@@ -1,0 +1,264 @@
+"""
+Общая логика Rating Radar: каскад BE->NL->reviews, работа с БД.
+Импортируется из radar_check.py (CLI/планировщик) и из app.py (кнопка в дашборде).
+"""
+
+import os
+import re
+import time
+import json
+
+import requests
+import psycopg2
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_KEY = os.environ.get("SCRAPINGDOG_API_KEY", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+SCRAPE_URL = "https://api.scrapingdog.com/scrape"
+RETRIES = 5
+TIMEOUT = 90
+
+MARKETS = [
+    ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
+    ("NL", "https://www.amazon.nl/dp/{asin}?language=en_GB"),
+]
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS asin_metrics (
+    id SERIAL PRIMARY KEY,
+    asin TEXT NOT NULL,
+    source TEXT,
+    rating NUMERIC(3,2),
+    review_count INTEGER,
+    histogram_json JSONB,
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS collection_runs (
+    id SERIAL PRIMARY KEY,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    asin_count INTEGER,
+    ok_count INTEGER,
+    status TEXT DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS tracked_asins (
+    asin TEXT PRIMARY KEY,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+def get_tracked_asins() -> list[str]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT asin FROM tracked_asins ORDER BY asin")
+            return [row[0] for row in cur.fetchall()]
+
+
+def add_tracked_asins(asins: list[str]):
+    """Добавляет новые ASIN в общий список (дубликаты игнорируются)."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for asin in asins:
+                cur.execute(
+                    "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
+                    (asin,),
+                )
+        conn.commit()
+
+
+def remove_tracked_asin(asin: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tracked_asins WHERE asin = %s", (asin,))
+        conn.commit()
+
+
+# ==================== БАЗА ДАННЫХ ====================
+
+def get_db_connection():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL не найден")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def ensure_schema():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
+        conn.commit()
+
+
+def save_to_db(data: dict):
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO asin_metrics (asin, source, rating, review_count, histogram_json, note)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    data.get("asin"),
+                    data.get("source"),
+                    data.get("rating"),
+                    data.get("count"),
+                    json.dumps(data.get("hist", {})),
+                    data.get("note", ""),
+                ),
+            )
+        conn.commit()
+
+
+def start_run(asin_count: int) -> int:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO collection_runs (asin_count, status) VALUES (%s, 'running') RETURNING id",
+                (asin_count,),
+            )
+            run_id = cur.fetchone()[0]
+        conn.commit()
+    return run_id
+
+
+def finish_run(run_id: int, ok_count: int, status: str = "done"):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE collection_runs SET finished_at = now(), ok_count = %s, status = %s WHERE id = %s",
+                (ok_count, status, run_id),
+            )
+        conn.commit()
+
+
+# ==================== ПАРСЕР ====================
+
+def fetch(url: str) -> str | None:
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(
+                SCRAPE_URL,
+                params={"api_key": API_KEY, "url": url, "dynamic": "false"},
+                timeout=TIMEOUT,
+            )
+            if r.status_code == 200 and len(r.text) > 5000:
+                return r.text
+        except requests.RequestException:
+            pass
+        time.sleep(2 * attempt)
+    return None
+
+
+def sanity_check(html: str) -> bool:
+    low = html.lower()
+    if "robot check" in low or "captcha" in low or "api-services-support@amazon" in low:
+        return False
+    return True
+
+
+def market_matches(html: str, market: str) -> bool:
+    expected = {"BE": "amazon.com.be", "NL": "amazon.nl"}[market]
+    return expected in html.lower()
+
+
+def in_variation(soup: BeautifulSoup) -> bool:
+    """
+    Узкая проверка: реальный блок вариаций (twister_feature_div) с больше
+    чем одним вариантом выбора. Голое слово 'twister' в html ложно
+    срабатывает на других виджетах карточки (карусели, рекомендации).
+    """
+    twister = soup.select_one("#twister_feature_div, #twisterContainer")
+    if not twister:
+        return False
+    # считаем реальные пункты выбора варианта (цвет/размер)
+    swatches = twister.select("li[data-defaultasin], li[data-asin], .swatchElement, .selectableOption")
+    return len(swatches) > 1
+
+
+def parse_rating(soup: BeautifulSoup, html: str) -> dict:
+    out = {"rating": None, "count": None, "hist": {}}
+
+    m = re.search(r'([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5', html)
+    if m:
+        out["rating"] = float(m.group(1).replace(",", "."))
+    else:
+        pop = soup.select_one("#acrPopover")
+        if pop and pop.get("title"):
+            m2 = re.search(r"([0-9][.,][0-9])", pop["title"])
+            if m2:
+                out["rating"] = float(m2.group(1).replace(",", "."))
+
+    cnt = soup.select_one("#acrCustomerReviewText")
+    if cnt:
+        digits = re.sub(r"[^\d]", "", cnt.get_text())
+        if digits:
+            out["count"] = int(digits)
+
+    for row in soup.select("#histogramTable tr, li[id*='star'], a[href*='filterByStar']"):
+        text = row.get_text(" ", strip=True)
+        m3 = re.search(r"([1-5])\s*(?:star|ster|étoile|Stern).*?(\d{1,3})\s*%", text, re.I)
+        if m3:
+            out["hist"][int(m3.group(1))] = int(m3.group(2))
+
+    if not out["hist"]:
+        for m4 in re.finditer(r'([1-5])\s*st\w+[^%]{0,60}?(\d{1,3})\s*%', html, re.I):
+            star, pct = int(m4.group(1)), int(m4.group(2))
+            if star not in out["hist"]:
+                out["hist"][star] = pct
+
+    return out
+
+
+def parse_reviews_page(asin: str) -> dict:
+    url = f"https://www.amazon.com.be/product-reviews/{asin}?language=en_GB&reviewerType=all_reviews"
+    html = fetch(url)
+    if not html:
+        return {"rating": None, "count": None}
+    stars = [
+        float(m.group(1).replace(",", "."))
+        for m in re.finditer(r'([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5', html)
+    ]
+    stars = stars[1:] if len(stars) > 1 else []
+    if not stars:
+        return {"rating": None, "count": None}
+    return {"rating": round(sum(stars) / len(stars), 2), "count": len(stars)}
+
+
+def check_asin(asin: str, log=print) -> dict:
+    log(f"=== {asin} ===")
+    for market, tmpl in MARKETS:
+        url = tmpl.format(asin=asin)
+        html = fetch(url)
+        if not html:
+            log(f"  [{market}] не скачалось")
+            continue
+        if not market_matches(html, market):
+            log(f"  [{market}] SANITY FAIL: не тот маркетплейс в ответе")
+            continue
+        if not sanity_check(html):
+            log(f"  [{market}] похоже на капчу/блок, пропускаю")
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        if in_variation(soup):
+            log(f"  [{market}] в вариации, идём дальше по каскаду")
+            continue
+        data = parse_rating(soup, html)
+        if data["rating"] is None:
+            log(f"  [{market}] одиночный, но рейтинг не распарсился")
+            continue
+        log(f"  [{market}] OK: rating={data['rating']} count={data['count']}")
+        return {"asin": asin, "source": market, **data}
+
+    log("  [reviews-only] фолбэк по письменным ревью (BE)")
+    rv = parse_reviews_page(asin)
+    if rv["rating"] is not None:
+        return {"asin": asin, "source": "reviews-only", "rating": rv["rating"],
+                "count": rv["count"], "hist": {}, "note": "только письменные ревью, данные неполные"}
+    return {"asin": asin, "source": "none", "rating": None, "count": None, "hist": {}}
