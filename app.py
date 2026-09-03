@@ -57,7 +57,13 @@ clean_db_trash()
 st.title("Rating Radar")
 st.caption("Мониторинг качества листингов и прогнозирование рейтинга")
 
-KYIV = ZoneInfo("Europe/Kyiv")
+TIMEZONES = {
+    "Киев (EEST / EET)": "Europe/Kyiv",
+    "UTC": "UTC",
+    "Берлин / Париж (CET)": "Europe/Berlin",
+    "Лондон (BST / GMT)": "Europe/London",
+    "Нью-Йорк (EDT / EST)": "America/New_York",
+}
 
 
 def get_last_run():
@@ -76,7 +82,9 @@ def get_last_run():
 
 last_run = get_last_run()
 if last_run is not None:
-    started_kyiv = pd.to_datetime(last_run["started_at"]).tz_convert(KYIV)
+    started_kyiv = pd.to_datetime(last_run["started_at"]).tz_convert(
+        ZoneInfo("Europe/Kyiv")
+    )
     status_label = "завершён" if last_run["status"] == "done" else "в процессе"
     st.info(
         f"Последний сбор данных: {started_kyiv:%d.%m.%Y в %H:%M} (Киев) — статус: {status_label} · "
@@ -145,7 +153,9 @@ with col_b:
     st.caption("Разовая проверка конкретных позиций")
     with st.form("ad_hoc_form"):
         adhoc_input = st.text_area(
-            "ASIN или ссылки на Amazon", height=80, placeholder="Введите ссылки..."
+            "ASIN или ссылки на Amazon",
+            height=80,
+            placeholder="Введите ссылки...",
         )
         adhoc_submit = st.form_submit_button("Выполнить проверку")
     if adhoc_submit:
@@ -220,6 +230,30 @@ st.markdown("---")
 if df.empty:
     st.warning("В базе данных нет сохраненных метрик")
 else:
+    top_col1, top_col2, top_col3, top_col4 = st.columns([2, 2, 2, 1])
+
+    all_asins = df["asin"].dropna().tolist()
+    all_sources = df["source"].dropna().unique().tolist()
+
+    with top_col1:
+        sel_asins = st.multiselect(
+            "Фильтр ASIN", options=all_asins, default=all_asins
+        )
+    with top_col2:
+        sel_sources = st.multiselect(
+            "Фильтр Источника", options=all_sources, default=all_sources
+        )
+    with top_col3:
+        selected_tz_label = st.selectbox(
+            "Часовой пояс сбора",
+            options=list(TIMEZONES.keys()),
+            index=0,
+        )
+        selected_tz = TIMEZONES[selected_tz_label]
+    with top_col4:
+        view_mode = st.radio(
+            "Формат", options=["Таблица", "Карточки"], horizontal=True
+        )
 
     def process_row(row):
         try:
@@ -228,7 +262,11 @@ else:
             rating = None
 
         try:
-            cnt = int(row["review_count"]) if pd.notnull(row["review_count"]) else None
+            cnt = (
+                int(row["review_count"])
+                if pd.notnull(row["review_count"])
+                else None
+            )
         except Exception:
             cnt = None
 
@@ -288,8 +326,16 @@ else:
             else "—"
         )
 
+        if pd.notnull(row["created_at"]):
+            dt_tz = pd.to_datetime(row["created_at"]).tz_convert(
+                ZoneInfo(selected_tz)
+            )
+            created_fmt = dt_tz.strftime("%d.%m.%Y %H:%M")
+        else:
+            created_fmt = "—"
+
         return pd.Series([
-            False,  # Колонка выбора (галочка)
+            False,
             asin,
             status_text,
             url,
@@ -302,11 +348,7 @@ else:
             margin_str,
             bsr_val,
             row["note"] if pd.notnull(row["note"]) else "",
-            (
-                row["created_at"].strftime("%d.%m.%Y %H:%M")
-                if pd.notnull(row["created_at"])
-                else "—"
-            ),
+            created_fmt,
         ])
 
     calc_df = df.apply(process_row, axis=1)
@@ -327,38 +369,19 @@ else:
         "Обновлено",
     ]
 
-    st.markdown("### Сводный отчет")
-
-    top_col1, top_col2, top_col3 = st.columns([2, 2, 1])
-
-    all_asins = df["asin"].dropna().tolist()
-    all_sources = df["source"].dropna().unique().tolist()
-
-    with top_col1:
-        sel_asins = st.multiselect(
-            "Фильтр ASIN", options=all_asins, default=all_asins
-        )
-    with top_col2:
-        sel_sources = st.multiselect(
-            "Фильтр Источника", options=all_sources, default=all_sources
-        )
-    with top_col3:
-        view_mode = st.radio(
-            "Формат", options=["Таблица", "Карточки"], horizontal=True
-        )
-
     filtered_df = calc_df[
         calc_df["raw_asin"].isin(sel_asins)
         & calc_df["Источник"].isin(sel_sources)
     ]
 
+    # --- ЗАГОЛОВОК С ПОДСЧЕТОМ КОЛИЧЕСТВА ---
+    st.markdown(f"### Сводный отчет &nbsp; <span style='font-size: 16px; color: #6e6e73; font-weight: normal;'>(Показано: **{len(filtered_df)}** из {len(calc_df)} позиций)</span>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- ТАБЛИЧНЫЙ ВИД С ГАЛОЧКАМИ (Interactive Data Editor) ---
+    # --- ТАБЛИЧНЫЙ ВИД С ГАЛОЧКАМИ ---
     if view_mode == "Таблица":
         display_tbl = filtered_df.drop(columns=["raw_asin"])
 
-        # Интерактивный редактор таблицы
         edited_df = st.data_editor(
             display_tbl,
             column_config={
@@ -382,42 +405,70 @@ else:
                     "Фото",
                     width="small",
                 ),
-                "Источник": st.column_config.TextColumn("Источник", width="small", disabled=True),
+                "Источник": st.column_config.TextColumn(
+                    "Источник", width="small", disabled=True
+                ),
                 "Рейтинг": st.column_config.NumberColumn(
                     "Рейтинг",
                     format="%.2f",
                     width="small",
                     disabled=True,
                 ),
-                "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
-                "1–2★ %": st.column_config.TextColumn("1–2★ %", width="small", disabled=True),
-                "Тренд": st.column_config.TextColumn("Тренд", width="small", disabled=True),
-                "Запас (до 4.0)": st.column_config.TextColumn("Запас", width="medium", disabled=True),
-                "BSR": st.column_config.TextColumn("BSR", width="medium", disabled=True),
-                "Комментарий": st.column_config.TextColumn("Комментарий", width="large", disabled=True),
-                "Обновлено": st.column_config.TextColumn("Обновлено", width="medium", disabled=True),
+                "Отзывы": st.column_config.NumberColumn(
+                    "Отзывы", width="small", disabled=True
+                ),
+                "1–2★ %": st.column_config.TextColumn(
+                    "1–2★ %", width="small", disabled=True
+                ),
+                "Тренд": st.column_config.TextColumn(
+                    "Тренд", width="small", disabled=True
+                ),
+                "Запас (до 4.0)": st.column_config.TextColumn(
+                    "Запас", width="medium", disabled=True
+                ),
+                "BSR": st.column_config.TextColumn(
+                    "BSR", width="medium", disabled=True
+                ),
+                "Комментарий": st.column_config.TextColumn(
+                    "Комментарий", width="large", disabled=True
+                ),
+                "Обновлено": st.column_config.TextColumn(
+                    f"Обновлено ({selected_tz_label.split(' ')[0]})",
+                    width="medium",
+                    disabled=True,
+                ),
             },
             use_container_width=True,
             hide_index=True,
             key="table_editor",
         )
 
-        # Выбираем отмеченные строки
+        st.caption(f"Всего отображается в таблице: {len(filtered_df)} строк")
+
         selected_rows = edited_df[edited_df["Выбор"] == True]
         selected_asins = [
-            extract_asin(url) for url in selected_rows["ASIN"].tolist() if extract_asin(url)
+            extract_asin(url)
+            for url in selected_rows["ASIN"].tolist()
+            if extract_asin(url)
         ]
 
-        # Панель действий над отмеченными позициями
         st.markdown("<br>", unsafe_allow_html=True)
         act_col1, act_col2, act_col3 = st.columns([3, 1, 1])
 
         if selected_asins:
-            act_col1.markdown(f"**Выбрано позиций: {len(selected_asins)}** (`{', '.join(selected_asins)}`)")
+            act_col1.markdown(
+                f"**Выбрано позиций: {len(selected_asins)}** (`{', '.join(selected_asins)}`)"
+            )
         else:
-            act_col1.caption("Отметьте галочками нужные строки в первой колонке для массовых действий")
+            act_col1.caption(
+                "Отметьте галочками нужные строки в первой колонке для массовых действий"
+            )
 
-        if act_col2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins):
+        if act_col2.button(
+            "↻ Обновить выбранные",
+            use_container_width=True,
+            disabled=not selected_asins,
+        ):
             ensure_schema()
             run_id = start_run(len(selected_asins))
             ok = 0
@@ -430,7 +481,11 @@ else:
             st.success(f"Обновлено позиций: {len(selected_asins)}")
             st.rerun()
 
-        if act_col3.button("✕ Удалить выбранные", use_container_width=True, disabled=not selected_asins):
+        if act_col3.button(
+            "✕ Удалить выбранные",
+            use_container_width=True,
+            disabled=not selected_asins,
+        ):
             for asin in selected_asins:
                 delete_asin_completely(asin)
             st.success(f"Удалено позиций: {len(selected_asins)}")
@@ -444,30 +499,9 @@ else:
             col = grid_cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    head_col1, head_col2, head_col3 = st.columns([3, 1, 1])
-                    head_col1.markdown(
+                    st.markdown(
                         f"**[{item['raw_asin']}]({item['ASIN']})** &nbsp; • &nbsp; `{item['Статус']}`"
                     )
-
-                    if head_col2.button(
-                        "↻", key=f"card_run_{item['raw_asin']}", help="Обновить"
-                    ):
-                        ensure_schema()
-                        run_id = start_run(1)
-                        res = check_asin(item["raw_asin"])
-                        save_to_db(res)
-                        finish_run(
-                            run_id,
-                            1 if res.get("source") in ("BE", "NL") else 0,
-                            "done",
-                        )
-                        st.rerun()
-
-                    if head_col3.button(
-                        "✕", key=f"card_del_{item['raw_asin']}", help="Удалить"
-                    ):
-                        delete_asin_completely(item["raw_asin"])
-                        st.rerun()
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     img_c, info_c = st.columns([1, 2])
@@ -481,8 +515,16 @@ else:
                         img_c.caption("Нет фото")
 
                     info_c.markdown(f"**Источник:** `{item['Источник']}`")
-                    r_val = f"{item['Рейтинг']:.2f}" if pd.notnull(item['Рейтинг']) else "—"
-                    cnt_fmt = str(item["Отзывы"]) if pd.notnull(item["Отзывы"]) else "—"
+                    r_val = (
+                        f"{item['Рейтинг']:.2f}"
+                        if pd.notnull(item["Рейтинг"])
+                        else "—"
+                    )
+                    cnt_fmt = (
+                        str(item["Отзывы"])
+                        if pd.notnull(item["Отзывы"])
+                        else "—"
+                    )
                     info_c.markdown(f"**Рейтинг:** {r_val} ({cnt_fmt} отз.)")
                     info_c.markdown(
                         f"**Негативные (1–2★):** {item['1–2★ %']} ({item['Тренд']})"
