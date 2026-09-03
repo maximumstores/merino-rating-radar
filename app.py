@@ -315,7 +315,10 @@ else:
 
                     img_c, info_c = st.columns([1, 2])
                     if item["Фото"]:
-                        img_c.image(item["Фото"], use_column_width=True)
+                        try:
+                            img_c.image(item["Фото"])
+                        except Exception:
+                            img_c.caption("Ошибка фото")
                     else:
                         img_c.caption("Нет фото")
 
