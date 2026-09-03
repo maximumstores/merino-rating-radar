@@ -218,11 +218,15 @@ else:
         asin = row["asin"]
         url = f"https://www.amazon.com.be/dp/{asin}?language=en_GB"
 
+        img_url = row["image_url"]
+        if pd.isna(img_url) or not isinstance(img_url, str) or not img_url.startswith("http"):
+            img_url = None
+
         return pd.Series([
             asin,
             flag,
             url,
-            row["image_url"],
+            img_url,
             source,
             rating,
             cnt,
@@ -268,12 +272,12 @@ else:
         calc_df["Маркетплейс (источник)"].isin(sel_sources)
     ]
 
-    # --- УДАЛЕНИЕ ИЗ БАЗЫ ОТДЕЛЬНЫМ БЛОКОМ ---
+    # --- УДАЛЕНИЕ ИЗ БАЗЫ ---
     with st.expander("🗑️ Удалить ASIN из базы"):
         del_asin_sel = st.selectbox("Выберите ASIN для полного удаления", options=[""] + filtered_df["raw_asin"].tolist())
         if st.button("Удалить выбранный ASIN") and del_asin_sel:
             delete_asin_completely(del_asin_sel)
-            st.success(f"ASIN {del_asin_sel} успешно удален из базы!")
+            st.success(f"ASIN {del_asin_sel} успешно удален!")
             st.rerun()
 
     st.markdown("---")
@@ -297,29 +301,28 @@ else:
 
     # --- ОТОБРАЖЕНИЕ: КАРТОЧКИ ---
     else:
+        records = filtered_df.to_dict(orient="records")
         grid_cols = st.columns(3)
-        for idx, row in enumerate(filtered_df.itertuples()):
+        for idx, item in enumerate(records):
             col = grid_cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    # Шляпка карточки
                     head_col1, head_col2 = st.columns([3, 1])
-                    head_col1.markdown(f"### {row.Флаг} [{row.raw_asin}]({row.ASIN})")
-                    if head_col2.button("🗑️", key=f"del_{row.raw_asin}"):
-                        delete_asin_completely(row.raw_asin)
+                    head_col1.markdown(f"### {item['Флаг']} [{item['raw_asin']}]({item['ASIN']})")
+                    if head_col2.button("🗑️", key=f"del_card_{item['raw_asin']}"):
+                        delete_asin_completely(item['raw_asin'])
                         st.rerun()
 
-                    # Фото и метрики
                     img_c, info_c = st.columns([1, 2])
-                    if row.Фото:
-                        img_c.image(row.Фото, use_container_width=True)
+                    if item["Фото"]:
+                        img_c.image(item["Фото"], use_column_width=True)
                     else:
                         img_c.caption("Нет фото")
 
-                    info_c.markdown(f"**Источник:** `{row.getattr('Маркетплейс_(источник)')}`")
-                    rating_val = f"{row.Рейтинг:.2f}" if isinstance(row.Рейтинг, float) else "—"
-                    info_c.markdown(f"**Рейтинг:** ⭐ **{rating_val}** ({row.getattr('Кол-во_рейтингов')} отзыва)")
-                    info_c.markdown(f"**1–2★ плохих:** {row.getattr('_8')}") # 1-2★ %
-                    info_c.markdown(f"**Запас до 4.0:** 🛡️ {row.getattr('_9')}")
+                    info_c.markdown(f"**Источник:** `{item['Маркетплейс (источник)']}`")
+                    rating_val = f"{item['Рейтинг']:.2f}" if isinstance(item['Рейтинг'], float) else "—"
+                    info_c.markdown(f"**Рейтинг:** ⭐ **{rating_val}** ({item['Кол-во рейтингов']} отз.)")
+                    info_c.markdown(f"**1–2★ плохих:** {item['1–2★ %']}")
+                    info_c.markdown(f"**Запас до 4.0:** 🛡️ {item['Запас до 4.0']}")
 
-                    st.caption(f"Обновлено: {row.getattr('Дата_сбора')}") 
+                    st.caption(f"Обновлено: {item['Дата сбора']}")
