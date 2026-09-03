@@ -152,7 +152,8 @@ with st.expander("Управление списком ASIN (Редактиров
         market_filter = st.selectbox(
             "Фильтр списка по стране", 
             options=["Все страны", "BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"], 
-            index=0
+            index=0,
+            key="market_filter_select"
         )
 
     if market_filter != "Все страны":
@@ -174,7 +175,7 @@ with st.expander("Управление списком ASIN (Редактиров
         "Список для редактирования:",
         value=current_tracked_text,
         height=120,
-        key="edit_tracked_list",
+        key=f"edit_tracked_list_{market_filter}",
         label_visibility="collapsed"
     )
     
@@ -851,4 +852,4 @@ else:
                 margin=dict(l=20, r=20, t=40, b=20),
             )
 
-            st.plotly_chart(fig_single, use_container_width=True) 
+            st.plotly_chart(fig_single, use_container_width=True)
