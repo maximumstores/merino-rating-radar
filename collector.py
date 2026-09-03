@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Общая логика Rating Radar: каскад BE->NL->reviews, работа с БД.
-Импортируется из radar_scheduled.py (CLI/планировщик) и из app.py (кнопка в дашборде).
 """
 
 import json
@@ -55,7 +54,11 @@ CREATE TABLE IF NOT EXISTS tracked_asins (
 """
 
 
-# ==================== БАЗА ДАННЫХ ====================
+def extract_asin(text: str) -> str:
+    """Извлекает чистый ASIN из текста или ссылки Amazon."""
+    text = text.strip().upper()
+    match = re.search(r"(B[0-9A-Z]{9})", text)
+    return match.group(1) if match else text
 
 
 def get_db_connection():
@@ -65,7 +68,6 @@ def get_db_connection():
 
 
 def ensure_schema():
-    """Создаёт таблицы базы данных при их отсутствии."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
@@ -73,8 +75,7 @@ def ensure_schema():
 
 
 def get_tracked_asins() -> list[str]:
-    """Возвращает список отслеживаемых ASIN из БД."""
-    ensure_schema()  # Гарантирует создание таблицы перед выполнением запроса
+    ensure_schema()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT asin FROM tracked_asins ORDER BY asin")
@@ -82,12 +83,11 @@ def get_tracked_asins() -> list[str]:
 
 
 def add_tracked_asins(asins: list[str]):
-    """Добавляет новые ASIN в общий список (дубликаты игнорируются)."""
     ensure_schema()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            for asin in asins:
-                clean_asin = asin.strip().upper()
+            for raw in asins:
+                clean_asin = extract_asin(raw)
                 if clean_asin:
                     cur.execute(
                         "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
@@ -97,12 +97,11 @@ def add_tracked_asins(asins: list[str]):
 
 
 def remove_tracked_asin(asin: str):
-    """Удаляет ASIN из отслеживаемого списка."""
+    clean_asin = extract_asin(asin)
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM tracked_asins WHERE asin = %s",
-                (asin.strip().upper(),),
+                "DELETE FROM tracked_asins WHERE asin = %s", (clean_asin,)
             )
         conn.commit()
 
@@ -149,9 +148,6 @@ def finish_run(run_id: int, ok_count: int, status: str = "done"):
         conn.commit()
 
 
-# ==================== ПАРСЕР ====================
-
-
 def fetch(url: str) -> str | None:
     for attempt in range(1, RETRIES + 1):
         try:
@@ -185,15 +181,9 @@ def market_matches(html: str, market: str) -> bool:
 
 
 def in_variation(soup: BeautifulSoup) -> bool:
-    """Узкая проверка: реальный блок вариаций (twister_feature_div) с больше
-
-    чем одним вариантом выбора. Голое слово 'twister' в html ложно
-    срабатывает на других виджетах карточки (карусели, рекомендации).
-    """
     twister = soup.select_one("#twister_feature_div, #twisterContainer")
     if not twister:
         return False
-    # считаем реальные пункты выбора варианта (цвет/размер)
     swatches = twister.select(
         "li[data-defaultasin], li[data-asin], .swatchElement, .selectableOption"
     )
@@ -259,7 +249,8 @@ def parse_reviews_page(asin: str) -> dict:
     return {"rating": round(sum(stars) / len(stars), 2), "count": len(stars)}
 
 
-def check_asin(asin: str, log=print) -> dict:
+def check_asin(raw_asin: str, log=print) -> dict:
+    asin = extract_asin(raw_asin)
     log(f"=== {asin} ===")
     for market, tmpl in MARKETS:
         url = tmpl.format(asin=asin)
@@ -302,4 +293,4 @@ def check_asin(asin: str, log=print) -> dict:
         "rating": None,
         "count": None,
         "hist": {},
-    }
+    } 
