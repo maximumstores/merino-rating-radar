@@ -1,17 +1,18 @@
+#!/usr/bin/env python3
 """
 Общая логика Rating Radar: каскад BE->NL->reviews, работа с БД.
-Импортируется из radar_check.py (CLI/планировщик) и из app.py (кнопка в дашборде).
+Импортируется из radar_scheduled.py (CLI/планировщик) и из app.py (кнопка в дашборде).
 """
 
+import json
 import os
 import re
 import time
-import json
 
-import requests
-import psycopg2
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+import psycopg2
+import requests
 
 load_dotenv()
 
@@ -54,7 +55,26 @@ CREATE TABLE IF NOT EXISTS tracked_asins (
 """
 
 
+# ==================== БАЗА ДАННЫХ ====================
+
+
+def get_db_connection():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL не найден в файле .env")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def ensure_schema():
+    """Создаёт таблицы базы данных при их отсутствии."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
+        conn.commit()
+
+
 def get_tracked_asins() -> list[str]:
+    """Возвращает список отслеживаемых ASIN из БД."""
+    ensure_schema()  # Гарантирует создание таблицы перед выполнением запроса
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT asin FROM tracked_asins ORDER BY asin")
@@ -63,35 +83,27 @@ def get_tracked_asins() -> list[str]:
 
 def add_tracked_asins(asins: list[str]):
     """Добавляет новые ASIN в общий список (дубликаты игнорируются)."""
+    ensure_schema()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             for asin in asins:
-                cur.execute(
-                    "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
-                    (asin,),
-                )
+                clean_asin = asin.strip().upper()
+                if clean_asin:
+                    cur.execute(
+                        "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
+                        (clean_asin,),
+                    )
         conn.commit()
 
 
 def remove_tracked_asin(asin: str):
+    """Удаляет ASIN из отслеживаемого списка."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM tracked_asins WHERE asin = %s", (asin,))
-        conn.commit()
-
-
-# ==================== БАЗА ДАННЫХ ====================
-
-def get_db_connection():
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL не найден")
-    return psycopg2.connect(DATABASE_URL)
-
-
-def ensure_schema():
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(SCHEMA_SQL)
+            cur.execute(
+                "DELETE FROM tracked_asins WHERE asin = %s",
+                (asin.strip().upper(),),
+            )
         conn.commit()
 
 
@@ -139,6 +151,7 @@ def finish_run(run_id: int, ok_count: int, status: str = "done"):
 
 # ==================== ПАРСЕР ====================
 
+
 def fetch(url: str) -> str | None:
     for attempt in range(1, RETRIES + 1):
         try:
@@ -157,7 +170,11 @@ def fetch(url: str) -> str | None:
 
 def sanity_check(html: str) -> bool:
     low = html.lower()
-    if "robot check" in low or "captcha" in low or "api-services-support@amazon" in low:
+    if (
+        "robot check" in low
+        or "captcha" in low
+        or "api-services-support@amazon" in low
+    ):
         return False
     return True
 
@@ -168,8 +185,8 @@ def market_matches(html: str, market: str) -> bool:
 
 
 def in_variation(soup: BeautifulSoup) -> bool:
-    """
-    Узкая проверка: реальный блок вариаций (twister_feature_div) с больше
+    """Узкая проверка: реальный блок вариаций (twister_feature_div) с больше
+
     чем одним вариантом выбора. Голое слово 'twister' в html ложно
     срабатывает на других виджетах карточки (карусели, рекомендации).
     """
@@ -177,14 +194,16 @@ def in_variation(soup: BeautifulSoup) -> bool:
     if not twister:
         return False
     # считаем реальные пункты выбора варианта (цвет/размер)
-    swatches = twister.select("li[data-defaultasin], li[data-asin], .swatchElement, .selectableOption")
+    swatches = twister.select(
+        "li[data-defaultasin], li[data-asin], .swatchElement, .selectableOption"
+    )
     return len(swatches) > 1
 
 
 def parse_rating(soup: BeautifulSoup, html: str) -> dict:
     out = {"rating": None, "count": None, "hist": {}}
 
-    m = re.search(r'([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5', html)
+    m = re.search(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5", html)
     if m:
         out["rating"] = float(m.group(1).replace(",", "."))
     else:
@@ -200,14 +219,22 @@ def parse_rating(soup: BeautifulSoup, html: str) -> dict:
         if digits:
             out["count"] = int(digits)
 
-    for row in soup.select("#histogramTable tr, li[id*='star'], a[href*='filterByStar']"):
+    for row in soup.select(
+        "#histogramTable tr, li[id*='star'], a[href*='filterByStar']"
+    ):
         text = row.get_text(" ", strip=True)
-        m3 = re.search(r"([1-5])\s*(?:star|ster|étoile|Stern).*?(\d{1,3})\s*%", text, re.I)
+        m3 = re.search(
+            r"([1-5])\s*(?:star|ster|étoile|Stern).*?(\d{1,3})\s*%",
+            text,
+            re.I,
+        )
         if m3:
             out["hist"][int(m3.group(1))] = int(m3.group(2))
 
     if not out["hist"]:
-        for m4 in re.finditer(r'([1-5])\s*st\w+[^%]{0,60}?(\d{1,3})\s*%', html, re.I):
+        for m4 in re.finditer(
+            r"([1-5])\s*st\w+[^%]{0,60}?(\d{1,3})\s*%", html, re.I
+        ):
             star, pct = int(m4.group(1)), int(m4.group(2))
             if star not in out["hist"]:
                 out["hist"][star] = pct
@@ -222,7 +249,9 @@ def parse_reviews_page(asin: str) -> dict:
         return {"rating": None, "count": None}
     stars = [
         float(m.group(1).replace(",", "."))
-        for m in re.finditer(r'([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5', html)
+        for m in re.finditer(
+            r"([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5", html
+        )
     ]
     stars = stars[1:] if len(stars) > 1 else []
     if not stars:
@@ -259,6 +288,18 @@ def check_asin(asin: str, log=print) -> dict:
     log("  [reviews-only] фолбэк по письменным ревью (BE)")
     rv = parse_reviews_page(asin)
     if rv["rating"] is not None:
-        return {"asin": asin, "source": "reviews-only", "rating": rv["rating"],
-                "count": rv["count"], "hist": {}, "note": "только письменные ревью, данные неполные"}
-    return {"asin": asin, "source": "none", "rating": None, "count": None, "hist": {}}
+        return {
+            "asin": asin,
+            "source": "reviews-only",
+            "rating": rv["rating"],
+            "count": rv["count"],
+            "hist": {},
+            "note": "только письменные ревью, данные неполные",
+        }
+    return {
+        "asin": asin,
+        "source": "none",
+        "rating": None,
+        "count": None,
+        "hist": {},
+    }
