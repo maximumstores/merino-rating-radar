@@ -12,6 +12,7 @@ from collector import (
     add_tracked_asins,
     check_asin,
     ensure_schema,
+    extract_asin,
     finish_run,
     get_tracked_asins,
     remove_tracked_asin,
@@ -26,8 +27,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 st.set_page_config(page_title="Rating Radar Dashboard", layout="wide", page_icon="📊")
 
 st.title("📊 Rating Radar Dashboard")
-
-# --- Блок управления сбором ASIN ---
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -65,16 +64,13 @@ st.caption(f"Сейчас в списке: {len(tracked)} ASIN")
 
 with st.expander("Добавить ASIN в общий список"):
     new_asins_input = st.text_area(
-        "По одного на строку или через запятую",
+        "По одному на строку, ссылкой или через запятую",
         height=100,
         key="add_tracked",
     )
     if st.button("Добавить в список"):
-        new_asins = [
-            a.strip().upper()
-            for a in re.split(r"[\s,]+", new_asins_input)
-            if a.strip()
-        ]
+        raw_list = [a.strip() for a in re.split(r"[\s,]+", new_asins_input) if a.strip()]
+        new_asins = [extract_asin(a) for a in raw_list if extract_asin(a)]
         if new_asins:
             ensure_schema()
             add_tracked_asins(new_asins)
@@ -115,14 +111,11 @@ with col_a:
 with col_b:
     st.markdown("**Точечная проверка** (не влияет на общий список)")
     with st.form("ad_hoc_form"):
-        adhoc_input = st.text_area("ASIN для разовой проверки", height=100)
+        adhoc_input = st.text_area("ASIN или ссылка для проверки", height=100)
         adhoc_submit = st.form_submit_button("Проверить эти ASIN")
     if adhoc_submit:
-        adhoc_asins = [
-            a.strip().upper()
-            for a in re.split(r"[\s,]+", adhoc_input)
-            if a.strip()
-        ]
+        raw_list = [a.strip() for a in re.split(r"[\s,]+", adhoc_input) if a.strip()]
+        adhoc_asins = [extract_asin(a) for a in raw_list if extract_asin(a)]
         if adhoc_asins:
             ensure_schema()
             run_id = start_run(len(adhoc_asins))
@@ -143,15 +136,9 @@ with col_b:
                         ok += 1
                 except Exception as e:
                     _log(f"❌ {asin}: ошибка {e}")
-                progress.progress(
-                    i / len(adhoc_asins), text=f"{i}/{len(adhoc_asins)}"
-                )
+                progress.progress(i / len(adhoc_asins), text=f"{i}/{len(adhoc_asins)}")
             finish_run(run_id, ok, "done")
-            st.success(
-                f"Готово: {ok}/{len(adhoc_asins)} чистых. Обнови страницу."
-            )
-
-# --- Основная логика работы с базой и отображением метрик ---
+            st.success(f"Готово: {ok}/{len(adhoc_asins)} чистых. Обнови страницу.")
 
 
 def get_data():
@@ -184,35 +171,23 @@ def get_data():
 df = get_data()
 
 if df.empty:
-    st.warning(
-        "В базе данных пока нет записей. Запустите скрипт сборщика `radar_check.py`!"
-    )
+    st.warning("В базе данных пока нет записей.")
 else:
     st.sidebar.header("Фильтры")
     all_asins = df["asin"].dropna().unique().tolist()
     all_sources = df["source"].dropna().unique().tolist()
 
-    selected_asins = st.sidebar.multiselect(
-        "Выберите ASIN", options=all_asins, default=all_asins
-    )
-    selected_sources = st.sidebar.multiselect(
-        "Источник данных", options=all_sources, default=all_sources
-    )
+    selected_asins = st.sidebar.multiselect("Выберите ASIN", options=all_asins, default=all_asins)
+    selected_sources = st.sidebar.multiselect("Источник данных", options=all_sources, default=all_sources)
 
-    filtered_df = df[
-        (df["asin"].isin(selected_asins))
-        & (df["source"].isin(selected_sources))
-    ]
+    filtered_df = df[(df["asin"].isin(selected_asins)) & (df["source"].isin(selected_sources))]
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Всего проверок", len(filtered_df))
     col2.metric("Уникальных ASIN", filtered_df["asin"].nunique())
 
     avg_rating = filtered_df["rating"].dropna().mean()
-    col3.metric(
-        "Средний рейтинг",
-        f"{avg_rating:.2f}" if not pd.isna(avg_rating) else "—",
-    )
+    col3.metric("Средний рейтинг", f"{avg_rating:.2f}" if not pd.isna(avg_rating) else "—")
 
     total_reviews = filtered_df["review_count"].dropna().sum()
     col4.metric("Сумма отзывов", f"{int(total_reviews):,}")
@@ -227,24 +202,15 @@ else:
     st.subheader("⭐ Распределение звёзд (Гистограмма)")
 
     if not filtered_df.empty:
-        selected_asin = st.selectbox(
-            "Выберите ASIN для детализации",
-            options=filtered_df["asin"].unique(),
-        )
+        selected_asin = st.selectbox("Выберите ASIN для детализации", options=filtered_df["asin"].unique())
         row = filtered_df[filtered_df["asin"] == selected_asin].iloc[0]
         hist_raw = row["histogram_json"]
 
         if hist_raw:
-            hist_dict = (
-                json.loads(hist_raw)
-                if isinstance(hist_raw, str)
-                else hist_raw
-            )
+            hist_dict = json.loads(hist_raw) if isinstance(hist_raw, str) else hist_raw
             if hist_dict:
                 hist_df = (
-                    pd.DataFrame(
-                        list(hist_dict.items()), columns=["Звёзды", "Процент"]
-                    )
+                    pd.DataFrame(list(hist_dict.items()), columns=["Звёзды", "Процент"])
                     .astype({"Звёзды": int, "Процент": int})
                     .sort_values("Звёзды", ascending=False)
                 )
