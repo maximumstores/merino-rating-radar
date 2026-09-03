@@ -69,6 +69,17 @@ TIMEZONES = {
     "Нью-Йорк (EDT / EST)": "America/New_York",
 }
 
+MARKET_DOMAINS = {
+    "US": "amazon.com",
+    "BE": "amazon.com.be",
+    "NL": "amazon.nl",
+    "DE": "amazon.de",
+    "UK": "amazon.co.uk",
+    "FR": "amazon.fr",
+    "IT": "amazon.it",
+    "ES": "amazon.es",
+}
+
 
 def get_last_run():
     try:
@@ -106,11 +117,11 @@ with st.expander("Управление списком ASIN (Редактиров
     current_tracked_text = ", ".join(tracked)
     
     edited_asins_input = st.text_area(
-        "Текущий список ASIN для планового сбора (редактируйте прямо здесь):",
+        "Текущий список ASIN или ссылок (редактируйте прямо здесь):",
         value=current_tracked_text,
         height=120,
         key="edit_tracked_list",
-        placeholder="B09NWGDK3S, B0DDV2DBZH...",
+        placeholder="https://www.amazon.com.be/dp/B0H6YBDKXJ, B09NWGDK3S...",
     )
     
     col_btn1, col_btn2 = st.columns([1, 1])
@@ -177,7 +188,7 @@ with col_a:
                 try:
                     res = check_asin(asin, log=_log)
                     save_to_db(res)
-                    if res.get("source") in ("BE", "NL"):
+                    if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                         ok += 1
                 except Exception as e:
                     _log(f"Ошибка {asin}: {e}")
@@ -188,44 +199,41 @@ with col_a:
 
 with col_b:
     st.markdown("**Точечная проверка**")
-    st.caption("Разовая проверка конкретных позиций")
+    st.caption("Разовая проверка конкретных ссылок / ASIN")
     with st.form("ad_hoc_form"):
         adhoc_input = st.text_area(
-            "ASIN или ссылки на Amazon",
+            "ASIN или прямые ссылки на Amazon (US, DE, BE и др.)",
             height=80,
-            placeholder="Введите ссылки...",
+            placeholder="https://www.amazon.com/dp/B0H6YBDKXJ...",
         )
         adhoc_submit = st.form_submit_button("Выполнить проверку")
     if adhoc_submit:
         raw_list = [
             a.strip() for a in re.split(r"[\s,]+", adhoc_input) if a.strip()
         ]
-        adhoc_asins = [extract_asin(a) for a in raw_list if extract_asin(a)]
-        if adhoc_asins:
+        if raw_list:
             ensure_schema()
-            run_id = start_run(len(adhoc_asins))
-            progress = st.progress(0.0, text=f"0/{len(adhoc_asins)}")
+            run_id = start_run(len(raw_list))
+            progress = st.progress(0.0, text=f"0/{len(raw_list)}")
             log_box = st.empty()
             log_lines = []
             ok = 0
-            for i, asin in enumerate(adhoc_asins, 1):
+            for i, item in enumerate(raw_list, 1):
 
                 def _log(msg, _lines=log_lines):
                     _lines.append(msg)
                     log_box.code("\n".join(_lines[-15:]))
 
                 try:
-                    res = check_asin(asin, log=_log)
+                    res = check_asin(item, log=_log)
                     save_to_db(res)
-                    if res.get("source") in ("BE", "NL"):
+                    if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                         ok += 1
                 except Exception as e:
-                    _log(f"Ошибка {asin}: {e}")
-                progress.progress(
-                    i / len(adhoc_asins), text=f"{i}/{len(adhoc_asins)}"
-                )
+                    _log(f"Ошибка {item}: {e}")
+                progress.progress(i / len(raw_list), text=f"{i}/{len(raw_list)}")
             finish_run(run_id, ok, "done")
-            st.success(f"Проверка завершена: {ok}/{len(adhoc_asins)} успешно.")
+            st.success(f"Проверка завершена: {ok}/{len(raw_list)} успешно.")
             st.rerun()
 
 
@@ -348,7 +356,8 @@ else:
             trend_symbol = "↑"
 
         asin = str(row["asin"])
-        url = f"https://www.amazon.com.be/dp/{asin}?language=en_GB"
+        domain = MARKET_DOMAINS.get(source, "amazon.com.be")
+        url = f"https://www.{domain}/dp/{asin}"
 
         img_url = row["image_url"]
         if (
@@ -438,7 +447,6 @@ else:
                 ),
                 "ASIN": st.column_config.LinkColumn(
                     "ASIN",
-                    display_text=r"https://www\.amazon\.com\.be/dp/(B[0-9A-Z]{9})\?language=en_GB",
                     width="medium",
                     disabled=True,
                 ),
@@ -505,7 +513,7 @@ else:
             for asin in selected_asins:
                 res = check_asin(asin)
                 save_to_db(res)
-                if res.get("source") in ("BE", "NL"):
+                if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                     ok += 1
             finish_run(run_id, ok, "done")
             st.success(f"Обновлено позиций: {len(selected_asins)}")
