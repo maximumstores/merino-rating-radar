@@ -113,10 +113,10 @@ else:
 # ==================== УПРАВЛЕНИЕ СПИСКОМ tracked_asins ====================
 tracked = get_tracked_asins()
 
-# Вспомогательный запрос для получения последней известной страны каждого ASIN из БД
-def get_asin_markets_map():
+
+def get_asin_markets_map(all_tracked_asins):
     if not DATABASE_URL:
-        return {}
+        return {a: "BE" for a in all_tracked_asins}
     try:
         conn = psycopg2.connect(DATABASE_URL)
         df_src = pd.read_sql(
@@ -124,15 +124,20 @@ def get_asin_markets_map():
             conn
         )
         conn.close()
-        return dict(zip(df_src["asin"], df_src["source"]))
+        db_map = dict(zip(df_src["asin"], df_src["source"]))
+        
+        final_map = {}
+        for a in all_tracked_asins:
+            val = db_map.get(a)
+            final_map[a] = val if val in MARKET_DOMAINS else "BE"
+        return final_map
     except Exception:
-        return {}
+        return {a: "BE" for a in all_tracked_asins}
 
-asin_market_map = get_asin_markets_map()
+
+asin_market_map = get_asin_markets_map(tracked)
 
 with st.expander("Управление списком ASIN (Редактирование текущего списка)"):
-    st.caption(f"Сейчас в базе отслеживается позиций: {len(tracked)}")
-    
     col_help, col_filter_market = st.columns([3, 1])
     with col_help:
         st.markdown(
@@ -150,23 +155,27 @@ with st.expander("Управление списком ASIN (Редактиров
             index=0
         )
 
-    # Формируем список с учетом фильтра страны
     if market_filter != "Все страны":
         display_tracked = [
             a for a in tracked 
-            if asin_market_map.get(a) == market_filter or a.endswith(f":{market_filter}")
+            if asin_market_map.get(a, "BE") == market_filter or a.endswith(f":{market_filter}")
         ]
     else:
         display_tracked = tracked
 
     current_tracked_text = ", ".join(display_tracked)
     
+    st.markdown(
+        f"**Текущие ASIN (`{market_filter}`)** &nbsp;—&nbsp; "
+        f"выбрано: **{len(display_tracked)}** из {len(tracked)} позиций"
+    )
+    
     edited_asins_input = st.text_area(
-        f"Текущие ASIN ({market_filter}):",
+        "Список для редактирования:",
         value=current_tracked_text,
         height=120,
         key="edit_tracked_list",
-        placeholder="B09NWGDK3S, B0H6YBDKXJ:US...",
+        label_visibility="collapsed"
     )
     
     col_btn1, col_btn2 = st.columns([1, 1])
@@ -190,7 +199,6 @@ with st.expander("Управление списком ASIN (Редактиров
                                 (asin_code,),
                             )
                 else:
-                    # При фильтрации обновляем только позиции выбранной страны
                     for asin_code in clean_new_list:
                         if len(asin_code) == 10:
                             cur.execute(
@@ -199,7 +207,7 @@ with st.expander("Управление списком ASIN (Редактиров
                             )
             conn.commit()
             conn.close()
-            st.success(f"Список обновлён!")
+            st.success("Список успешно сохранен!")
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка сохранения списка: {e}")
@@ -219,6 +227,7 @@ with st.expander("Управление списком ASIN (Редактиров
 # ==================== БЛОК СБОРА ДАННЫХ ====================
 st.markdown("### Сбор данных")
 col_a, col_b = st.columns(2)
+
 
 def run_full_collection():
     ensure_schema()
@@ -245,6 +254,7 @@ def run_full_collection():
     st.session_state["last_auto_run"] = time.time()
     st.success(f"Прогон завершен: {ok}/{len(tracked)} успешно.")
     st.rerun()
+
 
 with col_a:
     st.markdown("**Ручной прогон**")
@@ -294,6 +304,7 @@ with col_b:
             st.success(f"Проверка завершена: {ok}/{len(raw_list)} успешно.")
             st.rerun()
 
+
 def get_full_history():
     if not DATABASE_URL:
         return pd.DataFrame()
@@ -319,6 +330,7 @@ def get_full_history():
         return df
     except Exception:
         return pd.DataFrame()
+
 
 full_df = get_full_history()
 
