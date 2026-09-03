@@ -30,7 +30,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Минималистичная стилизация под SaaS / Google Sheets
 st.markdown(
     """
 <style>
@@ -43,19 +42,6 @@ st.markdown(
         letter-spacing: -0.02em !important;
         color: #1d1d1f !important;
     }
-    .badge {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: 600;
-        text-align: center;
-    }
-    .badge-success { background-color: #e6f4ea; color: #137333; }
-    .badge-warning { background-color: #fef7e0; color: #b06000; }
-    .badge-danger { background-color: #fce8e6; color: #c5221f; }
-    .badge-neutral { background-color: #f1f3f4; color: #5f6368; }
-
     div[data-testid="stForm"] {
         border: 1px solid #e5e5ea !important;
         border-radius: 8px !important;
@@ -303,6 +289,7 @@ else:
         )
 
         return pd.Series([
+            False,  # Колонка выбора (галочка)
             asin,
             status_text,
             url,
@@ -324,6 +311,7 @@ else:
 
     calc_df = df.apply(process_row, axis=1)
     calc_df.columns = [
+        "Выбор",
         "raw_asin",
         "Статус",
         "ASIN",
@@ -364,64 +352,89 @@ else:
         & calc_df["Источник"].isin(sel_sources)
     ]
 
-    # Быстрые действия над выбранным ASIN
-    with st.expander("Действия над позицией (Обновить / Удалить)"):
-        act_col1, act_col2, act_col3 = st.columns([2, 1, 1])
-        target_asin = act_col1.selectbox("Выберите ASIN", options=[""] + filtered_df["raw_asin"].tolist())
-        
-        if act_col2.button("↻ Обновить", use_container_width=True) and target_asin:
-            ensure_schema()
-            run_id = start_run(1)
-            res = check_asin(target_asin)
-            save_to_db(res)
-            finish_run(run_id, 1 if res.get("source") in ("BE", "NL") else 0, "done")
-            st.success(f"Обновлено: {target_asin}")
-            st.rerun()
-
-        if act_col3.button("✕ Удалить", use_container_width=True) and target_asin:
-            delete_asin_completely(target_asin)
-            st.success(f"Удалено: {target_asin}")
-            st.rerun()
-
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- ТАБЛИЧНЫЙ ВИД (Google Sheets Style) ---
+    # --- ТАБЛИЧНЫЙ ВИД С ГАЛОЧКАМИ (Interactive Data Editor) ---
     if view_mode == "Таблица":
         display_tbl = filtered_df.drop(columns=["raw_asin"])
-        
-        st.dataframe(
+
+        # Интерактивный редактор таблицы
+        edited_df = st.data_editor(
             display_tbl,
             column_config={
+                "Выбор": st.column_config.CheckboxColumn(
+                    "Выбор",
+                    default=False,
+                    width="small",
+                ),
                 "Статус": st.column_config.TextColumn(
                     "Статус",
                     width="small",
+                    disabled=True,
                 ),
                 "ASIN": st.column_config.LinkColumn(
                     "ASIN",
                     display_text=r"https://www\.amazon\.com\.be/dp/(B[0-9A-Z]{9})\?language=en_GB",
                     width="medium",
+                    disabled=True,
                 ),
                 "Фото": st.column_config.ImageColumn(
                     "Фото",
                     width="small",
                 ),
-                "Источник": st.column_config.TextColumn("Источник", width="small"),
+                "Источник": st.column_config.TextColumn("Источник", width="small", disabled=True),
                 "Рейтинг": st.column_config.NumberColumn(
                     "Рейтинг",
                     format="%.2f",
                     width="small",
+                    disabled=True,
                 ),
-                "Отзывы": st.column_config.NumberColumn("Отзывы", width="small"),
-                "1–2★ %": st.column_config.TextColumn("1–2★ %", width="small"),
-                "Тренд": st.column_config.TextColumn("Тренд", width="small"),
-                "Запас (до 4.0)": st.column_config.TextColumn("Запас", width="medium"),
-                "BSR": st.column_config.TextColumn("BSR", width="medium"),
-                "Комментарий": st.column_config.TextColumn("Комментарий", width="large"),
-                "Обновлено": st.column_config.TextColumn("Обновлено", width="medium"),
+                "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
+                "1–2★ %": st.column_config.TextColumn("1–2★ %", width="small", disabled=True),
+                "Тренд": st.column_config.TextColumn("Тренд", width="small", disabled=True),
+                "Запас (до 4.0)": st.column_config.TextColumn("Запас", width="medium", disabled=True),
+                "BSR": st.column_config.TextColumn("BSR", width="medium", disabled=True),
+                "Комментарий": st.column_config.TextColumn("Комментарий", width="large", disabled=True),
+                "Обновлено": st.column_config.TextColumn("Обновлено", width="medium", disabled=True),
             },
             use_container_width=True,
             hide_index=True,
+            key="table_editor",
         )
+
+        # Выбираем отмеченные строки
+        selected_rows = edited_df[edited_df["Выбор"] == True]
+        selected_asins = [
+            extract_asin(url) for url in selected_rows["ASIN"].tolist() if extract_asin(url)
+        ]
+
+        # Панель действий над отмеченными позициями
+        st.markdown("<br>", unsafe_allow_html=True)
+        act_col1, act_col2, act_col3 = st.columns([3, 1, 1])
+
+        if selected_asins:
+            act_col1.markdown(f"**Выбрано позиций: {len(selected_asins)}** (`{', '.join(selected_asins)}`)")
+        else:
+            act_col1.caption("Отметьте галочками нужные строки в первой колонке для массовых действий")
+
+        if act_col2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins):
+            ensure_schema()
+            run_id = start_run(len(selected_asins))
+            ok = 0
+            for asin in selected_asins:
+                res = check_asin(asin)
+                save_to_db(res)
+                if res.get("source") in ("BE", "NL"):
+                    ok += 1
+            finish_run(run_id, ok, "done")
+            st.success(f"Обновлено позиций: {len(selected_asins)}")
+            st.rerun()
+
+        if act_col3.button("✕ Удалить выбранные", use_container_width=True, disabled=not selected_asins):
+            for asin in selected_asins:
+                delete_asin_completely(asin)
+            st.success(f"Удалено позиций: {len(selected_asins)}")
+            st.rerun()
 
     # --- ВИД КАРТОЧЕК ---
     else:
@@ -431,9 +444,30 @@ else:
             col = grid_cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    st.markdown(
+                    head_col1, head_col2, head_col3 = st.columns([3, 1, 1])
+                    head_col1.markdown(
                         f"**[{item['raw_asin']}]({item['ASIN']})** &nbsp; • &nbsp; `{item['Статус']}`"
                     )
+
+                    if head_col2.button(
+                        "↻", key=f"card_run_{item['raw_asin']}", help="Обновить"
+                    ):
+                        ensure_schema()
+                        run_id = start_run(1)
+                        res = check_asin(item["raw_asin"])
+                        save_to_db(res)
+                        finish_run(
+                            run_id,
+                            1 if res.get("source") in ("BE", "NL") else 0,
+                            "done",
+                        )
+                        st.rerun()
+
+                    if head_col3.button(
+                        "✕", key=f"card_del_{item['raw_asin']}", help="Удалить"
+                    ):
+                        delete_asin_completely(item["raw_asin"])
+                        st.rerun()
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     img_c, info_c = st.columns([1, 2])
