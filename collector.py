@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Rating Radar: каскад BE->NL->reviews, работа с БД + BSR."""
+"""Rating Radar: каскад BE->NL->reviews + авто-определение страны из ссылок (US, DE, UK, BE, NL и др.)."""
 
 import json
 import os
 import re
 import time
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -19,7 +20,19 @@ SCRAPE_URL = "https://api.scrapingdog.com/scrape"
 RETRIES = 5
 TIMEOUT = 90
 
-MARKETS = [
+# Маппинг доменов Amazon к кодам стран
+DOMAIN_MARKETS = {
+    "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
+    "amazon.com.be": ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
+    "amazon.nl": ("NL", "https://www.amazon.nl/dp/{asin}?language=en_GB"),
+    "amazon.de": ("DE", "https://www.amazon.de/dp/{asin}?language=en_GB"),
+    "amazon.co.uk": ("UK", "https://www.amazon.co.uk/dp/{asin}"),
+    "amazon.fr": ("FR", "https://www.amazon.fr/dp/{asin}"),
+    "amazon.it": ("IT", "https://www.amazon.it/dp/{asin}"),
+    "amazon.es": ("ES", "https://www.amazon.es/dp/{asin}"),
+}
+
+DEFAULT_MARKETS = [
     ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
     ("NL", "https://www.amazon.nl/dp/{asin}?language=en_GB"),
 ]
@@ -55,9 +68,33 @@ CREATE TABLE IF NOT EXISTS tracked_asins (
 
 
 def extract_asin(text: str) -> str:
+    """Извлекает 10-значный чистый ASIN из текста или ссылки."""
     text = str(text).strip().upper()
     match = re.search(r"(B[0-9A-Z]{9})", text)
     return match.group(1) if match else text
+
+
+def extract_asin_and_market(text: str) -> tuple[str, str | None, str | None]:
+    """
+    Возвращает (clean_asin, target_market_code, custom_url_template)
+    Если введена ссылка (например https://www.amazon.com/dp/B0H6YBDKXJ),
+    определит маркет 'US' и соберет данные именно с amazon.com.
+    """
+    clean_asin = extract_asin(text)
+    if not clean_asin:
+        return "", None, None
+
+    if text.startswith("HTTP://") or text.startswith("HTTPS://"):
+        try:
+            parsed = urlparse(text.lower())
+            host = parsed.netloc.replace("www.", "")
+            for domain, (market_code, url_tmpl) in DOMAIN_MARKETS.items():
+                if domain in host:
+                    return clean_asin, market_code, url_tmpl
+        except Exception:
+            pass
+
+    return clean_asin, None, None
 
 
 def get_db_connection():
@@ -123,16 +160,6 @@ def add_tracked_asins(asins: list[str]):
                         "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
                         (clean_asin,),
                     )
-        conn.commit()
-
-
-def remove_tracked_asin(asin: str):
-    clean_asin = extract_asin(asin)
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM tracked_asins WHERE asin = %s", (clean_asin,)
-            )
         conn.commit()
 
 
@@ -211,23 +238,7 @@ def sanity_check(html: str) -> bool:
     return True
 
 
-def market_matches(html: str, market: str) -> bool:
-    expected = {"BE": "amazon.com.be", "NL": "amazon.nl"}[market]
-    return expected in html.lower()
-
-
-def in_variation(soup: BeautifulSoup) -> bool:
-    twister = soup.select_one("#twister_feature_div, #twisterContainer")
-    if not twister:
-        return False
-    swatches = twister.select(
-        "li[data-defaultasin], li[data-asin], .swatchElement, .selectableOption"
-    )
-    return len(swatches) > 1
-
-
 def parse_bsr(soup: BeautifulSoup, html: str) -> str | None:
-    """Парсинг Best Sellers Rank из HTML карточки."""
     m = re.search(r"#([0-9,.]+)\s*(?:in|в)\s*([^<\n(\n]+)", html, re.I)
     if m:
         return f"#{m.group(1)} {m.group(2).strip()[:30]}"
@@ -328,38 +339,43 @@ def parse_reviews_page(asin: str) -> dict:
     }
 
 
-def check_asin(raw_asin: str, log=print) -> dict:
-    asin = extract_asin(raw_asin)
-    log(f"=== {asin} ===")
-    for market, tmpl in MARKETS:
-        url = tmpl.format(asin=asin)
+def check_asin(raw_input: str, log=print) -> dict:
+    clean_asin, target_market, custom_tmpl = extract_asin_and_market(raw_input)
+    log(f"=== {clean_asin} ===")
+
+    # Если была передана прямая ссылка на конкретный маркетплейс (например Amazon US)
+    if target_market and custom_tmpl:
+        url = custom_tmpl.format(asin=clean_asin)
+        log(f"  [{target_market}] Запрос по прямой ссылке...")
         html = fetch(url)
-        if not html:
-            log(f"  [{market}] не скачалось")
-            continue
-        if not market_matches(html, market):
-            log(f"  [{market}] SANITY FAIL: не тот маркетплейс в ответе")
-            continue
-        if not sanity_check(html):
-            log(f"  [{market}] похоже на капчу/блок, пропускаю")
+        if html and sanity_check(html):
+            soup = BeautifulSoup(html, "html.parser")
+            data = parse_rating(soup, html)
+            if data["rating"] is not None:
+                log(f"  [{target_market}] OK: rating={data['rating']} count={data['count']}")
+                return {"asin": clean_asin, "source": target_market, **data}
+
+    # Иначе используем дефолтный каскадный поиск BE -> NL
+    for market, tmpl in DEFAULT_MARKETS:
+        url = tmpl.format(asin=clean_asin)
+        html = fetch(url)
+        if not html or not sanity_check(html):
             continue
 
         soup = BeautifulSoup(html, "html.parser")
         if in_variation(soup):
-            log(f"  [{market}] в вариации, идём дальше по каскаду")
             continue
         data = parse_rating(soup, html)
         if data["rating"] is None:
-            log(f"  [{market}] одиночный, но рейтинг не распарсился")
             continue
         log(f"  [{market}] OK: rating={data['rating']} count={data['count']}")
-        return {"asin": asin, "source": market, **data}
+        return {"asin": clean_asin, "source": market, **data}
 
     log("  [reviews-only] фолбэк по письменным ревью (BE)")
-    rv = parse_reviews_page(asin)
+    rv = parse_reviews_page(clean_asin)
     if rv["rating"] is not None:
         return {
-            "asin": asin,
+            "asin": clean_asin,
             "source": "reviews-only",
             "rating": rv["rating"],
             "count": rv["count"],
@@ -369,7 +385,7 @@ def check_asin(raw_asin: str, log=print) -> dict:
             "note": "только письменные ревью, данные неполные",
         }
     return {
-        "asin": asin,
+        "asin": clean_asin,
         "source": "none",
         "rating": None,
         "count": None,
