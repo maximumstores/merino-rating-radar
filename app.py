@@ -1,6 +1,8 @@
+import datetime
 import json
 import os
 import re
+import time
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -114,6 +116,20 @@ tracked = get_tracked_asins()
 with st.expander("Управление списком ASIN (Редактирование текущего списка)"):
     st.caption(f"Сейчас в базе отслеживается позиций: {len(tracked)}")
     
+    col_help, col_def_market = st.columns([3, 1])
+    with col_help:
+        st.markdown(
+            "💡 **Поддерживаемые форматы и страны:**\n"
+            "* `B09NWGDK3S` — обычный ASIN (используется дефолтный маркет)\n"
+            "* `B0H6YBDKXJ:US` — США (amazon.com)\n"
+            "* `B09NWGDK3S:DE` — Германия (amazon.de)\n"
+            "* `B09NWGDK3S:BE` — Бельгия (amazon.com.be)\n"
+            "* `B09NWGDK3S:NL` — Нидерланды (amazon.nl)\n"
+            "* Прямые ссылки: `https://www.amazon.com/dp/B0H6YBDKXJ`"
+        )
+    with col_def_market:
+        default_market_select = st.selectbox("Маркет по умолчанию", options=["BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"], index=0)
+
     current_tracked_text = ", ".join(tracked)
     
     edited_asins_input = st.text_area(
@@ -121,7 +137,7 @@ with st.expander("Управление списком ASIN (Редактиров
         value=current_tracked_text,
         height=120,
         key="edit_tracked_list",
-        placeholder="https://www.amazon.com.be/dp/B0H6YBDKXJ, B09NWGDK3S...",
+        placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.de/dp/B09NWGDK3S...",
     )
     
     col_btn1, col_btn2 = st.columns([1, 1])
@@ -166,45 +182,50 @@ with st.expander("Управление списком ASIN (Редактиров
 st.markdown("### Сбор данных")
 col_a, col_b = st.columns(2)
 
+def run_full_collection():
+    """Выполнение сбора по всем ASIN."""
+    ensure_schema()
+    run_id = start_run(len(tracked))
+    progress = st.progress(0.0, text=f"0/{len(tracked)}")
+    log_box = st.empty()
+    log_lines = []
+    ok = 0
+    for i, asin in enumerate(tracked, 1):
+
+        def _log(msg, _lines=log_lines):
+            _lines.append(msg)
+            log_box.code("\n".join(_lines[-15:]))
+
+        try:
+            res = check_asin(asin, default_market=default_market_select, log=_log)
+            save_to_db(res)
+            if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
+                ok += 1
+        except Exception as e:
+            _log(f"Ошибка {asin}: {e}")
+        progress.progress(i / len(tracked), text=f"{i}/{len(tracked)}")
+    finish_run(run_id, ok, "done")
+    st.session_state["last_auto_run"] = time.time()
+    st.success(f"Прогон завершен: {ok}/{len(tracked)} успешно.")
+    st.rerun()
+
 with col_a:
-    st.markdown("**Полный прогон**")
-    st.caption("Запуск сбора по всем отслеживаемым позициям")
+    st.markdown("**Ручной прогон**")
+    st.caption("Запуск сбора прямо сейчас")
     if st.button(f"Запустить прогон ({len(tracked)} ASIN)"):
         if not tracked:
             st.warning("Список отслеживания пуст")
         else:
-            ensure_schema()
-            run_id = start_run(len(tracked))
-            progress = st.progress(0.0, text=f"0/{len(tracked)}")
-            log_box = st.empty()
-            log_lines = []
-            ok = 0
-            for i, asin in enumerate(tracked, 1):
-
-                def _log(msg, _lines=log_lines):
-                    _lines.append(msg)
-                    log_box.code("\n".join(_lines[-15:]))
-
-                try:
-                    res = check_asin(asin, log=_log)
-                    save_to_db(res)
-                    if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
-                        ok += 1
-                except Exception as e:
-                    _log(f"Ошибка {asin}: {e}")
-                progress.progress(i / len(tracked), text=f"{i}/{len(tracked)}")
-            finish_run(run_id, ok, "done")
-            st.success(f"Прогон завершен: {ok}/{len(tracked)} успешно.")
-            st.rerun()
+            run_full_collection()
 
 with col_b:
     st.markdown("**Точечная проверка**")
-    st.caption("Разовая проверка конкретных ссылок / ASIN")
+    st.caption("Разовая проверка конкретных позиций")
     with st.form("ad_hoc_form"):
         adhoc_input = st.text_area(
-            "ASIN или прямые ссылки на Amazon (US, DE, BE и др.)",
+            "ASIN, комбинации B0XXXXXX:US или ссылки",
             height=80,
-            placeholder="https://www.amazon.com/dp/B0H6YBDKXJ...",
+            placeholder="B0H6YBDKXJ:US, https://www.amazon.de/dp/B09NWGDK3S...",
         )
         adhoc_submit = st.form_submit_button("Выполнить проверку")
     if adhoc_submit:
@@ -225,7 +246,7 @@ with col_b:
                     log_box.code("\n".join(_lines[-15:]))
 
                 try:
-                    res = check_asin(item, log=_log)
+                    res = check_asin(item, default_market=default_market_select, log=_log)
                     save_to_db(res)
                     if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                         ok += 1
@@ -275,31 +296,6 @@ else:
         full_df.sort_values("created_at").groupby("asin").last().reset_index()
     )
     latest_df = latest_df.sort_values("created_at", ascending=False)
-
-    top_col1, top_col2, top_col3, top_col4 = st.columns([2, 2, 2, 1])
-
-    all_asins = latest_df["asin"].dropna().tolist()
-    all_sources = latest_df["source"].dropna().unique().tolist()
-
-    with top_col1:
-        sel_asins = st.multiselect(
-            "Фильтр ASIN", options=all_asins, default=all_asins
-        )
-    with top_col2:
-        sel_sources = st.multiselect(
-            "Фильтр Источника", options=all_sources, default=all_sources
-        )
-    with top_col3:
-        selected_tz_label = st.selectbox(
-            "Часовой пояс сбора",
-            options=list(TIMEZONES.keys()),
-            index=0,
-        )
-        selected_tz = TIMEZONES[selected_tz_label]
-    with top_col4:
-        view_mode = st.radio(
-            "Формат", options=["Таблица", "Карточки"], horizontal=True
-        )
 
     def process_row(row):
         try:
@@ -373,19 +369,11 @@ else:
             else "—"
         )
 
-        if pd.notnull(row["created_at"]):
-            dt_tz = pd.to_datetime(row["created_at"]).tz_convert(
-                ZoneInfo(selected_tz)
-            )
-            created_fmt = dt_tz.strftime("%d.%m.%Y %H:%M")
-        else:
-            created_fmt = "—"
-
         return pd.Series([
             False,
             asin,
             status_text,
-            created_fmt,
+            row["created_at"],
             url,
             img_url,
             source,
@@ -403,7 +391,7 @@ else:
         "Выбор",
         "raw_asin",
         "Статус",
-        "Время сбора",
+        "raw_created_at",
         "ASIN",
         "Фото",
         "Источник",
@@ -416,10 +404,85 @@ else:
         "Комментарий",
     ]
 
+    # ==================== ЕДИНАЯ ВЕРХНЯЯ ПАНЕЛЬ ФИЛЬТРОВ И ВРЕМЕНИ ====================
+    top_col1, top_col2, top_col3, top_col4, top_col5 = st.columns([2, 2, 2, 1.5, 1])
+
+    all_asins = calc_df["raw_asin"].dropna().unique().tolist()
+    all_sources = calc_df["Источник"].dropna().unique().tolist()
+
+    with top_col1:
+        sel_asins = st.multiselect(
+            "Фильтр ASIN", 
+            options=all_asins, 
+            default=[], 
+            placeholder="Все ASIN (или выберите)"
+        )
+    with top_col2:
+        sel_sources = st.multiselect(
+            "Фильтр Источника", 
+            options=all_sources, 
+            default=[], 
+            placeholder="Все источники (US, BE...)"
+        )
+    with top_col3:
+        selected_tz_label = st.selectbox(
+            "Часовой пояс сбора",
+            options=list(TIMEZONES.keys()),
+            index=0,
+            key="sel_tz_val"
+        )
+        selected_tz = TIMEZONES[selected_tz_label]
+        
+    with top_col4:
+        target_daily_time = st.time_input(
+            "Время ежедневного сбора", 
+            value=datetime.time(13, 0),
+            key="daily_run_time"
+        )
+
+    with top_col5:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        auto_timer_active = st.checkbox("Автосбор", value=False)
+
+    # Проверка таймера
+    if auto_timer_active and tracked:
+        now_in_tz = datetime.datetime.now(ZoneInfo(selected_tz))
+        scheduled_in_tz = datetime.datetime.combine(now_in_tz.date(), target_daily_time, tzinfo=ZoneInfo(selected_tz))
+        
+        if now_in_tz > scheduled_in_tz:
+            scheduled_in_tz += datetime.timedelta(days=1)
+            
+        time_until_run = (scheduled_in_tz - now_in_tz).total_seconds()
+        
+        if 0 <= time_until_run <= 60:
+            st.warning(f"⏱️ Запуск автосбора в {target_daily_time.strftime('%H:%M')} ({selected_tz_label.split(' ')[0]})...")
+            run_full_collection()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    f_col1, f_col2 = st.columns([3, 1])
+    with f_col2:
+        view_mode = st.radio(
+            "Формат отображения", options=["Таблица", "Карточки"], horizontal=True
+        )
+
+    target_asins = sel_asins if sel_asins else all_asins
+    target_sources = sel_sources if sel_sources else all_sources
+
     filtered_df = calc_df[
-        calc_df["raw_asin"].isin(sel_asins)
-        & calc_df["Источник"].isin(sel_sources)
-    ]
+        calc_df["raw_asin"].isin(target_asins)
+        & calc_df["Источник"].isin(target_sources)
+    ].copy()
+
+    if sel_asins:
+        filtered_df["Выбор"] = filtered_df["raw_asin"].isin(sel_asins)
+
+    def format_tz_date(dt):
+        if pd.notnull(dt):
+            dt_tz = pd.to_datetime(dt).tz_convert(ZoneInfo(selected_tz))
+            return dt_tz.strftime("%d.%m.%Y %H:%M")
+        return "—"
+
+    filtered_df["Время сбора"] = filtered_df["raw_created_at"].apply(format_tz_date)
 
     st.markdown(
         f"### Сводный отчет &nbsp; <span style='font-size: 15px; color: #6e6e73; font-weight: normal;'>(Показано: **{len(filtered_df)}** из {len(calc_df)} позиций)</span>",
@@ -429,52 +492,34 @@ else:
 
     # --- ТАБЛИЦА ---
     if view_mode == "Таблица":
-        display_tbl = filtered_df.drop(columns=["raw_asin"])
+        display_tbl = filtered_df.drop(columns=["raw_asin", "raw_created_at"])
+        
+        cols_order = [
+            "Выбор", "Статус", "Время сбора", "ASIN", "Фото", "Источник", 
+            "Рейтинг", "Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR", "Комментарий"
+        ]
+        display_tbl = display_tbl[cols_order]
 
         edited_df = st.data_editor(
             display_tbl,
             column_config={
-                "Выбор": st.column_config.CheckboxColumn(
-                    "Выбор", default=False, width="small"
-                ),
-                "Статус": st.column_config.TextColumn(
-                    "Статус", width="small", disabled=True
-                ),
+                "Выбор": st.column_config.CheckboxColumn("Выбор", default=False, width="small"),
+                "Статус": st.column_config.TextColumn("Статус", width="small", disabled=True),
                 "Время сбора": st.column_config.TextColumn(
                     f"Время сбора ({selected_tz_label.split(' ')[0]})",
                     width="medium",
                     disabled=True,
                 ),
-                "ASIN": st.column_config.LinkColumn(
-                    "ASIN",
-                    width="medium",
-                    disabled=True,
-                ),
+                "ASIN": st.column_config.LinkColumn("ASIN", width="medium", disabled=True),
                 "Фото": st.column_config.ImageColumn("Фото", width="small"),
-                "Источник": st.column_config.TextColumn(
-                    "Источник", width="small", disabled=True
-                ),
-                "Рейтинг": st.column_config.NumberColumn(
-                    "Рейтинг", format="%.2f", width="small", disabled=True
-                ),
-                "Отзывы": st.column_config.NumberColumn(
-                    "Отзывы", width="small", disabled=True
-                ),
-                "1–2★ %": st.column_config.TextColumn(
-                    "1–2★ %", width="small", disabled=True
-                ),
-                "Тренд": st.column_config.TextColumn(
-                    "Тренд", width="small", disabled=True
-                ),
-                "Запас (до 4.0)": st.column_config.TextColumn(
-                    "Запас", width="medium", disabled=True
-                ),
-                "BSR": st.column_config.TextColumn(
-                    "BSR", width="medium", disabled=True
-                ),
-                "Комментарий": st.column_config.TextColumn(
-                    "Комментарий", width="large", disabled=True
-                ),
+                "Источник": st.column_config.TextColumn("Источник", width="small", disabled=True),
+                "Рейтинг": st.column_config.NumberColumn("Рейтинг", format="%.2f", width="small", disabled=True),
+                "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
+                "1–2★ %": st.column_config.TextColumn("1–2★ %", width="small", disabled=True),
+                "Тренд": st.column_config.TextColumn("Тренд", width="small", disabled=True),
+                "Запас (до 4.0)": st.column_config.TextColumn("Запас", width="medium", disabled=True),
+                "BSR": st.column_config.TextColumn("BSR", width="medium", disabled=True),
+                "Комментарий": st.column_config.TextColumn("Комментарий", width="large", disabled=True),
             },
             use_container_width=True,
             hide_index=True,
@@ -511,7 +556,7 @@ else:
             run_id = start_run(len(selected_asins))
             ok = 0
             for asin in selected_asins:
-                res = check_asin(asin)
+                res = check_asin(asin, default_market=default_market_select)
                 save_to_db(res)
                 if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                     ok += 1
