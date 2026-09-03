@@ -11,20 +11,23 @@ from dotenv import load_dotenv
 from collector import (
     add_tracked_asins,
     check_asin,
+    clean_db_trash,
+    delete_asin_completely,
     ensure_schema,
     extract_asin,
     finish_run,
     get_tracked_asins,
-    remove_tracked_asin,
     save_to_db,
     start_run,
 )
 
 load_dotenv()
-
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 st.set_page_config(page_title="Rating Radar Dashboard", layout="wide", page_icon="📊")
+
+# Авточистка мусорных записей из БД
+clean_db_trash()
 
 st.title("📊 Rating Radar Dashboard")
 
@@ -74,7 +77,8 @@ with st.expander("Добавить ASIN в общий список"):
         if new_asins:
             ensure_schema()
             add_tracked_asins(new_asins)
-            st.success(f"Добавлено: {len(new_asins)}. Обнови страницу.")
+            st.success(f"Добавлено: {len(new_asins)}. Перезагружаю...")
+            st.rerun()
 
 st.markdown("### 🚀 Собрать сейчас")
 col_a, col_b = st.columns(2)
@@ -106,7 +110,8 @@ with col_a:
                     _log(f"❌ {asin}: ошибка {e}")
                 progress.progress(i / len(tracked), text=f"{i}/{len(tracked)}")
             finish_run(run_id, ok, "done")
-            st.success(f"Готово: {ok}/{len(tracked)} чистых. Обнови страницу.")
+            st.success(f"Готово: {ok}/{len(tracked)} чистых.")
+            st.rerun()
 
 with col_b:
     st.markdown("**Точечная проверка** (не влияет на общий список)")
@@ -138,85 +143,183 @@ with col_b:
                     _log(f"❌ {asin}: ошибка {e}")
                 progress.progress(i / len(adhoc_asins), text=f"{i}/{len(adhoc_asins)}")
             finish_run(run_id, ok, "done")
-            st.success(f"Готово: {ok}/{len(adhoc_asins)} чистых. Обнови страницу.")
+            st.success(f"Готово: {ok}/{len(adhoc_asins)} чистых.")
+            st.rerun()
 
 
 def get_data():
     if not DATABASE_URL:
-        st.error("DATABASE_URL не найден в файле .env")
+        st.error("DATABASE_URL не найден в .env")
         return pd.DataFrame()
     try:
         conn = psycopg2.connect(DATABASE_URL)
         query = """
-            SELECT 
+            SELECT DISTINCT ON (asin)
                 id,
                 asin,
                 source,
                 rating,
                 review_count,
                 histogram_json,
+                image_url,
                 note,
                 created_at
             FROM asin_metrics 
-            ORDER BY created_at DESC;
+            WHERE asin NOT LIKE 'HTTP%' AND LENGTH(asin) <= 10
+            ORDER BY asin, created_at DESC;
         """
         df = pd.read_sql(query, conn)
         conn.close()
+        if not df.empty:
+            df = df.sort_values("created_at", ascending=False)
         return df
     except Exception as e:
-        st.error(f"Ошибка подключения к базе данных: {e}")
+        st.error(f"Ошибка подключения к БД: {e}")
         return pd.DataFrame()
 
 
 df = get_data()
 
+st.markdown("---")
+
 if df.empty:
-    st.warning("В базе данных пока нет записей.")
+    st.warning("В базе данных пока нет корректных записей.")
 else:
-    st.sidebar.header("Фильтры")
-    all_asins = df["asin"].dropna().unique().tolist()
-    all_sources = df["source"].dropna().unique().tolist()
-
-    selected_asins = st.sidebar.multiselect("Выберите ASIN", options=all_asins, default=all_asins)
-    selected_sources = st.sidebar.multiselect("Источник данных", options=all_sources, default=all_sources)
-
-    filtered_df = df[(df["asin"].isin(selected_asins)) & (df["source"].isin(selected_sources))]
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Всего проверок", len(filtered_df))
-    col2.metric("Уникальных ASIN", filtered_df["asin"].nunique())
-
-    avg_rating = filtered_df["rating"].dropna().mean()
-    col3.metric("Средний рейтинг", f"{avg_rating:.2f}" if not pd.isna(avg_rating) else "—")
-
-    total_reviews = filtered_df["review_count"].dropna().sum()
-    col4.metric("Сумма отзывов", f"{int(total_reviews):,}")
-
-    st.markdown("---")
-
-    st.subheader("📋 История сбора данных")
-    display_df = filtered_df.drop(columns=["histogram_json"]).copy()
-    st.dataframe(display_df, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("⭐ Распределение звёзд (Гистограмма)")
-
-    if not filtered_df.empty:
-        selected_asin = st.selectbox("Выберите ASIN для детализации", options=filtered_df["asin"].unique())
-        row = filtered_df[filtered_df["asin"] == selected_asin].iloc[0]
+    # --- РАСЧЕТ ПОЛЕЙ ---
+    def process_row(row):
+        rating = row["rating"]
+        cnt = row["review_count"]
+        source = row["source"]
         hist_raw = row["histogram_json"]
 
+        bad_pct = 0
+        bad_pct_str = "—"
         if hist_raw:
-            hist_dict = json.loads(hist_raw) if isinstance(hist_raw, str) else hist_raw
-            if hist_dict:
-                hist_df = (
-                    pd.DataFrame(list(hist_dict.items()), columns=["Звёзды", "Процент"])
-                    .astype({"Звёзды": int, "Процент": int})
-                    .sort_values("Звёзды", ascending=False)
-                )
-                hist_df["Звёзды"] = hist_df["Звёзды"].astype(str) + " ★"
-                st.bar_chart(hist_df.set_index("Звёзды"))
-            else:
-                st.info("Гистограмма для этого ASIN пуста.")
-        else:
-            st.info("Данные о гистограмме отсутствуют.") 
+            try:
+                h = json.loads(hist_raw) if isinstance(hist_raw, str) else hist_raw
+                bad_pct = int(h.get("1", 0)) + int(h.get("2", 0))
+                bad_pct_str = f"{bad_pct}%"
+            except Exception:
+                pass
+
+        margin_str = "—"
+        if rating is not None and cnt is not None and rating > 4.0:
+            margin = int((cnt * (rating - 4.0)) / 3.0)
+            margin_str = f"{max(0, margin)} ед."
+
+        flag = "🟢"
+        if source == "none" or rating is None:
+            flag = "⚪"
+        elif rating < 4.0:
+            flag = "🔴"
+        elif rating < 4.3 or bad_pct > 15:
+            flag = "🟡"
+
+        asin = row["asin"]
+        url = f"https://www.amazon.com.be/dp/{asin}?language=en_GB"
+
+        return pd.Series([
+            asin,
+            flag,
+            url,
+            row["image_url"],
+            source,
+            rating,
+            cnt,
+            bad_pct_str,
+            margin_str,
+            row["note"] if row["note"] else "",
+            row["created_at"].strftime("%d.%m.%Y %H:%M") if pd.notnull(row["created_at"]) else "—"
+        ])
+
+    calc_df = df.apply(process_row, axis=1)
+    calc_df.columns = [
+        "raw_asin",
+        "Флаг",
+        "ASIN",
+        "Фото",
+        "Маркетплейс (источник)",
+        "Рейтинг",
+        "Кол-во рейтингов",
+        "1–2★ %",
+        "Запас до 4.0",
+        "Комментарий",
+        "Дата сбора"
+    ]
+
+    # --- ФИЛЬТРЫ И ПЕРЕКЛЮЧЕНИЕ ВИДА ---
+    st.subheader("📋 Сводный отчет")
+    
+    top_col1, top_col2, top_col3 = st.columns([2, 2, 1])
+
+    all_asins = df["asin"].tolist()
+    all_sources = df["source"].dropna().unique().tolist()
+
+    with top_col1:
+        sel_asins = st.multiselect("Фильтр по ASIN", options=all_asins, default=all_asins)
+    with top_col2:
+        sel_sources = st.multiselect("Фильтр по Источнику", options=all_sources, default=all_sources)
+    with top_col3:
+        view_mode = st.radio("Вид отображения", options=["📊 Таблица", "🎴 Карточки"], horizontal=True)
+
+    # Фильтрация
+    filtered_df = calc_df[
+        calc_df["raw_asin"].isin(sel_asins) &
+        calc_df["Маркетплейс (источник)"].isin(sel_sources)
+    ]
+
+    # --- УДАЛЕНИЕ ИЗ БАЗЫ ОТДЕЛЬНЫМ БЛОКОМ ---
+    with st.expander("🗑️ Удалить ASIN из базы"):
+        del_asin_sel = st.selectbox("Выберите ASIN для полного удаления", options=[""] + filtered_df["raw_asin"].tolist())
+        if st.button("Удалить выбранный ASIN") and del_asin_sel:
+            delete_asin_completely(del_asin_sel)
+            st.success(f"ASIN {del_asin_sel} успешно удален из базы!")
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- ОТОБРАЖЕНИЕ: ТАБЛИЦА ---
+    if view_mode == "📊 Таблица":
+        display_tbl = filtered_df.drop(columns=["raw_asin"])
+        st.dataframe(
+            display_tbl,
+            column_config={
+                "ASIN": st.column_config.LinkColumn(
+                    "ASIN",
+                    display_text=r"https://www\.amazon\.com\.be/dp/(B[0-9A-Z]{9})\?language=en_GB"
+                ),
+                "Фото": st.column_config.ImageColumn("Фото", width="small"),
+                "Рейтинг": st.column_config.NumberColumn("Рейтинг", format="%.2f"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # --- ОТОБРАЖЕНИЕ: КАРТОЧКИ ---
+    else:
+        grid_cols = st.columns(3)
+        for idx, row in enumerate(filtered_df.itertuples()):
+            col = grid_cols[idx % 3]
+            with col:
+                with st.container(border=True):
+                    # Шляпка карточки
+                    head_col1, head_col2 = st.columns([3, 1])
+                    head_col1.markdown(f"### {row.Флаг} [{row.raw_asin}]({row.ASIN})")
+                    if head_col2.button("🗑️", key=f"del_{row.raw_asin}"):
+                        delete_asin_completely(row.raw_asin)
+                        st.rerun()
+
+                    # Фото и метрики
+                    img_c, info_c = st.columns([1, 2])
+                    if row.Фото:
+                        img_c.image(row.Фото, use_container_width=True)
+                    else:
+                        img_c.caption("Нет фото")
+
+                    info_c.markdown(f"**Источник:** `{row.getattr('Маркетплейс_(источник)')}`")
+                    rating_val = f"{row.Рейтинг:.2f}" if isinstance(row.Рейтинг, float) else "—"
+                    info_c.markdown(f"**Рейтинг:** ⭐ **{rating_val}** ({row.getattr('Кол-во_рейтингов')} отзыва)")
+                    info_c.markdown(f"**1–2★ плохих:** {row.getattr('_8')}") # 1-2★ %
+                    info_c.markdown(f"**Запас до 4.0:** 🛡️ {row.getattr('_9')}")
+
+                    st.caption(f"Обновлено: {row.getattr('Дата_сбора')}") 
