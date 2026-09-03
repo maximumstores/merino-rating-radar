@@ -97,13 +97,12 @@ if last_run is not None:
 else:
     st.warning("История сборов пуста")
 
-# ==================== БЛОК УПРАВЛЕНИЯ СПИСКОМ tracked_asins ====================
+# ==================== УПРАВЛЕНИЕ СПИСКОМ tracked_asins ====================
 tracked = get_tracked_asins()
 
 with st.expander("Управление списком ASIN (Редактирование текущего списка)"):
     st.caption(f"Сейчас в базе отслеживается позиций: {len(tracked)}")
     
-    # Загружаем текущие ASIN в поле в формате через запятую
     current_tracked_text = ", ".join(tracked)
     
     edited_asins_input = st.text_area(
@@ -122,7 +121,6 @@ with st.expander("Управление списком ASIN (Редактиров
         ]
         clean_new_list = [extract_asin(a) for a in raw_list if extract_asin(a)]
         
-        # Перезаписываем список в БД
         ensure_schema()
         try:
             conn = psycopg2.connect(DATABASE_URL)
@@ -660,11 +658,8 @@ else:
         asin_history["created_at"] = pd.to_datetime(asin_history["created_at"])
         asin_history = asin_history.sort_values("created_at")
 
-        if len(asin_history) < 2:
-            st.info(
-                f"Для ASIN {target_forecast_asin} собрано менее 2 замеров. "
-                "Прогноз будет рассчитан автоматически после следующего сбора данных."
-            )
+        if asin_history.empty:
+            st.info("Нет данных по выбранному ASIN.")
         else:
             asin_history["ts"] = (
                 asin_history["created_at"].astype(np.int64) // 10**9
@@ -672,24 +667,31 @@ else:
             X = asin_history[["ts"]].values
 
             y_rating = asin_history["rating"].fillna(0.0).values
-            model_rating = LinearRegression().fit(X, y_rating)
-
             y_reviews = asin_history["review_count"].fillna(0).values
-            model_reviews = LinearRegression().fit(X, y_reviews)
+
+            cur_r = y_rating[-1] if len(y_rating) > 0 else 0.0
+            cur_cnt = y_reviews[-1] if len(y_reviews) > 0 else 0
 
             last_ts = X[-1][0]
             future_days = [7, 14, 30]
             future_ts = np.array([[last_ts + d * 86400] for d in future_days])
 
-            pred_ratings = model_rating.predict(future_ts)
-            pred_reviews = model_reviews.predict(future_ts)
+            if len(asin_history) >= 2:
+                model_rating = LinearRegression().fit(X, y_rating)
+                model_reviews = LinearRegression().fit(X, y_reviews)
+
+                pred_ratings = model_rating.predict(future_ts)
+                pred_reviews = model_reviews.predict(future_ts)
+                
+                r_diff = cur_r - y_rating[0]
+                cnt_diff = cur_cnt - y_reviews[0]
+            else:
+                pred_ratings = np.array([cur_r] * len(future_days))
+                pred_reviews = np.array([cur_cnt] * len(future_days))
+                r_diff = 0.0
+                cnt_diff = 0
 
             c1, c2, c3, c4 = st.columns(4)
-            cur_r = y_rating[-1]
-            cur_cnt = y_reviews[-1]
-
-            r_diff = cur_r - y_rating[0]
-            cnt_diff = cur_cnt - y_reviews[0]
 
             c1.metric(
                 "Текущий рейтинг",
@@ -750,4 +752,4 @@ else:
                 margin=dict(l=20, r=20, t=40, b=20),
             )
 
-            st.plotly_chart(fig_single, use_container_width=True) 
+            st.plotly_chart(fig_single, use_container_width=True)
