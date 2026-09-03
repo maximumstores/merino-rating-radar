@@ -717,9 +717,10 @@ with tab_bot:
                                          anomalies=("anomaly", "sum"),
                                          drops=("d_rating", lambda x: int((x < 0).sum()))).reset_index()
         agg["neg_share"] = agg["new_neg"] / agg["new_ratings"].replace(0, np.nan) * 100
-        w_in_series = snap.groupby("bucket").apply(
-            lambda d: (d["in_rating"] * d["new_ratings"]).sum() / d["new_ratings"].sum() if d["new_ratings"].sum() > 0 else np.nan)
-        agg["in_rating"] = agg["bucket"].map(w_in_series)
+        snap["_w"] = snap["in_rating"].fillna(0) * snap["new_ratings"]
+        w_sum = snap.groupby("bucket")["_w"].sum()
+        agg["in_rating"] = (w_sum.reindex(agg["bucket"]).values
+                            / agg["new_ratings"].replace(0, np.nan).values)
 
         rl = pd.Timestamp(rollout)
         gc1, gc2 = st.columns(2)
