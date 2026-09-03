@@ -162,6 +162,7 @@ def get_data():
                 review_count,
                 histogram_json,
                 image_url,
+                bsr,
                 note,
                 created_at
             FROM asin_metrics 
@@ -207,13 +208,16 @@ else:
             margin = int((cnt * (rating - 4.0)) / 3.0)
             margin_str = f"{max(0, margin)} ед."
 
+        # Флаги и логика цвета
         flag = "🟢"
         if source == "none" or rating is None:
             flag = "⚪"
-        elif rating < 4.0:
+        elif rating <= 4.2:
             flag = "🔴"
-        elif rating < 4.3 or bad_pct > 15:
+        elif rating == 4.3 or (rating < 4.4) or bad_pct > 15:
             flag = "🟡"
+        else:
+            flag = "🟢"
 
         asin = row["asin"]
         url = f"https://www.amazon.com.be/dp/{asin}?language=en_GB"
@@ -221,6 +225,8 @@ else:
         img_url = row["image_url"]
         if pd.isna(img_url) or not isinstance(img_url, str) or not img_url.startswith("http"):
             img_url = None
+
+        bsr_val = row["bsr"] if ("bsr" in row and pd.notnull(row["bsr"]) and row["bsr"]) else "—"
 
         return pd.Series([
             asin,
@@ -232,6 +238,7 @@ else:
             cnt,
             bad_pct_str,
             margin_str,
+            bsr_val,
             row["note"] if row["note"] else "",
             row["created_at"].strftime("%d.%m.%Y %H:%M") if pd.notnull(row["created_at"]) else "—"
         ])
@@ -247,6 +254,7 @@ else:
         "Кол-во рейтингов",
         "1–2★ %",
         "Запас до 4.0",
+        "BSR",
         "Комментарий",
         "Дата сбора"
     ]
@@ -276,10 +284,21 @@ else:
 
     st.markdown("---")
 
+    def get_colored_rating(rating_val):
+        if not isinstance(rating_val, float) or pd.isna(rating_val):
+            return "—"
+        val_str = f"{rating_val:.2f}"
+        if rating_val >= 4.4:
+            return f"<span style='color: #2e7d32; font-weight: bold;'>🟢 {val_str}</span>"
+        elif 4.25 <= rating_val <= 4.35:
+            return f"<span style='color: #f57f17; font-weight: bold;'>🟡 {val_str}</span>"
+        else:
+            return f"<span style='color: #c62828; font-weight: bold;'>🔴 {val_str}</span>"
+
     # --- ОТОБРАЖЕНИЕ: ТАБЛИЦА ---
     if view_mode == "📊 Таблица":
         # Шапка таблицы
-        th_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.8, 1.0, 1.2, 1.0, 1.2, 1.5, 1.5])
+        th_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.5, 1.2, 1.0, 1.0, 1.0, 1.5, 1.2, 1.5])
         th_cols[0].markdown("**Флаг**")
         th_cols[1].markdown("**Действия**")
         th_cols[2].markdown("**ASIN**")
@@ -289,19 +308,17 @@ else:
         th_cols[6].markdown("**Отзывы**")
         th_cols[7].markdown("**1–2★ %**")
         th_cols[8].markdown("**Запас**")
-        th_cols[9].markdown("**Комментарий**")
-        th_cols[10].markdown("**Дата сбора**")
+        th_cols[9].markdown("**BSR**")
+        th_cols[10].markdown("**Комментарий**")
+        th_cols[11].markdown("**Дата сбора**")
 
         st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
 
-        # Строки таблицы
         for item in records:
-            r_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.8, 1.0, 1.2, 1.0, 1.2, 1.5, 1.5])
+            r_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.5, 1.2, 1.0, 1.0, 1.0, 1.5, 1.2, 1.5])
             
-            # Флаг
             r_cols[0].markdown(f"### {item['Флаг']}")
             
-            # Действия (Кнопки Собрать и Удалить)
             act_c1, act_c2 = r_cols[1].columns(2)
             if act_c1.button("🔄", key=f"tbl_run_{item['raw_asin']}", help="Собрать сейчас"):
                 ensure_schema()
@@ -315,10 +332,8 @@ else:
                 delete_asin_completely(item['raw_asin'])
                 st.rerun()
 
-            # ASIN ссылка
             r_cols[2].markdown(f"[{item['raw_asin']}]({item['ASIN']})")
             
-            # Фото
             if item["Фото"]:
                 try:
                     r_cols[3].image(item["Фото"], width=45)
@@ -327,15 +342,14 @@ else:
             else:
                 r_cols[3].caption("—")
 
-            # Источник, Рейтинг, Отзывы, % и т.д.
             r_cols[4].write(item['Маркетплейс (источник)'])
-            rating_val = f"{item['Рейтинг']:.2f}" if isinstance(item['Рейтинг'], float) else "—"
-            r_cols[5].write(rating_val)
+            r_cols[5].markdown(get_colored_rating(item['Рейтинг']), unsafe_allow_html=True)
             r_cols[6].write(str(item['Кол-во рейтингов']))
             r_cols[7].write(item['1–2★ %'])
             r_cols[8].write(item['Запас до 4.0'])
-            r_cols[9].write(item['Комментарий'])
-            r_cols[10].write(item['Дата сбора'])
+            r_cols[9].write(str(item['BSR']))
+            r_cols[10].write(item['Комментарий'])
+            r_cols[11].write(item['Дата сбора'])
 
     # --- ОТОБРАЖЕНИЕ: КАРТОЧКИ ---
     else:
@@ -369,9 +383,10 @@ else:
                         img_c.caption("Нет фото")
 
                     info_c.markdown(f"**Источник:** `{item['Маркетплейс (источник)']}`")
-                    rating_val = f"{item['Рейтинг']:.2f}" if isinstance(item['Рейтинг'], float) else "—"
-                    info_c.markdown(f"**Рейтинг:** ⭐ **{rating_val}** ({item['Кол-во рейтингов']} отз.)")
+                    colored_r = get_colored_rating(item['Рейтинг'])
+                    info_c.markdown(f"**Рейтинг:** {colored_r} ({item['Кол-во рейтингов']} отз.)", unsafe_allow_html=True)
                     info_c.markdown(f"**1–2★ плохих:** {item['1–2★ %']}")
                     info_c.markdown(f"**Запас до 4.0:** 🛡️ {item['Запас до 4.0']}")
+                    info_c.markdown(f"**BSR:** 🏆 `{item['BSR']}`")
 
                     st.caption(f"Обновлено: {item['Дата сбора']}")
