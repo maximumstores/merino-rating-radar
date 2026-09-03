@@ -30,30 +30,24 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Пользовательский CSS для стилизации под Apple / SaaS Clean UI
+# Стилизация интерфейса (Apple/SaaS minimal)
 st.markdown(
     """
 <style>
-    /* Общий фон и字体 */
     .stApp {
         background-color: #fbfbfd;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
     }
-    
-    /* Стилизация заголовков */
     h1 {
         font-weight: 600 !important;
         letter-spacing: -0.02em !important;
         color: #1d1d1f !important;
     }
-    
     h3 {
         font-weight: 500 !important;
         letter-spacing: -0.01em !important;
         color: #1d1d1f !important;
     }
-
-    /* Стилизация бейджей статуса */
     .badge {
         display: inline-block;
         padding: 3px 8px;
@@ -67,14 +61,11 @@ st.markdown(
     .badge-danger { background-color: #fce8e6; color: #c5221f; }
     .badge-neutral { background-color: #f1f3f4; color: #5f6368; }
 
-    /* Табличные разделители и рамки */
     div[data-testid="stForm"] {
         border: 1px solid #e5e5ea !important;
         border-radius: 12px !important;
         background-color: #ffffff !important;
     }
-
-    /* Кнопки */
     .stButton>button {
         border-radius: 8px !important;
         border: 1px solid #d2d2d7 !important;
@@ -126,7 +117,6 @@ if last_run is not None:
 else:
     st.warning("История сборов пуста")
 
-# Блок управления списком
 tracked = get_tracked_asins()
 
 with st.expander("Управление списком ASIN"):
@@ -264,9 +254,18 @@ if df.empty:
 else:
 
     def process_row(row):
-        rating = row["rating"]
-        cnt = row["review_count"]
-        source = row["source"]
+        # Безопасное приведение рейтинга и отзывов к float/int
+        try:
+            rating = float(row["rating"]) if pd.notnull(row["rating"]) else None
+        except Exception:
+            rating = None
+
+        try:
+            cnt = int(row["review_count"]) if pd.notnull(row["review_count"]) else None
+        except Exception:
+            cnt = None
+
+        source = str(row["source"]) if pd.notnull(row["source"]) else "none"
         hist_raw = row["histogram_json"]
 
         bad_pct = 0
@@ -283,10 +282,14 @@ else:
             except Exception:
                 pass
 
+        # Безопасный расчет Запаса до 4.0
         margin_str = "—"
         if rating is not None and cnt is not None and rating > 4.0:
-            margin = int((cnt * (rating - 4.0)) / 3.0)
-            margin_str = f"{max(0, margin)} ед."
+            try:
+                margin = int((cnt * (rating - 4.0)) / 3.0)
+                margin_str = f"{max(0, margin)} ед."
+            except Exception:
+                margin_str = "—"
 
         # Определение статуса (Бейджа)
         badge_html = '<span class="badge badge-success">ОК</span>'
@@ -304,7 +307,7 @@ else:
         elif bad_pct < 8 and rating is not None and rating >= 4.5:
             trend_symbol = "↑"
 
-        asin = row["asin"]
+        asin = str(row["asin"])
         url = f"https://www.amazon.com.be/dp/{asin}?language=en_GB"
 
         img_url = row["image_url"]
@@ -333,7 +336,7 @@ else:
             trend_symbol,
             margin_str,
             bsr_val,
-            row["note"] if row["note"] else "",
+            row["note"] if pd.notnull(row["note"]) else "",
             (
                 row["created_at"].strftime("%d.%m.%Y %H:%M")
                 if pd.notnull(row["created_at"])
@@ -362,7 +365,7 @@ else:
 
     top_col1, top_col2, top_col3 = st.columns([2, 2, 1])
 
-    all_asins = df["asin"].tolist()
+    all_asins = df["asin"].dropna().tolist()
     all_sources = df["source"].dropna().unique().tolist()
 
     with top_col1:
@@ -388,7 +391,7 @@ else:
     st.markdown("<br>", unsafe_allow_html=True)
 
     def get_rating_html(val):
-        if not isinstance(val, float) or pd.isna(val):
+        if not isinstance(val, (int, float)) or pd.isna(val):
             return "—"
         val_str = f"{val:.2f}"
         if val >= 4.4:
@@ -462,7 +465,7 @@ else:
             r_cols[5].markdown(
                 get_rating_html(item["Рейтинг"]), unsafe_allow_html=True
             )
-            r_cols[6].write(str(item["Отзывы"]))
+            r_cols[6].write(str(item["Отзывы"]) if pd.notnull(item["Отзывы"]) else "—")
             r_cols[7].write(item["1–2★ %"])
             r_cols[8].write(item["Тренд"])
             r_cols[9].write(item["Запас (до 4.0)"])
@@ -515,8 +518,9 @@ else:
 
                     info_c.markdown(f"**Источник:** `{item['Источник']}`")
                     rating_fmt = get_rating_html(item["Рейтинг"])
+                    cnt_fmt = str(item["Отзывы"]) if pd.notnull(item["Отзывы"]) else "—"
                     info_c.markdown(
-                        f"**Рейтинг:** {rating_fmt} &nbsp;({item['Отзывы']} отз.)",
+                        f"**Рейтинг:** {rating_fmt} &nbsp;({cnt_fmt} отз.)",
                         unsafe_allow_html=True,
                     )
                     info_c.markdown(
