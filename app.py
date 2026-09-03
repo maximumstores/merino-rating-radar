@@ -266,11 +266,12 @@ def build_calc_df(df):
         if rating is not None and cnt is not None and rating > 4.0:
             margin = max(0, int((cnt * (rating - 4.0)) / 3.0))
 
+        # Логика Amazon: ≥4.5 зелёный · 4.3–4.4 жёлтый · ≤4.2 красный
         if source == "none" or rating is None:
             status = "Нет данных"
-        elif rating <= 4.2:
+        elif rating <= 4.24:
             status = "Риск"
-        elif rating == 4.3 or bad_pct > 15:
+        elif rating < 4.45:
             status = "Внимание"
         else:
             status = "ОК"
@@ -335,10 +336,15 @@ if not calc_df.empty:
     kpi(k2, "Средний рейтинг", f"{avg_r:.2f}" if pd.notnull(avg_r) else "—",
         f"взвеш. по отзывам {w_avg:.2f}" if w_avg else "")
     kpi(k3, "ОК", n_ok, f"{n_ok / n_total:.0%} портфеля", PALETTE["ok"])
-    kpi(k4, "Внимание", n_warn, "4.3★ или >15% негатива", PALETTE["warn"])
+    kpi(k4, "Внимание", n_warn, "4.3–4.4★", PALETTE["warn"])
     kpi(k5, "Риск", n_risk, "≤ 4.2★", PALETTE["risk"])
     kpi(k6, "Отзывов всего", f"{tot_reviews:,}".replace(",", " "),
         f"+{new_reviews} с прошлого замера" if new_reviews else f"нет данных: {n_none}")
+    st.markdown(
+        "<div class='muted' style='margin:8px 0 4px'>Цвета по логике Amazon: "
+        f"{badge('ОК')} 4.5–5.0★ &nbsp; {badge('Внимание')} 4.3–4.4★ &nbsp; "
+        f"{badge('Риск')} ≤ 4.2★ &nbsp; {badge('Нет данных')} данные не собраны</div>",
+        unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
 # ==================== ГЛОБАЛЬНЫЕ ФИЛЬТРЫ ====================
@@ -381,7 +387,8 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_an, tab_fc, tab_ops = st.tabs(["📋 Портфель", "📊 Аналитика", "📈 Прогноз", "⚙️ Сбор и управление"])
+tab_port, tab_an, tab_bot, tab_fc, tab_ops = st.tabs(
+    ["📋 Портфель", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление"])
 
 # ---------- ПОРТФЕЛЬ ----------
 with tab_port:
@@ -624,6 +631,179 @@ with tab_an:
             style_fig(fig, 380, yaxis=dict(range=[min(3.0, hist_df["rating"].min() - 0.1), 5.05]),
                       legend=dict(orientation="h", y=-0.2), showlegend=len(f_asins) <= 25)
             st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------- ДЕТЕКТОР БОТА ВОЗВРАТОВ ----------
+with tab_bot:
+    st.markdown("### Детектор ИИ-бота возвратов Amazon")
+    st.markdown(
+        "<div class='muted'>Маркер: рейтинг падает, а число оценок почти не растёт — значит новые оценки "
+        "пришли пустыми 1–2★ (rating-only, без текста). Считаем по каждому замеру: сколько оценок добавилось "
+        "и какой у них средний балл (входящий рейтинг), плюс оценку прироста негатива через гистограмму 1–2★.</div>",
+        unsafe_allow_html=True)
+
+    bc1, bc2, bc3, bc4 = st.columns([1.4, 1, 1, 1.2])
+    rollout = bc1.date_input("Дата внедрения бота", value=datetime.date(2026, 8, 20))
+    gran = bc2.radio("Гранулярность", ["День", "Неделя"], horizontal=True)
+    drop_thr = bc3.number_input("Порог падения ★", value=0.1, step=0.05, min_value=0.05, format="%.2f")
+    growth_thr = bc4.number_input("Макс. прирост оценок, %", value=0.5, step=0.1, min_value=0.0,
+                                  help="Аномалия = рейтинг упал ≥ порога, а оценок прибавилось меньше этого % от базы")
+
+    src_df = full_df[full_df["asin"].isin(f_asins)].copy() if not full_df.empty else pd.DataFrame()
+    if src_df.empty:
+        st.info("Нет данных под текущие фильтры")
+    else:
+        src_df["created_local"] = src_df["created_at"].dt.tz_convert(ZoneInfo(selected_tz))
+        src_df["bucket"] = (src_df["created_local"].dt.to_period("W").dt.start_time
+                            if gran == "Неделя" else src_df["created_local"].dt.floor("D"))
+        src_df["bad_pct"] = src_df["histogram_json"].apply(lambda h: (lambda d: d.get("1", 0) + d.get("2", 0) if d else np.nan)(parse_hist(h)))
+        # последний замер в бакете на ASIN
+        snap = src_df.sort_values("created_at").groupby(["asin", "bucket"]).last().reset_index()
+        snap = snap.sort_values(["asin", "bucket"]).dropna(subset=["rating", "review_count"])
+        g = snap.groupby("asin")
+        snap["prev_rating"] = g["rating"].shift()
+        snap["prev_count"] = g["review_count"].shift()
+        snap["prev_bad"] = g["bad_pct"].shift()
+        snap = snap.dropna(subset=["prev_rating"])
+        snap["new_ratings"] = (snap["review_count"] - snap["prev_count"]).clip(lower=0)
+        snap["d_rating"] = snap["rating"] - snap["prev_rating"]
+        snap["growth_pct"] = snap["new_ratings"] / snap["prev_count"].replace(0, np.nan) * 100
+        # входящий рейтинг новых оценок (рейтинг на витрине округлён до 0.1 → даём диапазон)
+        def incoming(r, c, pr, pc, n, shift):
+            if n <= 0:
+                return np.nan
+            return ((r + shift) * c - (pr - shift) * pc) / n
+        snap["in_rating"] = [np.clip(incoming(r, c, pr, pc, n, 0.0), 1, 5)
+                             for r, c, pr, pc, n in zip(snap["rating"], snap["review_count"], snap["prev_rating"],
+                                                        snap["prev_count"], snap["new_ratings"])]
+        snap["in_rating_lo"] = [np.clip(incoming(r, c, pr, pc, n, -0.05), 1, 5)
+                                for r, c, pr, pc, n in zip(snap["rating"], snap["review_count"], snap["prev_rating"],
+                                                           snap["prev_count"], snap["new_ratings"])]
+        # оценка негатива через гистограмму
+        snap["neg_est"] = (snap["bad_pct"] / 100 * snap["review_count"]).round()
+        snap["prev_neg_est"] = (snap["prev_bad"] / 100 * snap["prev_count"]).round()
+        snap["new_neg"] = (snap["neg_est"] - snap["prev_neg_est"]).clip(lower=0)
+        snap["anomaly"] = (snap["d_rating"] <= -drop_thr) & (snap["growth_pct"].fillna(0) <= growth_thr)
+        snap["after"] = snap["bucket"].dt.date >= rollout
+
+        # --- KPI до / после ---
+        def period_stats(d):
+            n = d["new_ratings"].sum()
+            neg = d["new_neg"].sum()
+            drops = int((d["d_rating"] < 0).sum())
+            anom = int(d["anomaly"].sum())
+            w_in = (d["in_rating"] * d["new_ratings"]).sum() / n if n > 0 else np.nan
+            return n, neg, drops, anom, w_in
+
+        before, after = snap[~snap["after"]], snap[snap["after"]]
+        nb, negb, dropb, anb, inb = period_stats(before)
+        na, nega, dropa, ana, ina = period_stats(after)
+        share_b = negb / nb * 100 if nb else np.nan
+        share_a = nega / na * 100 if na else np.nan
+
+        st.markdown(f"**До {rollout:%d.%m} vs после** (по текущему фильтру, {len(snap['asin'].unique())} ASIN)")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Новых оценок (после)", f"{int(na)}", delta=f"до: {int(nb)}", delta_color="off")
+        m2.metric("Из них негатив (оценка)", f"{int(nega)}", delta=f"до: {int(negb)}", delta_color="off")
+        m3.metric("Доля негатива во входящих", f"{share_a:.0f}%" if pd.notnull(share_a) else "—",
+                  delta=f"{share_a - share_b:+.0f} п.п. к периоду до" if pd.notnull(share_a) and pd.notnull(share_b) else None,
+                  delta_color="inverse")
+        m4.metric("Входящий рейтинг (после)", f"{ina:.2f}" if pd.notnull(ina) else "—",
+                  delta=f"{ina - inb:+.2f} к периоду до" if pd.notnull(ina) and pd.notnull(inb) else None)
+        m5.metric("Аномалий (падение без роста)", f"{ana}", delta=f"до: {anb} · падений всего {dropa}", delta_color="off")
+
+        # --- график 1: прирост оценок vs прирост негатива по периодам ---
+        agg = snap.groupby("bucket").agg(new_ratings=("new_ratings", "sum"), new_neg=("new_neg", "sum"),
+                                         anomalies=("anomaly", "sum"),
+                                         drops=("d_rating", lambda x: int((x < 0).sum()))).reset_index()
+        agg["neg_share"] = agg["new_neg"] / agg["new_ratings"].replace(0, np.nan) * 100
+        w_in_series = snap.groupby("bucket").apply(
+            lambda d: (d["in_rating"] * d["new_ratings"]).sum() / d["new_ratings"].sum() if d["new_ratings"].sum() > 0 else np.nan)
+        agg["in_rating"] = agg["bucket"].map(w_in_series)
+
+        rl = pd.Timestamp(rollout)
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            st.markdown(f"**Прирост оценок и негатива по {'неделям' if gran == 'Неделя' else 'дням'}**")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=agg["bucket"], y=agg["new_ratings"], name="Новых оценок", marker_color="#c7c7cc"))
+            fig.add_trace(go.Bar(x=agg["bucket"], y=agg["new_neg"], name="Из них 1–2★ (оценка)", marker_color=PALETTE["risk"]))
+            fig.add_trace(go.Scatter(x=agg["bucket"], y=agg["neg_share"], name="Доля негатива, %", yaxis="y2",
+                                     mode="lines+markers", line=dict(color=PALETTE["warn"], width=2)))
+            fig.add_vline(x=rl, line_dash="dash", line_color=PALETTE["ink"], annotation_text="бот", annotation_position="top")
+            style_fig(fig, 340, barmode="overlay", legend=dict(orientation="h", y=-0.25),
+                      yaxis2=dict(title="%", overlaying="y", side="right", range=[0, 100], showgrid=False))
+            st.plotly_chart(fig, use_container_width=True)
+        with gc2:
+            st.markdown("**Входящий рейтинг новых оценок и число аномалий**")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=agg["bucket"], y=agg["in_rating"], name="Входящий рейтинг", mode="lines+markers",
+                                     line=dict(color=PALETTE["accent"], width=3)))
+            fig.add_trace(go.Bar(x=agg["bucket"], y=agg["anomalies"], name="Аномалии (шт.)", yaxis="y2",
+                                 marker_color=PALETTE["risk"], opacity=0.45))
+            fig.add_trace(go.Bar(x=agg["bucket"], y=agg["drops"], name="Падений ★ (шт.)", yaxis="y2",
+                                 marker_color=PALETTE["warn"], opacity=0.3))
+            fig.add_vline(x=rl, line_dash="dash", line_color=PALETTE["ink"], annotation_text="бот", annotation_position="top")
+            style_fig(fig, 340, barmode="overlay", legend=dict(orientation="h", y=-0.25),
+                      yaxis=dict(title="★", range=[1, 5.05]),
+                      yaxis2=dict(title="шт.", overlaying="y", side="right", showgrid=False, rangemode="tozero"))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # --- график 2: scatter падение vs прирост ---
+        st.markdown("**Карта аномалий** — каждая точка = замер ASIN; красная зона = падение рейтинга при почти нулевом приросте оценок")
+        sc = snap.dropna(subset=["growth_pct"]).copy()
+        sc["период"] = np.where(sc["after"], "после бота", "до бота")
+        fig = px.scatter(sc, x="growth_pct", y="d_rating", color="период", symbol="anomaly",
+                         hover_name="asin", hover_data={"bucket": True, "new_ratings": True, "in_rating": ":.2f", "anomaly": False},
+                         color_discrete_map={"до бота": "#8e8e93", "после бота": PALETTE["accent"]},
+                         symbol_map={True: "x", False: "circle"},
+                         labels={"growth_pct": "Прирост оценок, % от базы", "d_rating": "Δ рейтинга"})
+        fig.add_shape(type="rect", x0=0, x1=growth_thr, y0=-1, y1=-drop_thr, fillcolor=PALETTE["risk"], opacity=0.08, line_width=0)
+        fig.add_hline(y=0, line_color="#c7c7cc")
+        style_fig(fig, 340, legend=dict(orientation="h", y=-0.25),
+                  yaxis=dict(range=[min(-0.3, sc["d_rating"].min() - 0.05), max(0.3, sc["d_rating"].max() + 0.05)]))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- таблица аномалий ---
+        st.markdown("**Замеры с аномалией**")
+        an = snap[snap["anomaly"]].sort_values("bucket", ascending=False)
+        if an.empty:
+            st.caption("Аномалий под текущие пороги нет")
+        else:
+            show = an[["asin", "source", "bucket", "prev_rating", "rating", "d_rating", "prev_count", "review_count",
+                       "new_ratings", "in_rating", "new_neg", "after"]].copy()
+            show["bucket"] = show["bucket"].dt.strftime("%d.%m.%Y")
+            show["after"] = show["after"].map({True: "после", False: "до"})
+            show.columns = ["ASIN", "Ист.", "Период", "Было ★", "Стало ★", "Δ★", "Было оценок", "Стало оценок",
+                            "Новых", "Входящий ★", "Новых 1–2★", "Бот"]
+            st.dataframe(show.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
+                                            "Входящий ★": "{:.2f}", "Было оценок": "{:.0f}", "Стало оценок": "{:.0f}",
+                                            "Новых": "{:.0f}", "Новых 1–2★": "{:.0f}"}),
+                         use_container_width=True, hide_index=True, height=min(420, 40 + 35 * len(show)))
+            st.download_button("⬇ CSV аномалий", show.to_csv(index=False).encode("utf-8-sig"), "bot_anomalies.csv", "text/csv")
+
+        # --- по ASIN: до/после ---
+        st.markdown("**По ASIN: доля негатива во входящих оценках до и после**")
+        per = snap.groupby(["asin", "after"]).agg(n=("new_ratings", "sum"), neg=("new_neg", "sum")).reset_index()
+        per["share"] = per["neg"] / per["n"].replace(0, np.nan) * 100
+        pv = per.pivot(index="asin", columns="after", values="share").rename(columns={False: "до", True: "после"})
+        pv = pv.dropna(how="all")
+        if pv.empty or "после" not in pv:
+            st.caption("Недостаточно замеров после даты внедрения")
+        else:
+            pv["Δ"] = pv["после"] - pv.get("до", np.nan)
+            pv = pv.sort_values("после", ascending=False).head(30)
+            fig = go.Figure()
+            if "до" in pv:
+                fig.add_trace(go.Bar(x=pv.index, y=pv["до"], name="до", marker_color="#c7c7cc"))
+            fig.add_trace(go.Bar(x=pv.index, y=pv["после"], name="после", marker_color=PALETTE["risk"]))
+            style_fig(fig, 320, barmode="group", yaxis=dict(title="% негатива", range=[0, 100]),
+                      legend=dict(orientation="h", y=-0.3))
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.caption("Оговорка: витринный рейтинг округлён до 0.1, а гистограмма — до 1 %, поэтому на больших базах "
+                   "(тысячи оценок) входящий рейтинг и число новых 1–2★ — оценка, не точный счёт. "
+                   "Чем чаще замеры, тем точнее.")
 
 # ---------- ПРОГНОЗ ----------
 with tab_fc:
