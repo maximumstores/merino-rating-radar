@@ -272,44 +272,90 @@ else:
         calc_df["Маркетплейс (источник)"].isin(sel_sources)
     ]
 
-    # --- УДАЛЕНИЕ ИЗ БАЗЫ ---
-    with st.expander("🗑️ Удалить ASIN из базы"):
-        del_asin_sel = st.selectbox("Выберите ASIN для полного удаления", options=[""] + filtered_df["raw_asin"].tolist())
-        if st.button("Удалить выбранный ASIN") and del_asin_sel:
-            delete_asin_completely(del_asin_sel)
-            st.success(f"ASIN {del_asin_sel} успешно удален!")
-            st.rerun()
+    records = filtered_df.to_dict(orient="records")
 
     st.markdown("---")
 
     # --- ОТОБРАЖЕНИЕ: ТАБЛИЦА ---
     if view_mode == "📊 Таблица":
-        display_tbl = filtered_df.drop(columns=["raw_asin"])
-        st.dataframe(
-            display_tbl,
-            column_config={
-                "ASIN": st.column_config.LinkColumn(
-                    "ASIN",
-                    display_text=r"https://www\.amazon\.com\.be/dp/(B[0-9A-Z]{9})\?language=en_GB"
-                ),
-                "Фото": st.column_config.ImageColumn("Фото", width="small"),
-                "Рейтинг": st.column_config.NumberColumn("Рейтинг", format="%.2f"),
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+        # Шапка таблицы
+        th_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.8, 1.0, 1.2, 1.0, 1.2, 1.5, 1.5])
+        th_cols[0].markdown("**Флаг**")
+        th_cols[1].markdown("**Действия**")
+        th_cols[2].markdown("**ASIN**")
+        th_cols[3].markdown("**Фото**")
+        th_cols[4].markdown("**Маркетплейс**")
+        th_cols[5].markdown("**Рейтинг**")
+        th_cols[6].markdown("**Отзывы**")
+        th_cols[7].markdown("**1–2★ %**")
+        th_cols[8].markdown("**Запас**")
+        th_cols[9].markdown("**Комментарий**")
+        th_cols[10].markdown("**Дата сбора**")
+
+        st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
+
+        # Строки таблицы
+        for item in records:
+            r_cols = st.columns([0.6, 1.2, 1.2, 1.2, 1.8, 1.0, 1.2, 1.0, 1.2, 1.5, 1.5])
+            
+            # Флаг
+            r_cols[0].markdown(f"### {item['Флаг']}")
+            
+            # Действия (Кнопки Собрать и Удалить)
+            act_c1, act_c2 = r_cols[1].columns(2)
+            if act_c1.button("🔄", key=f"tbl_run_{item['raw_asin']}", help="Собрать сейчас"):
+                ensure_schema()
+                run_id = start_run(1)
+                res = check_asin(item['raw_asin'])
+                save_to_db(res)
+                finish_run(run_id, 1 if res.get("source") in ("BE", "NL") else 0, "done")
+                st.rerun()
+                
+            if act_c2.button("🗑️", key=f"tbl_del_{item['raw_asin']}", help="Удалить из базы"):
+                delete_asin_completely(item['raw_asin'])
+                st.rerun()
+
+            # ASIN ссылка
+            r_cols[2].markdown(f"[{item['raw_asin']}]({item['ASIN']})")
+            
+            # Фото
+            if item["Фото"]:
+                try:
+                    r_cols[3].image(item["Фото"], width=45)
+                except Exception:
+                    r_cols[3].caption("—")
+            else:
+                r_cols[3].caption("—")
+
+            # Источник, Рейтинг, Отзывы, % и т.д.
+            r_cols[4].write(item['Маркетплейс (источник)'])
+            rating_val = f"{item['Рейтинг']:.2f}" if isinstance(item['Рейтинг'], float) else "—"
+            r_cols[5].write(rating_val)
+            r_cols[6].write(str(item['Кол-во рейтингов']))
+            r_cols[7].write(item['1–2★ %'])
+            r_cols[8].write(item['Запас до 4.0'])
+            r_cols[9].write(item['Комментарий'])
+            r_cols[10].write(item['Дата сбора'])
 
     # --- ОТОБРАЖЕНИЕ: КАРТОЧКИ ---
     else:
-        records = filtered_df.to_dict(orient="records")
         grid_cols = st.columns(3)
         for idx, item in enumerate(records):
             col = grid_cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    head_col1, head_col2 = st.columns([3, 1])
+                    head_col1, head_col2, head_col3 = st.columns([3, 1, 1])
                     head_col1.markdown(f"### {item['Флаг']} [{item['raw_asin']}]({item['ASIN']})")
-                    if head_col2.button("🗑️", key=f"del_card_{item['raw_asin']}"):
+                    
+                    if head_col2.button("🔄", key=f"card_run_{item['raw_asin']}", help="Собрать сейчас"):
+                        ensure_schema()
+                        run_id = start_run(1)
+                        res = check_asin(item['raw_asin'])
+                        save_to_db(res)
+                        finish_run(run_id, 1 if res.get("source") in ("BE", "NL") else 0, "done")
+                        st.rerun()
+
+                    if head_col3.button("🗑️", key=f"card_del_{item['raw_asin']}", help="Удалить из базы"):
                         delete_asin_completely(item['raw_asin'])
                         st.rerun()
 
