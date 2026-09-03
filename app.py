@@ -113,31 +113,60 @@ else:
 # ==================== УПРАВЛЕНИЕ СПИСКОМ tracked_asins ====================
 tracked = get_tracked_asins()
 
+# Вспомогательный запрос для получения последней известной страны каждого ASIN из БД
+def get_asin_markets_map():
+    if not DATABASE_URL:
+        return {}
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        df_src = pd.read_sql(
+            "SELECT DISTINCT ON (asin) asin, source FROM asin_metrics ORDER BY asin, created_at DESC", 
+            conn
+        )
+        conn.close()
+        return dict(zip(df_src["asin"], df_src["source"]))
+    except Exception:
+        return {}
+
+asin_market_map = get_asin_markets_map()
+
 with st.expander("Управление списком ASIN (Редактирование текущего списка)"):
     st.caption(f"Сейчас в базе отслеживается позиций: {len(tracked)}")
     
-    col_help, col_def_market = st.columns([3, 1])
+    col_help, col_filter_market = st.columns([3, 1])
     with col_help:
         st.markdown(
             "💡 **Поддерживаемые форматы и страны:**\n"
-            "* `B09NWGDK3S` — обычный ASIN (используется дефолтный маркет)\n"
+            "* `B09NWGDK3S` — обычный ASIN\n"
             "* `B0H6YBDKXJ:US` — США (amazon.com)\n"
             "* `B09NWGDK3S:DE` — Германия (amazon.de)\n"
             "* `B09NWGDK3S:BE` — Бельгия (amazon.com.be)\n"
-            "* `B09NWGDK3S:NL` — Нидерланды (amazon.nl)\n"
             "* Прямые ссылки: `https://www.amazon.com/dp/B0H6YBDKXJ`"
         )
-    with col_def_market:
-        default_market_select = st.selectbox("Маркет по умолчанию", options=["BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"], index=0)
+    with col_filter_market:
+        market_filter = st.selectbox(
+            "Фильтр списка по стране", 
+            options=["Все страны", "BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"], 
+            index=0
+        )
 
-    current_tracked_text = ", ".join(tracked)
+    # Формируем список с учетом фильтра страны
+    if market_filter != "Все страны":
+        display_tracked = [
+            a for a in tracked 
+            if asin_market_map.get(a) == market_filter or a.endswith(f":{market_filter}")
+        ]
+    else:
+        display_tracked = tracked
+
+    current_tracked_text = ", ".join(display_tracked)
     
     edited_asins_input = st.text_area(
-        "Текущий список ASIN или ссылок (редактируйте прямо здесь):",
+        f"Текущие ASIN ({market_filter}):",
         value=current_tracked_text,
         height=120,
         key="edit_tracked_list",
-        placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.de/dp/B09NWGDK3S...",
+        placeholder="B09NWGDK3S, B0H6YBDKXJ:US...",
     )
     
     col_btn1, col_btn2 = st.columns([1, 1])
@@ -152,16 +181,25 @@ with st.expander("Управление списком ASIN (Редактиров
         try:
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM tracked_asins;")
-                for asin_code in clean_new_list:
-                    if len(asin_code) == 10:
-                        cur.execute(
-                            "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;",
-                            (asin_code,),
-                        )
+                if market_filter == "Все страны":
+                    cur.execute("DELETE FROM tracked_asins;")
+                    for asin_code in clean_new_list:
+                        if len(asin_code) == 10:
+                            cur.execute(
+                                "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;",
+                                (asin_code,),
+                            )
+                else:
+                    # При фильтрации обновляем только позиции выбранной страны
+                    for asin_code in clean_new_list:
+                        if len(asin_code) == 10:
+                            cur.execute(
+                                "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;",
+                                (asin_code,),
+                            )
             conn.commit()
             conn.close()
-            st.success(f"Список полностью обновлён! Сохранено позиций: {len(clean_new_list)}")
+            st.success(f"Список обновлён!")
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка сохранения списка: {e}")
@@ -183,7 +221,6 @@ st.markdown("### Сбор данных")
 col_a, col_b = st.columns(2)
 
 def run_full_collection():
-    """Выполнение сбора по всем ASIN."""
     ensure_schema()
     run_id = start_run(len(tracked))
     progress = st.progress(0.0, text=f"0/{len(tracked)}")
@@ -197,7 +234,7 @@ def run_full_collection():
             log_box.code("\n".join(_lines[-15:]))
 
         try:
-            res = check_asin(asin, default_market=default_market_select, log=_log)
+            res = check_asin(asin, log=_log)
             save_to_db(res)
             if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                 ok += 1
@@ -246,7 +283,7 @@ with col_b:
                     log_box.code("\n".join(_lines[-15:]))
 
                 try:
-                    res = check_asin(item, default_market=default_market_select, log=_log)
+                    res = check_asin(item, log=_log)
                     save_to_db(res)
                     if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                         ok += 1
@@ -256,7 +293,6 @@ with col_b:
             finish_run(run_id, ok, "done")
             st.success(f"Проверка завершена: {ok}/{len(raw_list)} успешно.")
             st.rerun()
-
 
 def get_full_history():
     if not DATABASE_URL:
@@ -283,7 +319,6 @@ def get_full_history():
         return df
     except Exception:
         return pd.DataFrame()
-
 
 full_df = get_full_history()
 
@@ -404,7 +439,7 @@ else:
         "Комментарий",
     ]
 
-    # ==================== ЕДИНАЯ ВЕРХНЯЯ ПАНЕЛЬ ФИЛЬТРОВ И ВРЕМЕНИ ====================
+    # ==================== ПАНЕЛЬ ФИЛЬТРОВ И ВРЕМЕНИ ====================
     top_col1, top_col2, top_col3, top_col4, top_col5 = st.columns([2, 2, 2, 1.5, 1])
 
     all_asins = calc_df["raw_asin"].dropna().unique().tolist()
@@ -444,7 +479,6 @@ else:
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         auto_timer_active = st.checkbox("Автосбор", value=False)
 
-    # Проверка таймера
     if auto_timer_active and tracked:
         now_in_tz = datetime.datetime.now(ZoneInfo(selected_tz))
         scheduled_in_tz = datetime.datetime.combine(now_in_tz.date(), target_daily_time, tzinfo=ZoneInfo(selected_tz))
@@ -556,7 +590,7 @@ else:
             run_id = start_run(len(selected_asins))
             ok = 0
             for asin in selected_asins:
-                res = check_asin(asin, default_market=default_market_select)
+                res = check_asin(asin)
                 save_to_db(res)
                 if res.get("source") in ("BE", "NL", "US", "DE", "UK", "FR", "IT", "ES"):
                     ok += 1
@@ -619,7 +653,7 @@ else:
 
                     st.caption(f"Обновлено: {item['Время сбора']}")
 
-    # ==================== ОБЩАЯ АНАЛИТИКА И КРУГОВАЯ ДИАГРАММА ====================
+    # ==================== ОБЩАЯ АНАЛИТИКА ====================
     st.markdown("---")
     st.markdown("### 📊 Общая аналитика портфеля")
 
