@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """Rating Radar: каскад BE->NL->reviews + авто-определение страны из ссылок (US, DE, UK, BE, NL и др.)."""
 
 import json
