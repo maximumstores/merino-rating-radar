@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import psycopg2
 from sklearn.linear_model import LinearRegression
@@ -28,7 +29,7 @@ load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 st.set_page_config(
-    page_title="Rating Radar — Executive Dashboard & Predictive Analytics",
+    page_title="Rating Radar — Executive Analytics",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -40,7 +41,7 @@ st.markdown(
         background-color: #fbfbfd;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
-    h1 {
+    h1, h3 {
         font-weight: 600 !important;
         letter-spacing: -0.02em !important;
         color: #1d1d1f !important;
@@ -58,7 +59,7 @@ st.markdown(
 clean_db_trash()
 
 st.title("Rating Radar")
-st.caption("Мониторинг качества листингов и ML-прогнозирование динамики")
+st.caption("Мониторинг качества листингов и аналитика портфеля")
 
 TIMEZONES = {
     "Киев (EEST / EET)": "Europe/Kyiv",
@@ -96,27 +97,63 @@ if last_run is not None:
 else:
     st.warning("История сборов пуста")
 
+# ==================== БЛОК УПРАВЛЕНИЯ СПИСКОМ tracked_asins ====================
 tracked = get_tracked_asins()
 
-with st.expander("Управление списком ASIN"):
-    st.caption(f"Отслеживается позиций: {len(tracked)}")
-    new_asins_input = st.text_area(
-        "Ввод ASIN (по одному на строку или списком)",
-        height=80,
-        key="add_tracked",
+with st.expander("Управление списком ASIN (Редактирование текущего списка)"):
+    st.caption(f"Сейчас в базе отслеживается позиций: {len(tracked)}")
+    
+    # Загружаем текущие ASIN в поле в формате через запятую
+    current_tracked_text = ", ".join(tracked)
+    
+    edited_asins_input = st.text_area(
+        "Текущий список ASIN для планового сбора (редактируйте прямо здесь):",
+        value=current_tracked_text,
+        height=120,
+        key="edit_tracked_list",
         placeholder="B09NWGDK3S, B0DDV2DBZH...",
     )
-    if st.button("Сохранить в базу"):
+    
+    col_btn1, col_btn2 = st.columns([1, 1])
+    
+    if col_btn1.button("💾 Пересохранить весь список"):
         raw_list = [
-            a.strip() for a in re.split(r"[\s,]+", new_asins_input) if a.strip()
+            a.strip() for a in re.split(r"[\s,]+", edited_asins_input) if a.strip()
         ]
-        new_asins = [extract_asin(a) for a in raw_list if extract_asin(a)]
-        if new_asins:
-            ensure_schema()
-            add_tracked_asins(new_asins)
-            st.success(f"Успешно добавлено позиций: {len(new_asins)}")
+        clean_new_list = [extract_asin(a) for a in raw_list if extract_asin(a)]
+        
+        # Перезаписываем список в БД
+        ensure_schema()
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tracked_asins;")
+                for asin_code in clean_new_list:
+                    if len(asin_code) == 10:
+                        cur.execute(
+                            "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;",
+                            (asin_code,),
+                        )
+            conn.commit()
+            conn.close()
+            st.success(f"Список полностью обновлён! Сохранено позиций: {len(clean_new_list)}")
             st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка сохранения списка: {e}")
 
+    if col_btn2.button("🗑️ Очистить весь список"):
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tracked_asins;")
+            conn.commit()
+            conn.close()
+            st.success("Список отслеживания полностью очищен!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка очистки: {e}")
+
+# ==================== БЛОК СБОРА ДАННЫХ ====================
 st.markdown("### Сбор данных")
 col_a, col_b = st.columns(2)
 
@@ -195,7 +232,6 @@ with col_b:
 
 
 def get_full_history():
-    """Загружает полную историю всех проверок для графиков и ML."""
     if not DATABASE_URL:
         return pd.DataFrame()
     try:
@@ -229,8 +265,9 @@ st.markdown("---")
 if full_df.empty:
     st.warning("В базе данных нет сохраненных метрик")
 else:
-    # Самые свежие записи по каждому ASIN для сводной таблицы
-    latest_df = full_df.sort_values("created_at").groupby("asin").last().reset_index()
+    latest_df = (
+        full_df.sort_values("created_at").groupby("asin").last().reset_index()
+    )
     latest_df = latest_df.sort_values("created_at", ascending=False)
 
     top_col1, top_col2, top_col3, top_col4 = st.columns([2, 2, 2, 1])
@@ -383,7 +420,7 @@ else:
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- ТАБЛИЧНЫЙ ВИД ---
+    # --- ТАБЛИЦА ---
     if view_mode == "Таблица":
         display_tbl = filtered_df.drop(columns=["raw_asin"])
 
@@ -391,14 +428,10 @@ else:
             display_tbl,
             column_config={
                 "Выбор": st.column_config.CheckboxColumn(
-                    "Выбор",
-                    default=False,
-                    width="small",
+                    "Выбор", default=False, width="small"
                 ),
                 "Статус": st.column_config.TextColumn(
-                    "Статус",
-                    width="small",
-                    disabled=True,
+                    "Статус", width="small", disabled=True
                 ),
                 "Время сбора": st.column_config.TextColumn(
                     f"Время сбора ({selected_tz_label.split(' ')[0]})",
@@ -411,18 +444,12 @@ else:
                     width="medium",
                     disabled=True,
                 ),
-                "Фото": st.column_config.ImageColumn(
-                    "Фото",
-                    width="small",
-                ),
+                "Фото": st.column_config.ImageColumn("Фото", width="small"),
                 "Источник": st.column_config.TextColumn(
                     "Источник", width="small", disabled=True
                 ),
                 "Рейтинг": st.column_config.NumberColumn(
-                    "Рейтинг",
-                    format="%.2f",
-                    width="small",
-                    disabled=True,
+                    "Рейтинг", format="%.2f", width="small", disabled=True
                 ),
                 "Отзывы": st.column_config.NumberColumn(
                     "Отзывы", width="small", disabled=True
@@ -496,7 +523,7 @@ else:
             st.success(f"Удалено позиций: {len(selected_asins)}")
             st.rerun()
 
-    # --- ВИД КАРТОЧЕК ---
+    # --- КАРТОЧКИ ---
     else:
         records = filtered_df.to_dict(orient="records")
         grid_cols = st.columns(3)
@@ -541,105 +568,186 @@ else:
 
                     st.caption(f"Обновлено: {item['Время сбора']}")
 
-    # ==================== БЛОК ПРОГНОЗИРОВАНИЯ И ГРАФИКОВ (ML) ====================
+    # ==================== ОБЩАЯ АНАЛИТИКА И КРУГОВАЯ ДИАГРАММА ====================
     st.markdown("---")
-    st.markdown("### 📈 Аналитика тренда и ML-прогнозирование")
+    st.markdown("### 📊 Общая аналитика портфеля")
+
+    chart_c1, chart_c2 = st.columns([1, 2])
+
+    with chart_c1:
+        st.markdown("**Распределение по рейтингу**")
+
+        def categorize_rating(r):
+            if pd.isna(r) or r is None:
+                return "Нет данных"
+            elif r >= 4.5:
+                return "Отличные (4.5–5.0★)"
+            elif 4.3 <= r < 4.5:
+                return "Внимание (4.3–4.4★)"
+            else:
+                return "Зона риска (<4.3★)"
+
+        calc_df["Категория"] = calc_df["Рейтинг"].apply(categorize_rating)
+        dist_df = (
+            calc_df["Категория"].value_counts().reset_index()
+        )
+        dist_df.columns = ["Категория", "Количество"]
+
+        color_map = {
+            "Отличные (4.5–5.0★)": "#137333",
+            "Внимание (4.3–4.4★)": "#b06000",
+            "Зона риска (<4.3★)": "#c5221f",
+            "Нет данных": "#5f6368",
+        }
+
+        fig_pie = px.pie(
+            dist_df,
+            values="Количество",
+            names="Категория",
+            hole=0.4,
+            color="Категория",
+            color_discrete_map=color_map,
+        )
+        fig_pie.update_traces(textinfo="value+percent")
+        fig_pie.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=300,
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.1),
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with chart_c2:
+        st.markdown("**Сравнительная динамика рейтинга (Все ASIN)**")
+
+        full_df_tz = full_df.copy()
+        full_df_tz["created_at"] = pd.to_datetime(
+            full_df_tz["created_at"]
+        ).dt.tz_convert(ZoneInfo(selected_tz))
+
+        fig_all = px.line(
+            full_df_tz,
+            x="created_at",
+            y="rating",
+            color="asin",
+            markers=True,
+            labels={
+                "created_at": "Дата сбора",
+                "rating": "Рейтинг",
+                "asin": "ASIN",
+            },
+        )
+        fig_all.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=300,
+            yaxis=dict(range=[1.0, 5.1]),
+            template="plotly_white",
+            legend=dict(orientation="h", y=-0.2),
+        )
+        st.plotly_chart(fig_all, use_container_width=True)
+
+    # ==================== ИНДИВИДУАЛЬНЫЙ ML-ПРОГНОЗ ====================
+    st.markdown("---")
+    st.markdown("### 📈 Детальный ML-прогноз для выбранного ASIN")
 
     target_forecast_asin = st.selectbox(
-        "Выберите ASIN для детального разбора и прогнозирования",
+        "Выберите ASIN для подробного прогнозирования",
         options=all_asins,
     )
 
     if target_forecast_asin:
-        # Данные по выбранному ASIN
         asin_history = full_df[full_df["asin"] == target_forecast_asin].copy()
         asin_history["created_at"] = pd.to_datetime(asin_history["created_at"])
         asin_history = asin_history.sort_values("created_at")
 
         if len(asin_history) < 2:
             st.info(
-                f"Недостаточно исторических точек для ASIN {target_forecast_asin} (требуется минимум 2 замера). "
-                "Прогноз станет доступен после следующих сборов."
+                f"Для ASIN {target_forecast_asin} собрано менее 2 замеров. "
+                "Прогноз будет рассчитан автоматически после следующего сбора данных."
             )
         else:
-            # Преобразуем дату в числовое значение (секунды) для Линейной Регрессии
-            asin_history["ts"] = asin_history["created_at"].astype(np.int64) // 10**9
-            
+            asin_history["ts"] = (
+                asin_history["created_at"].astype(np.int64) // 10**9
+            )
             X = asin_history[["ts"]].values
-            
-            # Прогноз по Рейтингу
+
             y_rating = asin_history["rating"].fillna(0.0).values
-            model_rating = LinearRegression()
-            model_rating.fit(X, y_rating)
+            model_rating = LinearRegression().fit(X, y_rating)
 
-            # Прогноз по Отзывам
             y_reviews = asin_history["review_count"].fillna(0).values
-            model_reviews = LinearRegression()
-            model_reviews.fit(X, y_reviews)
+            model_reviews = LinearRegression().fit(X, y_reviews)
 
-            # Генерируем точки будущего (+7, +14, +30 дней)
             last_ts = X[-1][0]
             future_days = [7, 14, 30]
             future_ts = np.array([[last_ts + d * 86400] for d in future_days])
-            
+
             pred_ratings = model_rating.predict(future_ts)
             pred_reviews = model_reviews.predict(future_ts)
 
-            # Метрики
             c1, c2, c3, c4 = st.columns(4)
             cur_r = y_rating[-1]
             cur_cnt = y_reviews[-1]
-            
+
             r_diff = cur_r - y_rating[0]
             cnt_diff = cur_cnt - y_reviews[0]
 
-            c1.metric("Текущий рейтинг", f"{cur_r:.2f}", delta=f"{r_diff:+.2f}" if abs(r_diff) > 0.01 else None)
-            c2.metric("Всего отзывов", f"{int(cur_cnt)}", delta=f"{cnt_diff:+d}" if cnt_diff != 0 else None)
-            c3.metric("Прогноз рейтинга (+30д)", f"{max(1.0, min(5.0, pred_ratings[-1])):.2f}")
-            c4.metric("Прогноз отзывов (+30д)", f"{int(max(cur_cnt, pred_reviews[-1]))}")
+            c1.metric(
+                "Текущий рейтинг",
+                f"{cur_r:.2f}",
+                delta=f"{r_diff:+.2f}" if abs(r_diff) > 0.01 else None,
+            )
+            c2.metric(
+                "Всего отзывов",
+                f"{int(cur_cnt)}",
+                delta=f"{cnt_diff:+d}" if cnt_diff != 0 else None,
+            )
+            c3.metric(
+                "Прогноз (+30 дней)",
+                f"{max(1.0, min(5.0, pred_ratings[-1])):.2f}",
+            )
+            c4.metric(
+                "Прогноз отзывов (+30 дней)",
+                f"{int(max(cur_cnt, pred_reviews[-1]))}",
+            )
 
-            # Построение графика в Plotly
-            fig = go.Figure()
+            fig_single = go.Figure()
 
-            # Исторические данные (Сплошная линия)
-            fig.add_trace(
+            fig_single.add_trace(
                 go.Scatter(
                     x=asin_history["created_at"],
                     y=asin_history["rating"],
                     mode="lines+markers",
-                    name="История рейтинга",
+                    name="История",
                     line=dict(color="#0071e3", width=3),
-                    marker=dict(size=6),
                 )
             )
 
-            # Будущие даты
             last_date = asin_history["created_at"].iloc[-1]
-            future_dates = [last_date + pd.Timedelta(days=d) for d in future_days]
-            
-            # Прогнозная линия (Пунктир)
-            fig.add_trace(
+            future_dates = [
+                last_date + pd.Timedelta(days=d) for d in future_days
+            ]
+
+            fig_single.add_trace(
                 go.Scatter(
                     x=[last_date] + future_dates,
                     y=[cur_r] + [max(1.0, min(5.0, r)) for r in pred_ratings],
                     mode="lines+markers",
-                    name="ML-Прогноз (Линейная регрессия)",
+                    name="Прогноз (ML)",
                     line=dict(color="#f57f17", width=2, dash="dash"),
-                    marker=dict(size=6),
                 )
             )
 
-            fig.update_layout(
+            fig_single.update_layout(
                 title=dict(
-                    text=f"Динамика и Прогноз рейтинга для ASIN {target_forecast_asin}",
-                    font=dict(size=16),
+                    text=f"Прогноз динамики рейтинга: ASIN {target_forecast_asin}",
+                    font=dict(size=15),
                 ),
                 xaxis_title="Дата",
-                yaxis_title="Рейтинг (★)",
+                yaxis_title="Рейтинг",
                 yaxis=dict(range=[1.0, 5.1]),
                 template="plotly_white",
-                height=400,
-                margin=dict(l=20, r=20, t=50, b=20),
+                height=350,
+                margin=dict(l=20, r=20, t=40, b=20),
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_single, use_container_width=True)
