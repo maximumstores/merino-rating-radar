@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Общая логика Rating Radar: каскад BE->NL->reviews, работа с БД.
-"""
+"""Rating Radar: каскад BE->NL->reviews, работа с БД."""
 
 import json
 import os
@@ -34,6 +32,7 @@ CREATE TABLE IF NOT EXISTS asin_metrics (
     rating NUMERIC(3,2),
     review_count INTEGER,
     histogram_json JSONB,
+    image_url TEXT,
     note TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -55,15 +54,15 @@ CREATE TABLE IF NOT EXISTS tracked_asins (
 
 
 def extract_asin(text: str) -> str:
-    """Извлекает чистый ASIN из текста или ссылки Amazon."""
-    text = text.strip().upper()
+    """Извлекает чистый 10-значный ASIN из текста или ссылки."""
+    text = str(text).strip().upper()
     match = re.search(r"(B[0-9A-Z]{9})", text)
     return match.group(1) if match else text
 
 
 def get_db_connection():
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL не найден в файле .env")
+        raise ValueError("DATABASE_URL не найден в .env")
     return psycopg2.connect(DATABASE_URL)
 
 
@@ -71,6 +70,36 @@ def ensure_schema():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
+            cur.execute(
+                "ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS image_url TEXT;"
+            )
+        conn.commit()
+
+
+def clean_db_trash():
+    """Удаляет из базы старый мусор со ссылками вместо ASIN."""
+    try:
+        ensure_schema()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM asin_metrics WHERE asin LIKE 'HTTP%' OR LENGTH(asin) > 10;"
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def delete_asin_completely(asin: str):
+    """Полностью удаляет ASIN из отслеживания и его метрики из базы."""
+    clean = extract_asin(asin)
+    if not clean:
+        return
+    ensure_schema()
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tracked_asins WHERE asin = %s", (clean,))
+            cur.execute("DELETE FROM asin_metrics WHERE asin = %s", (clean,))
         conn.commit()
 
 
@@ -88,7 +117,7 @@ def add_tracked_asins(asins: list[str]):
         with conn.cursor() as cur:
             for raw in asins:
                 clean_asin = extract_asin(raw)
-                if clean_asin:
+                if clean_asin and len(clean_asin) == 10:
                     cur.execute(
                         "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
                         (clean_asin,),
@@ -107,19 +136,24 @@ def remove_tracked_asin(asin: str):
 
 
 def save_to_db(data: dict):
+    clean_asin = extract_asin(data.get("asin", ""))
+    if not clean_asin or len(clean_asin) != 10:
+        return
+
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO asin_metrics (asin, source, rating, review_count, histogram_json, note)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO asin_metrics (asin, source, rating, review_count, histogram_json, image_url, note)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    data.get("asin"),
+                    clean_asin,
                     data.get("source"),
                     data.get("rating"),
                     data.get("count"),
                     json.dumps(data.get("hist", {})),
+                    data.get("image_url"),
                     data.get("note", ""),
                 ),
             )
@@ -191,7 +225,13 @@ def in_variation(soup: BeautifulSoup) -> bool:
 
 
 def parse_rating(soup: BeautifulSoup, html: str) -> dict:
-    out = {"rating": None, "count": None, "hist": {}}
+    out = {"rating": None, "count": None, "hist": {}, "image_url": None}
+
+    img = soup.select_one(
+        "#landingImage, #imgBlkFront, #main-image"
+    ) or soup.select_one("img[data-old-hires]")
+    if img:
+        out["image_url"] = img.get("data-old-hires") or img.get("src")
 
     m = re.search(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5", html)
     if m:
@@ -236,7 +276,11 @@ def parse_reviews_page(asin: str) -> dict:
     url = f"https://www.amazon.com.be/product-reviews/{asin}?language=en_GB&reviewerType=all_reviews"
     html = fetch(url)
     if not html:
-        return {"rating": None, "count": None}
+        return {"rating": None, "count": None, "image_url": None}
+    soup = BeautifulSoup(html, "html.parser")
+    img = soup.select_one("img[data-hook='product-image'], #cm_cr-product_preview img")
+    image_url = img.get("src") if img else None
+
     stars = [
         float(m.group(1).replace(",", "."))
         for m in re.finditer(
@@ -245,8 +289,12 @@ def parse_reviews_page(asin: str) -> dict:
     ]
     stars = stars[1:] if len(stars) > 1 else []
     if not stars:
-        return {"rating": None, "count": None}
-    return {"rating": round(sum(stars) / len(stars), 2), "count": len(stars)}
+        return {"rating": None, "count": None, "image_url": image_url}
+    return {
+        "rating": round(sum(stars) / len(stars), 2),
+        "count": len(stars),
+        "image_url": image_url,
+    }
 
 
 def check_asin(raw_asin: str, log=print) -> dict:
@@ -285,6 +333,7 @@ def check_asin(raw_asin: str, log=print) -> dict:
             "rating": rv["rating"],
             "count": rv["count"],
             "hist": {},
+            "image_url": rv["image_url"],
             "note": "только письменные ревью, данные неполные",
         }
     return {
@@ -293,4 +342,5 @@ def check_asin(raw_asin: str, log=print) -> dict:
         "rating": None,
         "count": None,
         "hist": {},
-    } 
+        "image_url": None,
+    }
