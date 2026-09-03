@@ -30,30 +30,25 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Стилизация интерфейса (Apple/SaaS minimal)
+# Минималистичная стилизация под SaaS / Google Sheets
 st.markdown(
     """
 <style>
     .stApp {
         background-color: #fbfbfd;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
     h1 {
         font-weight: 600 !important;
         letter-spacing: -0.02em !important;
         color: #1d1d1f !important;
     }
-    h3 {
-        font-weight: 500 !important;
-        letter-spacing: -0.01em !important;
-        color: #1d1d1f !important;
-    }
     .badge {
         display: inline-block;
-        padding: 3px 8px;
-        border-radius: 6px;
-        font-size: 12px;
-        font-weight: 500;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
         text-align: center;
     }
     .badge-success { background-color: #e6f4ea; color: #137333; }
@@ -63,21 +58,8 @@ st.markdown(
 
     div[data-testid="stForm"] {
         border: 1px solid #e5e5ea !important;
-        border-radius: 12px !important;
-        background-color: #ffffff !important;
-    }
-    .stButton>button {
         border-radius: 8px !important;
-        border: 1px solid #d2d2d7 !important;
         background-color: #ffffff !important;
-        color: #1d1d1f !important;
-        font-weight: 400 !important;
-        transition: all 0.2s ease !important;
-    }
-    .stButton>button:hover {
-        border-color: #0071e3 !important;
-        color: #0071e3 !important;
-        background-color: #f5f5f7 !important;
     }
 </style>
 """,
@@ -254,7 +236,6 @@ if df.empty:
 else:
 
     def process_row(row):
-        # Безопасное приведение рейтинга и отзывов к float/int
         try:
             rating = float(row["rating"]) if pd.notnull(row["rating"]) else None
         except Exception:
@@ -282,7 +263,6 @@ else:
             except Exception:
                 pass
 
-        # Безопасный расчет Запаса до 4.0
         margin_str = "—"
         if rating is not None and cnt is not None and rating > 4.0:
             try:
@@ -291,16 +271,14 @@ else:
             except Exception:
                 margin_str = "—"
 
-        # Определение статуса (Бейджа)
-        badge_html = '<span class="badge badge-success">ОК</span>'
+        status_text = "ОК"
         if source == "none" or rating is None:
-            badge_html = '<span class="badge badge-neutral">Нет данных</span>'
+            status_text = "Нет данных"
         elif rating <= 4.2:
-            badge_html = '<span class="badge badge-danger">Риск</span>'
+            status_text = "Риск"
         elif rating == 4.3 or bad_pct > 15:
-            badge_html = '<span class="badge badge-warning">Внимание</span>'
+            status_text = "Внимание"
 
-        # Тренд
         trend_symbol = "—"
         if bad_pct > 20 or (rating is not None and rating < 4.2):
             trend_symbol = "↓"
@@ -326,7 +304,7 @@ else:
 
         return pd.Series([
             asin,
-            badge_html,
+            status_text,
             url,
             img_url,
             source,
@@ -386,124 +364,76 @@ else:
         & calc_df["Источник"].isin(sel_sources)
     ]
 
-    records = filtered_df.to_dict(orient="records")
+    # Быстрые действия над выбранным ASIN
+    with st.expander("Действия над позицией (Обновить / Удалить)"):
+        act_col1, act_col2, act_col3 = st.columns([2, 1, 1])
+        target_asin = act_col1.selectbox("Выберите ASIN", options=[""] + filtered_df["raw_asin"].tolist())
+        
+        if act_col2.button("↻ Обновить", use_container_width=True) and target_asin:
+            ensure_schema()
+            run_id = start_run(1)
+            res = check_asin(target_asin)
+            save_to_db(res)
+            finish_run(run_id, 1 if res.get("source") in ("BE", "NL") else 0, "done")
+            st.success(f"Обновлено: {target_asin}")
+            st.rerun()
+
+        if act_col3.button("✕ Удалить", use_container_width=True) and target_asin:
+            delete_asin_completely(target_asin)
+            st.success(f"Удалено: {target_asin}")
+            st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    def get_rating_html(val):
-        if not isinstance(val, (int, float)) or pd.isna(val):
-            return "—"
-        val_str = f"{val:.2f}"
-        if val >= 4.4:
-            color = "#137333"
-        elif 4.25 <= val <= 4.35:
-            color = "#b06000"
-        else:
-            color = "#c5221f"
-        return f"<span style='color: {color}; font-weight: 600;'>{val_str}</span>"
-
-    # --- ТАБЛИЧНЫЙ ВИД ---
+    # --- ТАБЛИЧНЫЙ ВИД (Google Sheets Style) ---
     if view_mode == "Таблица":
-        th_cols = st.columns(
-            [0.8, 0.8, 1.2, 0.8, 1.0, 1.0, 0.9, 0.8, 0.6, 1.1, 1.3, 1.2]
+        display_tbl = filtered_df.drop(columns=["raw_asin"])
+        
+        st.dataframe(
+            display_tbl,
+            column_config={
+                "Статус": st.column_config.TextColumn(
+                    "Статус",
+                    width="small",
+                ),
+                "ASIN": st.column_config.LinkColumn(
+                    "ASIN",
+                    display_text=r"https://www\.amazon\.com\.be/dp/(B[0-9A-Z]{9})\?language=en_GB",
+                    width="medium",
+                ),
+                "Фото": st.column_config.ImageColumn(
+                    "Фото",
+                    width="small",
+                ),
+                "Источник": st.column_config.TextColumn("Источник", width="small"),
+                "Рейтинг": st.column_config.NumberColumn(
+                    "Рейтинг",
+                    format="%.2f",
+                    width="small",
+                ),
+                "Отзывы": st.column_config.NumberColumn("Отзывы", width="small"),
+                "1–2★ %": st.column_config.TextColumn("1–2★ %", width="small"),
+                "Тренд": st.column_config.TextColumn("Тренд", width="small"),
+                "Запас (до 4.0)": st.column_config.TextColumn("Запас", width="medium"),
+                "BSR": st.column_config.TextColumn("BSR", width="medium"),
+                "Комментарий": st.column_config.TextColumn("Комментарий", width="large"),
+                "Обновлено": st.column_config.TextColumn("Обновлено", width="medium"),
+            },
+            use_container_width=True,
+            hide_index=True,
         )
-        th_cols[0].markdown("**Статус**")
-        th_cols[1].markdown("**Действия**")
-        th_cols[2].markdown("**ASIN**")
-        th_cols[3].markdown("**Фото**")
-        th_cols[4].markdown("**Источник**")
-        th_cols[5].markdown("**Рейтинг**")
-        th_cols[6].markdown("**Отзывы**")
-        th_cols[7].markdown("**1–2★ %**")
-        th_cols[8].markdown("**Тренд**")
-        th_cols[9].markdown("**Запас**")
-        th_cols[10].markdown("**BSR**")
-        th_cols[11].markdown("**Обновлено**")
-
-        st.markdown(
-            "<hr style='margin: 8px 0 16px 0; border: none; border-top: 1px solid #e5e5ea;'>",
-            unsafe_allow_html=True,
-        )
-
-        for item in records:
-            r_cols = st.columns(
-                [0.8, 0.8, 1.2, 0.8, 1.0, 1.0, 0.9, 0.8, 0.6, 1.1, 1.3, 1.2]
-            )
-
-            r_cols[0].markdown(item["Статус"], unsafe_allow_html=True)
-
-            act_c1, act_c2 = r_cols[1].columns(2)
-            if act_c1.button(
-                "↻", key=f"tbl_run_{item['raw_asin']}", help="Обновить"
-            ):
-                ensure_schema()
-                run_id = start_run(1)
-                res = check_asin(item["raw_asin"])
-                save_to_db(res)
-                finish_run(
-                    run_id, 1 if res.get("source") in ("BE", "NL") else 0, "done"
-                )
-                st.rerun()
-
-            if act_c2.button(
-                "✕", key=f"tbl_del_{item['raw_asin']}", help="Удалить"
-            ):
-                delete_asin_completely(item["raw_asin"])
-                st.rerun()
-
-            r_cols[2].markdown(f"[{item['raw_asin']}]({item['ASIN']})")
-
-            if item["Фото"]:
-                try:
-                    r_cols[3].image(item["Фото"], width=36)
-                except Exception:
-                    r_cols[3].caption("—")
-            else:
-                r_cols[3].caption("—")
-
-            r_cols[4].write(item["Источник"])
-            r_cols[5].markdown(
-                get_rating_html(item["Рейтинг"]), unsafe_allow_html=True
-            )
-            r_cols[6].write(str(item["Отзывы"]) if pd.notnull(item["Отзывы"]) else "—")
-            r_cols[7].write(item["1–2★ %"])
-            r_cols[8].write(item["Тренд"])
-            r_cols[9].write(item["Запас (до 4.0)"])
-            r_cols[10].write(str(item["BSR"]))
-            r_cols[11].write(item["Обновлено"])
 
     # --- ВИД КАРТОЧЕК ---
     else:
+        records = filtered_df.to_dict(orient="records")
         grid_cols = st.columns(3)
         for idx, item in enumerate(records):
             col = grid_cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    head_col1, head_col2, head_col3 = st.columns([3, 1, 1])
-                    head_col1.markdown(
-                        f"{item['Статус']} &nbsp; **[{item['raw_asin']}]({item['ASIN']})**",
-                        unsafe_allow_html=True,
+                    st.markdown(
+                        f"**[{item['raw_asin']}]({item['ASIN']})** &nbsp; • &nbsp; `{item['Статус']}`"
                     )
-
-                    if head_col2.button(
-                        "↻", key=f"card_run_{item['raw_asin']}", help="Обновить"
-                    ):
-                        ensure_schema()
-                        run_id = start_run(1)
-                        res = check_asin(item["raw_asin"])
-                        save_to_db(res)
-                        finish_run(
-                            run_id,
-                            1 if res.get("source") in ("BE", "NL") else 0,
-                            "done",
-                        )
-                        st.rerun()
-
-                    if head_col3.button(
-                        "✕", key=f"card_del_{item['raw_asin']}", help="Удалить"
-                    ):
-                        delete_asin_completely(item["raw_asin"])
-                        st.rerun()
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     img_c, info_c = st.columns([1, 2])
@@ -517,14 +447,11 @@ else:
                         img_c.caption("Нет фото")
 
                     info_c.markdown(f"**Источник:** `{item['Источник']}`")
-                    rating_fmt = get_rating_html(item["Рейтинг"])
+                    r_val = f"{item['Рейтинг']:.2f}" if pd.notnull(item['Рейтинг']) else "—"
                     cnt_fmt = str(item["Отзывы"]) if pd.notnull(item["Отзывы"]) else "—"
+                    info_c.markdown(f"**Рейтинг:** {r_val} ({cnt_fmt} отз.)")
                     info_c.markdown(
-                        f"**Рейтинг:** {rating_fmt} &nbsp;({cnt_fmt} отз.)",
-                        unsafe_allow_html=True,
-                    )
-                    info_c.markdown(
-                        f"**Негативные (1–2★):** {item['1–2★ %']} (Тренд: {item['Тренд']})"
+                        f"**Негативные (1–2★):** {item['1–2★ %']} ({item['Тренд']})"
                     )
                     info_c.markdown(
                         f"**Запас до 4.0:** {item['Запас (до 4.0)']}"
