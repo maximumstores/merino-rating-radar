@@ -52,6 +52,13 @@ STATUS_COLOR = {"ОК": PALETTE["ok"], "Внимание": PALETTE["warn"],
 st.markdown(
     """
 <style>
+    /* --- прячем служебный хром Streamlit --- */
+    header[data-testid="stHeader"] { display: none !important; }
+    [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+    .stAppDeployButton, #MainMenu, footer { display: none !important; visibility: hidden !important; }
+    .stApp > header { height: 0 !important; }
+    .block-container { padding-top: 1rem !important; }
+
     .stApp { background: #f5f5f7;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
     .block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1480px; }
@@ -185,6 +192,171 @@ def get_full_history():
         return pd.DataFrame()
 
 
+DICT_COLS = ["asin", "parent_asin", "category", "subcategory", "product_type", "brand", "market"]
+# порядок алиасов = приоритет (первый найденный побеждает). Заточено под SPR Алёны:
+# ASIN | категория | категории (Mens LS 165) | плотность | тип | Parent group | Category+parent | Архив …
+DICT_ALIASES = {
+    "asin": ["asin", "child", "child asin", "child_asin", "sku asin", "asin child"],
+    "category": ["category+parent", "category + parent", "категория", "category", "cat"],
+    "subcategory": ["parent group", "parent_group", "subcategory", "sub category", "sub_category", "подкатегория", "subcat",
+                    "категории"],
+    "product_type": ["тип", "product type", "product_type", "type", "вид", "вид товара", "kind", "плотность"],
+    "brand": ["brand", "бренд"],
+    "market": ["market", "country", "страна", "marketplace", "рынок"],
+    "archive": ["архив", "archive", "archived"],
+    # parent_asin последним: иначе «parent» перехватит «Parent group»
+    "parent_asin": ["parent asin", "parent_asin", "парент", "родитель", "parent"],
+}
+DICT_COLS_ALL = DICT_COLS + ["archive"]
+
+
+def ensure_dict_table():
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS asin_dictionary (
+                    asin TEXT PRIMARY KEY,
+                    parent_asin TEXT,
+                    category TEXT,
+                    subcategory TEXT,
+                    product_type TEXT,
+                    brand TEXT,
+                    market TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_dictionary():
+    if not DATABASE_URL:
+        return pd.DataFrame(columns=DICT_COLS)
+    try:
+        conn = _conn()
+        df = pd.read_sql("SELECT " + ", ".join(DICT_COLS) + " FROM asin_dictionary", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=DICT_COLS)
+
+
+def normalize_dict_df(raw: pd.DataFrame) -> pd.DataFrame:
+    """Приводит любой справочник (CSV/XLSX/Google Sheet) к DICT_COLS по алиасам колонок."""
+    cols = {c: str(c).strip().lower() for c in raw.columns}
+    mapping = {}
+    for target, aliases in DICT_ALIASES.items():
+        for a in aliases:                       # приоритет по порядку алиасов
+            for c, lc in cols.items():
+                if c in mapping.values():
+                    continue
+                if lc == a or (len(a) > 3 and lc.startswith(a)):
+                    mapping[target] = c
+                    break
+            if target in mapping:
+                break
+    out = pd.DataFrame()
+    for t in DICT_COLS_ALL:
+        out[t] = raw[mapping[t]].astype(str).str.strip() if t in mapping else ""
+    # архивные позиции выкидываем (в SPR колонка «Архив» с пометкой)
+    if "archive" in mapping:
+        arch = out["archive"].str.lower().isin(["1", "true", "да", "yes", "архив", "x", "+"])
+        out = out[~arch]
+    out = out.drop(columns=["archive"])
+    out["asin"] = out["asin"].apply(lambda v: extract_asin(v) or "")
+    out = out[out["asin"].str.len() == 10].copy()
+    out["parent_asin"] = out["parent_asin"].apply(lambda v: extract_asin(v) or "")
+    out["market"] = out["market"].str.upper().str.strip()
+    out.loc[~out["market"].isin(MARKET_DOMAINS), "market"] = ""
+    out = out.replace({"nan": "", "None": ""}).drop_duplicates("asin", keep="last")
+    return out.reset_index(drop=True)
+
+
+def save_dictionary(df: pd.DataFrame, replace: bool):
+    ensure_dict_table()
+    conn = _conn()
+    with conn.cursor() as cur:
+        if replace:
+            cur.execute("DELETE FROM asin_dictionary;")
+        for r in df.itertuples(index=False):
+            cur.execute(
+                """
+                INSERT INTO asin_dictionary (asin, parent_asin, category, subcategory, product_type, brand, market, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (asin) DO UPDATE SET
+                    parent_asin = EXCLUDED.parent_asin, category = EXCLUDED.category,
+                    subcategory = EXCLUDED.subcategory, product_type = EXCLUDED.product_type,
+                    brand = EXCLUDED.brand,
+                    market = CASE WHEN EXCLUDED.market <> '' THEN EXCLUDED.market ELSE asin_dictionary.market END,
+                    updated_at = NOW();
+                """,
+                (r.asin, r.parent_asin, r.category, r.subcategory, r.product_type, r.brand, r.market))
+    conn.commit()
+    conn.close()
+
+
+def parse_asin_batch(text, existing, default_market=None):
+    """Разбирает пачку ASIN/ссылок. Возвращает (new_codes, dup_codes, invalid_tokens, markets, dup_in_batch)."""
+    raw_list = [a.strip() for a in re.split(r"[\s,;]+", text or "") if a.strip()]
+    seen, new, dups, invalid, markets, batch_dups = set(), [], [], [], {}, []
+    existing = set(existing)
+    for tok in raw_list:
+        code = extract_asin(tok)
+        if not code or len(code) != 10:
+            invalid.append(tok)
+            continue
+        if code in seen:
+            batch_dups.append(code)
+            continue
+        seen.add(code)
+        mk = None
+        tail = tok.split(":")[-1].upper()
+        if ":" in tok and tail in MARKET_DOMAINS:
+            mk = tail
+        else:
+            for k, dom in MARKET_DOMAINS.items():
+                if dom in tok.lower():
+                    mk = k
+                    break
+        if not mk and default_market in MARKET_DOMAINS:
+            mk = default_market
+        if mk:
+            markets[code] = mk
+        (dups if code in existing else new).append(code)
+    return new, dups, invalid, markets, batch_dups
+
+
+def save_markets(markets):
+    if not markets:
+        return
+    ensure_dict_table()
+    conn = _conn()
+    with conn.cursor() as cur:
+        for code, mk in markets.items():
+            cur.execute("INSERT INTO asin_dictionary (asin, market) VALUES (%s, %s) "
+                        "ON CONFLICT (asin) DO UPDATE SET market = EXCLUDED.market, updated_at = NOW();", (code, mk))
+    conn.commit()
+    conn.close()
+
+
+def gsheet_to_csv_url(url: str) -> str:
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    if not m:
+        return url
+    gid = re.search(r"[#&?]gid=(\d+)", url)
+    return f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv" + (f"&gid={gid.group(1)}" if gid else "")
+
+
+GROUP_LABELS = {"category": "Категория", "subcategory": "Подкатегория", "product_type": "Вид",
+                "parent_asin": "Parent", "brand": "Бренд", "market": "Страна"}
+
+
 def parse_hist(raw):
     if not raw:
         return None
@@ -196,6 +368,7 @@ def parse_hist(raw):
 
 
 def run_collection(items, label="Прогон"):
+    items = with_market(items)
     ensure_schema()
     run_id = start_run(len(items))
     progress = st.progress(0.0, text=f"0/{len(items)}")
@@ -239,6 +412,33 @@ with hdr_r:
 tracked = get_tracked_asins()
 asin_market_map = get_asin_markets_map(tracked)
 full_df = get_full_history()
+ensure_dict_table()
+dict_df = get_dictionary()
+dict_map = dict_df.set_index("asin").to_dict("index") if not dict_df.empty else {}
+# страна из справочника имеет приоритет над каскадом
+for a, row in dict_map.items():
+    if row.get("market") in MARKET_DOMAINS and a in asin_market_map:
+        asin_market_map[a] = row["market"]
+
+
+def with_market(asin_list):
+    """Коллектор понимает страну только из ссылки (extract_asin_and_market смотрит на домен),
+    поэтому ASIN со страной из справочника или суффиксом :XX превращаем в полный URL."""
+    out = []
+    for a in asin_list:
+        a = str(a).strip()
+        if a.lower().startswith("http"):
+            out.append(a)
+            continue
+        code = extract_asin(a)
+        mk = None
+        tail = a.split(":")[-1].upper()
+        if ":" in a and tail in MARKET_DOMAINS:
+            mk = tail
+        elif code in dict_map and dict_map[code].get("market") in MARKET_DOMAINS:
+            mk = dict_map[code]["market"]
+        out.append(f"https://www.{MARKET_DOMAINS[mk]}/dp/{code}" if mk else code)
+    return out
 
 # ==================== РАСЧЁТ ТЕКУЩИХ МЕТРИК ====================
 def build_calc_df(df):
@@ -290,9 +490,15 @@ def build_calc_df(df):
             img = None
         bsr = r["bsr"] if pd.notnull(r["bsr"]) and r["bsr"] else "—"
 
+        d = dict_map.get(str(r["asin"]), {})
         rows.append({
             "Выбор": False,
             "raw_asin": str(r["asin"]),
+            "Parent": d.get("parent_asin") or "",
+            "Категория": d.get("category") or "—",
+            "Подкатегория": d.get("subcategory") or "—",
+            "Вид": d.get("product_type") or "—",
+            "Бренд": d.get("brand") or "—",
             "Статус": status,
             "raw_created_at": r["created_at"],
             "ASIN": f"https://www.{MARKET_DOMAINS.get(source, 'amazon.com.be')}/dp/{r['asin']}",
@@ -348,31 +554,53 @@ if not calc_df.empty:
     st.markdown("<br>", unsafe_allow_html=True)
 
 # ==================== ГЛОБАЛЬНЫЕ ФИЛЬТРЫ ====================
-fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1.5, 1.5, 1.6, 1.2])
 all_asins = calc_df["raw_asin"].tolist() if not calc_df.empty else []
 all_sources = sorted(calc_df["Источник"].dropna().unique().tolist()) if not calc_df.empty else []
+all_cats = sorted(calc_df["Категория"].unique().tolist()) if not calc_df.empty else []
+all_parents = sorted(p for p in calc_df["Parent"].unique().tolist() if p) if not calc_df.empty else []
 
+fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
     sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN")
 with fc2:
-    sel_sources = st.multiselect("Источник", options=all_sources, default=[], placeholder="Все")
+    sel_cats = st.multiselect("Категория", options=all_cats, default=[], placeholder="Все")
 with fc3:
+    sel_parents = st.multiselect("Parent", options=all_parents, default=[], placeholder="Все")
+with fc4:
+    sel_sources = st.multiselect("Страна", options=all_sources, default=[], placeholder="Все")
+with fc5:
     sel_status = st.multiselect("Статус", options=["ОК", "Внимание", "Риск", "Нет данных"], default=[],
                                 placeholder="Все")
-with fc4:
+with fc6:
+    st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+    only_us = st.toggle("🇺🇸 Только США", value=False)
+
+fc7, fc8, fc9 = st.columns([1.6, 1.2, 3])
+with fc7:
     selected_tz_label = st.selectbox("Часовой пояс", options=list(TIMEZONES.keys()), index=0, key="sel_tz_val")
     selected_tz = TIMEZONES[selected_tz_label]
     tz_short = selected_tz_label.split(" ")[0]
-with fc5:
+with fc8:
     period_days = st.selectbox("Период истории", options=[7, 14, 30, 60, 90, 365], index=2,
                                format_func=lambda d: f"{d} дн.")
+with fc9:
+    group_field = st.selectbox("Группировать по", options=["Нет"] + list(GROUP_LABELS.values()), index=0,
+                               help="Группы берутся из справочника (вкладка «Сбор и управление» → Справочник)")
+    group_col = {v: k for k, v in GROUP_LABELS.items()}.get(group_field)
+    GROUP_DF_COL = {"category": "Категория", "subcategory": "Подкатегория", "product_type": "Вид",
+                    "parent_asin": "Parent", "brand": "Бренд", "market": "Источник"}.get(group_col)
 
 if not calc_df.empty:
+    src_ok = ["US"] if only_us else (sel_sources if sel_sources else all_sources)
     filtered_df = calc_df[
         calc_df["raw_asin"].isin(sel_asins if sel_asins else all_asins)
-        & calc_df["Источник"].isin(sel_sources if sel_sources else all_sources)
+        & calc_df["Категория"].isin(sel_cats if sel_cats else all_cats)
+        & (calc_df["Parent"].isin(sel_parents) if sel_parents else True)
+        & calc_df["Источник"].isin(src_ok)
         & calc_df["Статус"].isin(sel_status if sel_status else ["ОК", "Внимание", "Риск", "Нет данных"])
     ].copy()
+    if GROUP_DF_COL:
+        filtered_df["_group"] = filtered_df[GROUP_DF_COL].replace("", "—")
     filtered_df["Время сбора"] = filtered_df["raw_created_at"].apply(
         lambda dt: pd.to_datetime(dt).tz_convert(ZoneInfo(selected_tz)).strftime("%d.%m.%Y %H:%M")
         if pd.notnull(dt) else "—")
@@ -400,9 +628,26 @@ with tab_port:
                     unsafe_allow_html=True)
         view_mode = vc.radio("Вид", options=["Таблица", "Карточки"], horizontal=True, label_visibility="collapsed")
 
+        if GROUP_DF_COL:
+            st.markdown(f"**Сводка по группам: {group_field}**")
+            gsum = filtered_df.groupby("_group").agg(
+                Позиций=("raw_asin", "count"), Рейтинг=("Рейтинг", "mean"),
+                Отзывов=("Отзывы", "sum"), Риск=("Статус", lambda x: int((x == "Риск").sum())),
+                Внимание=("Статус", lambda x: int((x == "Внимание").sum())),
+                ОК=("Статус", lambda x: int((x == "ОК").sum())),
+                Негатив=("bad_pct", "mean")).reset_index().rename(columns={"_group": group_field})
+            gsum = gsum.sort_values("Рейтинг")
+            st.dataframe(gsum.style.format({"Рейтинг": "{:.2f}", "Отзывов": "{:,.0f}", "Негатив": "{:.0f}%"}),
+                         use_container_width=True, hide_index=True, height=min(400, 40 + 35 * len(gsum)))
+            st.markdown("<br>", unsafe_allow_html=True)
+
         if view_mode == "Таблица":
-            cols_order = ["Выбор", "Статус", "Время сбора", "ASIN", "Фото", "Источник", "Рейтинг", "Δ Рейтинг",
-                          "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR", "Комментарий"]
+            cols_order = ["Выбор", "Статус", "Время сбора", "ASIN", "Фото", "Источник", "Категория", "Parent",
+                          "Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR",
+                          "Комментарий"]
+            if GROUP_DF_COL:
+                cols_order = [GROUP_DF_COL] + [c for c in cols_order if c != GROUP_DF_COL]
+                filtered_df = filtered_df.sort_values(["_group", "Рейтинг"], na_position="last")
             display_tbl = filtered_df[cols_order]
             if sel_asins:
                 display_tbl = display_tbl.assign(Выбор=filtered_df["raw_asin"].isin(sel_asins))
@@ -417,6 +662,8 @@ with tab_port:
                                                         display_text=r"/dp/([A-Z0-9]{10})"),
                     "Фото": st.column_config.ImageColumn("Фото", width="small"),
                     "Источник": st.column_config.TextColumn("Ист.", width="small", disabled=True),
+                    "Категория": st.column_config.TextColumn("Категория", width="medium", disabled=True),
+                    "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
                     "Рейтинг": st.column_config.ProgressColumn("Рейтинг", format="%.2f", min_value=1.0, max_value=5.0,
                                                                width="medium"),
                     "Δ Рейтинг": st.column_config.NumberColumn("Δ★", format="%+.2f", width="small", disabled=True),
@@ -472,6 +719,9 @@ with tab_port:
                         d_c = f" (+{int(item['Δ Отзывы'])})" if pd.notnull(item["Δ Отзывы"]) and item["Δ Отзывы"] > 0 else ""
                         tc.markdown(f"**{r_val}★**{d_r} · {cnt} отз.{d_c}")
                         tc.markdown(f"Источник `{item['Источник']}` · BSR `{item['BSR']}`")
+                        if item.get("Категория", "—") != "—":
+                            tc.markdown(f"<span class='muted'>{item['Категория']}"
+                                        f"{' · ' + item['Parent'] if item['Parent'] else ''}</span>", unsafe_allow_html=True)
                         tc.markdown(f"Негатив 1–2★: **{item['1–2★ %']}** {item['Тренд']}")
                         tc.markdown(f"Запас до 4.0: **{item['Запас (до 4.0)']}**")
                         st.caption(f"Обновлено: {item['Время сбора']}")
@@ -520,9 +770,19 @@ with tab_dyn:
             order = sorted(piv_r.index)
 
         src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
+        grp_map = filtered_df.set_index("raw_asin")["_group"].to_dict() if GROUP_DF_COL else {}
         blocks = []
         param_map = {"Rating": piv_r, "BSR": piv_b, "Reviews": piv_c, "1–2★ %": piv_n}
+        if GROUP_DF_COL:
+            order = sorted(order, key=lambda a: (str(grp_map.get(a, "—")), list(order).index(a)))
+        cur_group = object()
         for a in order:
+            g_val = grp_map.get(a, "—") if GROUP_DF_COL else None
+            if GROUP_DF_COL and g_val != cur_group:
+                cur_group = g_val
+                # строка-заголовок группы: средний рейтинг по дням
+                members = [x for x in order if grp_map.get(x, "—") == g_val]
+                blocks.append([f"▶ {g_val}", "", "Группа (ср. ★)"] + piv_r.loc[members].mean().round(2).tolist())
             for pname in params_sel:
                 row = param_map[pname].loc[a].tolist()
                 blocks.append([a, src_map.get(a, ""), pname] + row)
@@ -542,6 +802,10 @@ with tab_dyn:
             p = row["Parameter"]
             out = [""] * len(row)
             vals = row[day_labels]
+            if p == "Группа (ср. ★)":
+                out = ["background-color:#e8e8ed;font-weight:700"] * len(row)
+                out[3:] = [rating_color(v) for v in vals]
+                return out
             if p == "Rating":
                 out[3:] = [rating_color(v) for v in vals]
             elif p == "1–2★ %":
@@ -574,8 +838,8 @@ with tab_dyn:
         def fmt(v, p):
             if pd.isna(v):
                 return ""
-            if p == "Rating":
-                return f"{v:.1f}"
+            if p in ("Rating", "Группа (ср. ★)"):
+                return f"{v:.2f}" if p.startswith("Группа") else f"{v:.1f}"
             if p == "1–2★ %":
                 return f"{int(v)}%"
             return f"{int(v)}"
@@ -583,9 +847,14 @@ with tab_dyn:
         disp = wide.copy()
         for col in day_labels:
             disp[col] = [fmt(v, p) for v, p in zip(wide[col], wide["Parameter"])]
-        # прячем повтор ASIN внутри блока
-        disp["ASIN"] = disp["ASIN"].where(disp["Parameter"] == params_sel[0] if params_sel else True, "")
-        disp["Ист."] = disp["Ист."].where(disp["ASIN"] != "", "")
+        # прячем повтор ASIN внутри блока; первая строка блока — кликабельная ссылка на листинг
+        first_row = disp["Parameter"] == (params_sel[0] if params_sel else "")
+        is_group = disp["Parameter"] == "Группа (ср. ★)"
+        disp["ASIN"] = [
+            (a if g else (f"https://www.{MARKET_DOMAINS.get(src, 'amazon.com.be')}/dp/{a}" if f else ""))
+            for a, src, f, g in zip(wide["ASIN"], wide["Ист."], first_row, is_group)
+        ]
+        disp["Ист."] = disp["Ист."].where(first_row, "")
 
         # стили считаем по числовым значениям из wide
         def style_row_num(row):
@@ -597,9 +866,11 @@ with tab_dyn:
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(disp)} строк")
         st.dataframe(styled, use_container_width=True, hide_index=True,
                      height=min(800, 40 + 35 * len(disp)),
-                     column_config={"ASIN": st.column_config.TextColumn(width="medium"),
+                     column_config={"ASIN": st.column_config.LinkColumn("ASIN", width="medium",
+                                                                        display_text=r"/dp/([A-Z0-9]{10})"),
                                     "Ист.": st.column_config.TextColumn(width="small"),
-                                    "Parameter": st.column_config.TextColumn("Параметр", width="small")})
+                                    "Parameter": st.column_config.TextColumn("Параметр", width="small"),
+                                    **{d: st.column_config.TextColumn(d, width="small") for d in day_labels}})
 
         e1, e2 = st.columns([1, 5])
         e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), "rating_dynamics.csv", "text/csv",
@@ -653,6 +924,24 @@ with tab_an:
                           yaxis=dict(title="Рейтинг", range=[3.5, 5.05]),
                           yaxis2=dict(title="% риск", overlaying="y", side="right", range=[0, 100], showgrid=False))
                 st.plotly_chart(fig, use_container_width=True)
+
+        if GROUP_DF_COL and filtered_df["_group"].nunique() > 1:
+            st.markdown(f"**Разрез по: {group_field}** — средний рейтинг и доля позиций в риске")
+            gb = filtered_df.groupby("_group").agg(
+                avg=("Рейтинг", "mean"), n=("raw_asin", "count"),
+                risk=("Статус", lambda x: (x == "Риск").mean() * 100),
+                neg=("bad_pct", "mean")).reset_index().sort_values("avg")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=gb["_group"], y=gb["avg"], name="Средний ★", text=gb["avg"].round(2),
+                                 textposition="outside",
+                                 marker_color=[PALETTE["risk"] if v <= 4.24 else (PALETTE["warn"] if v < 4.45 else PALETTE["ok"])
+                                               for v in gb["avg"].fillna(0)]))
+            fig.add_trace(go.Scatter(x=gb["_group"], y=gb["risk"], name="% в риске", yaxis="y2", mode="lines+markers",
+                                     line=dict(color=PALETTE["ink"], width=2, dash="dot")))
+            fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
+            style_fig(fig, 340, legend=dict(orientation="h", y=-0.3), yaxis=dict(range=[3.0, 5.15]),
+                      yaxis2=dict(title="% риск", overlaying="y", side="right", range=[0, 100], showgrid=False))
+            st.plotly_chart(fig, use_container_width=True)
 
         # --- ряд 2: scatter + топ негатива ---
         c3, c4 = st.columns([3, 2])
@@ -921,6 +1210,23 @@ with tab_bot:
                          use_container_width=True, hide_index=True, height=min(420, 40 + 35 * len(show)))
             st.download_button("⬇ CSV аномалий", show.to_csv(index=False).encode("utf-8-sig"), "bot_anomalies.csv", "text/csv")
 
+        # --- по группе: до/после ---
+        if GROUP_DF_COL:
+            st.markdown(f"**По {group_field.lower()}: новые оценки и доля негатива до/после**")
+            gm = filtered_df.set_index("raw_asin")["_group"].to_dict()
+            snap["_group"] = snap["asin"].map(gm).fillna("—")
+            gg = snap.groupby(["_group", "after"]).agg(n=("new_ratings", "sum"), neg=("new_neg", "sum"),
+                                                        anom=("anomaly", "sum")).reset_index()
+            gg["share"] = gg["neg"] / gg["n"].replace(0, np.nan) * 100
+            gg["Период"] = gg["after"].map({True: "после", False: "до"})
+            gt = gg.pivot(index="_group", columns="Период", values=["n", "share", "anom"])
+            gt.columns = [f"{a} ({b})" for a, b in gt.columns]
+            gt = gt.rename(columns=lambda c: c.replace("n (", "Новых оценок (").replace("share (", "% негатива (")
+                           .replace("anom (", "Аномалий ("))
+            st.dataframe(gt.reset_index().rename(columns={"_group": group_field}).style.format(
+                {c: ("{:.0f}%" if "негатива" in c else "{:.0f}") for c in gt.columns}, na_rep="—"),
+                use_container_width=True, hide_index=True)
+
         # --- по ASIN: до/после ---
         st.markdown("**По ASIN: доля негатива во входящих оценках до и после**")
         per = snap.groupby(["asin", "after"]).agg(n=("new_ratings", "sum"), neg=("new_neg", "sum")).reset_index()
@@ -1127,6 +1433,45 @@ with tab_ops:
                 run_collection(raw_list, "Проверка")
 
     st.markdown("---")
+    with st.expander(f"📚 Справочник ASIN (категории / parent / вид / страна) — загружено: {len(dict_df)}", expanded=False):
+        st.markdown("<div class='muted'>Колонки распознаются по названию: <code>asin</code>/<code>child</code>, "
+                    "<code>parent</code>, <code>category</code>/<code>категория</code>, <code>subcategory</code>, "
+                    "<code>type</code>/<code>вид</code>, <code>brand</code>, <code>market</code>/<code>страна</code> (US, BE…). "
+                    "Лишние колонки игнорируются.</div>", unsafe_allow_html=True)
+        s1, s2 = st.columns(2)
+        up = s1.file_uploader("CSV / XLSX справочника", type=["csv", "xlsx"])
+        gs_url = s2.text_input("…или ссылка на Google Sheet (доступ по ссылке)", placeholder="https://docs.google.com/spreadsheets/d/…")
+        replace_mode = st.radio("Режим", ["Дополнить / обновить", "Заменить полностью"], horizontal=True)
+        if st.button("📥 Загрузить справочник", type="primary"):
+            try:
+                if up is not None:
+                    raw = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
+                elif gs_url.strip():
+                    raw = pd.read_csv(gsheet_to_csv_url(gs_url.strip()))
+                else:
+                    raw = None
+                if raw is None or raw.empty:
+                    st.warning("Файл или ссылка не заданы")
+                else:
+                    nd = normalize_dict_df(raw)
+                    if nd.empty:
+                        st.error("Не нашёл колонку с ASIN")
+                    else:
+                        save_dictionary(nd, replace=(replace_mode == "Заменить полностью"))
+                        st.success(f"Сохранено {len(nd)} строк · категорий: {nd['category'].replace('', np.nan).nunique()} · "
+                                   f"parent: {nd['parent_asin'].replace('', np.nan).nunique()}")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка загрузки: {e}")
+        if not dict_df.empty:
+            st.dataframe(dict_df.rename(columns={"asin": "ASIN", "parent_asin": "Parent", "category": "Категория",
+                                                 "subcategory": "Подкатегория", "product_type": "Вид",
+                                                 "brand": "Бренд", "market": "Страна"}),
+                         use_container_width=True, hide_index=True, height=260)
+            miss = [a for a in tracked if a not in dict_map]
+            if miss:
+                st.caption(f"Без записи в справочнике: {len(miss)} ASIN из списка отслеживания")
+
     with st.expander("Управление списком ASIN", expanded=False):
         h1, h2 = st.columns([3, 1])
         h1.markdown(
@@ -1137,13 +1482,59 @@ with tab_ops:
         display_tracked = tracked if market_filter == "Все страны" else [
             a for a in tracked if asin_market_map.get(a, "BE") == market_filter or a.endswith(f":{market_filter}")]
 
-        st.markdown(f"**Текущие ASIN (`{market_filter}`)** — {len(display_tracked)} из {len(tracked)}")
+        # ---- быстрое добавление с проверкой дублей ----
+        st.markdown("**➕ Добавить ASIN в список** <span class='muted'>— дубли не запишутся, только новые</span>",
+                    unsafe_allow_html=True)
+        ad1, ad2 = st.columns([4, 1])
+        add_text = ad1.text_area("Пачка ASIN / ссылок", height=90, key="add_asins_text",
+                                 placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
+                                 label_visibility="collapsed")
+        add_market = ad2.selectbox("Страна", options=["— (каскад)"] + list(MARKET_DOMAINS.keys()), index=1,
+                                   key="add_market_sel")
+        if add_text.strip():
+            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked,
+                                                              add_market if add_market in MARKET_DOMAINS else None)
+            p1, p2, p3 = st.columns(3)
+            p1.markdown(f"🟢 **Новых: {len(new_c)}**" + (f"<br><span class='muted'>{', '.join(new_c[:30])}"
+                        f"{' …' if len(new_c) > 30 else ''}</span>" if new_c else ""), unsafe_allow_html=True)
+            p2.markdown(f"🟡 **Уже в базе: {len(dup_c)}**" + (f"<br><span style='color:#b06000'>{', '.join(dup_c[:30])}"
+                        f"{' …' if len(dup_c) > 30 else ''}</span>" if dup_c else ""), unsafe_allow_html=True)
+            p3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**" + (f"<br><span style='color:#c5221f'>{', '.join(inv_c[:15])}"
+                        f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
+                        + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
+                        unsafe_allow_html=True)
+            if st.button(f"➕ Добавить {len(new_c)} новых", type="primary", disabled=not new_c, key="add_asins_btn"):
+                ensure_schema()
+                try:
+                    conn = _conn()
+                    with conn.cursor() as cur:
+                        for code in new_c:
+                            cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
+                    conn.commit()
+                    conn.close()
+                    save_markets({c: m for c, m in mk_map.items() if c in new_c})
+                    st.success(f"Добавлено {len(new_c)} · пропущено как дубли {len(dup_c)}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка добавления: {e}")
+        st.markdown("---")
+
+        st.markdown(f"**Текущие ASIN (`{market_filter}`)** — {len(display_tracked)} из {len(tracked)} "
+                    "<span class='muted'>(полное редактирование: удалить — сотри из текста и пересохрани)</span>",
+                    unsafe_allow_html=True)
         edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
                               key=f"edit_tracked_list_{market_filter}", label_visibility="collapsed")
-        b1, b2, b3 = st.columns([1, 1, 2])
+        b0, b1, b2 = st.columns([1.2, 1, 1])
+        default_market = b0.selectbox("Страна для новых ASIN", options=["— (каскад BE/NL)"] + list(MARKET_DOMAINS.keys()),
+                                      index=1, help="Записывается в справочник; при прогоне коллектор пойдёт на этот домен")
         if b1.button("💾 Пересохранить список"):
-            raw_list = [a.strip() for a in re.split(r"[\s,]+", edited) if a.strip()]
-            clean = [extract_asin(a) for a in raw_list if extract_asin(a)]
+            existing_for_check = [] if market_filter == "Все страны" else tracked
+            clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, existing_for_check, None)
+            # явные :XX / ссылки — всегда; страна по умолчанию — только для действительно новых ASIN
+            if default_market in MARKET_DOMAINS:
+                for code in clean:
+                    if code not in markets and code not in dict_map and code not in tracked:
+                        markets[code] = default_market
             ensure_schema()
             try:
                 conn = _conn()
@@ -1151,11 +1542,18 @@ with tab_ops:
                     if market_filter == "Все страны":
                         cur.execute("DELETE FROM tracked_asins;")
                     for code in clean:
-                        if len(code) == 10:
-                            cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
+                        cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
                 conn.commit()
                 conn.close()
-                st.success("Список сохранён")
+                save_markets(markets)
+                msg = f"Сохранено {len(clean)} ASIN"
+                if dup_c:
+                    msg += f" · уже были: {len(dup_c)}"
+                if bd:
+                    msg += f" · повторов в тексте убрано: {len(bd)}"
+                if inv_c:
+                    msg += f" · нераспознано: {len(inv_c)} ({', '.join(inv_c[:5])}{' …' if len(inv_c) > 5 else ''})"
+                st.success(msg)
                 st.rerun()
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
