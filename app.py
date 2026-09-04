@@ -387,8 +387,8 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_an, tab_bot, tab_fc, tab_ops = st.tabs(
-    ["📋 Портфель", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление"])
+tab_port, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops = st.tabs(
+    ["📋 Портфель", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление"])
 
 # ---------- ПОРТФЕЛЬ ----------
 with tab_port:
@@ -475,6 +475,144 @@ with tab_port:
                         tc.markdown(f"Негатив 1–2★: **{item['1–2★ %']}** {item['Тренд']}")
                         tc.markdown(f"Запас до 4.0: **{item['Запас (до 4.0)']}**")
                         st.caption(f"Обновлено: {item['Время сбора']}")
+
+
+# ---------- ДИНАМИКА ПО ДНЯМ (широкая таблица) ----------
+with tab_dyn:
+    st.markdown("### Динамика по дням")
+    st.markdown("<div class='muted'>Каждый ASIN — блок строк (Rating / BSR / Reviews / 1–2★), колонки — даты замеров. "
+                "Цвет рейтинга по логике Amazon. Период задаётся фильтром сверху.</div>", unsafe_allow_html=True)
+
+    if hist_df.empty:
+        st.info("Нет истории под текущие фильтры")
+    else:
+        d1, d2, d3 = st.columns([2, 1.5, 1.5])
+        params_sel = d1.multiselect("Параметры", ["Rating", "BSR", "Reviews", "1–2★ %"],
+                                    default=["Rating", "BSR", "Reviews"])
+        sort_by = d2.selectbox("Сортировка ASIN", ["По последнему рейтингу ↑", "По последнему рейтингу ↓",
+                                                   "По падению за период", "По алфавиту"])
+        gran_d = d3.radio("Шаг", ["День", "Неделя"], horizontal=True)
+
+        h = hist_df.copy()
+        h["day"] = (h["created_local"].dt.to_period("W").dt.start_time if gran_d == "Неделя"
+                    else h["created_local"].dt.floor("D"))
+        h["bad"] = h["histogram_json"].apply(lambda x: (lambda d: d.get("1", 0) + d.get("2", 0) if d else np.nan)(parse_hist(x)))
+        h["bsr_num"] = pd.to_numeric(h["bsr"].astype(str).str.replace(r"[^\d]", "", regex=True), errors="coerce")
+        snap_d = h.sort_values("created_at").groupby(["asin", "day"]).last().reset_index()
+        days = sorted(snap_d["day"].unique())
+        day_labels = [d.strftime("%d.%m.%Y") for d in days]
+
+        piv_r = snap_d.pivot(index="asin", columns="day", values="rating").reindex(columns=days)
+        piv_b = snap_d.pivot(index="asin", columns="day", values="bsr_num").reindex(columns=days)
+        piv_c = snap_d.pivot(index="asin", columns="day", values="review_count").reindex(columns=days)
+        piv_n = snap_d.pivot(index="asin", columns="day", values="bad").reindex(columns=days)
+
+        # порядок ASIN
+        last_r = piv_r.ffill(axis=1).iloc[:, -1]
+        first_r = piv_r.bfill(axis=1).iloc[:, 0]
+        if sort_by == "По последнему рейтингу ↑":
+            order = last_r.sort_values().index
+        elif sort_by == "По последнему рейтингу ↓":
+            order = last_r.sort_values(ascending=False).index
+        elif sort_by == "По падению за период":
+            order = (last_r - first_r).sort_values().index
+        else:
+            order = sorted(piv_r.index)
+
+        src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
+        blocks = []
+        param_map = {"Rating": piv_r, "BSR": piv_b, "Reviews": piv_c, "1–2★ %": piv_n}
+        for a in order:
+            for pname in params_sel:
+                row = param_map[pname].loc[a].tolist()
+                blocks.append([a, src_map.get(a, ""), pname] + row)
+        wide = pd.DataFrame(blocks, columns=["ASIN", "Ист.", "Parameter"] + day_labels)
+
+        # --- стилизация ---
+        def rating_color(v):
+            if pd.isna(v):
+                return ""
+            if v >= 4.45:
+                return "background-color:#7ee36b;color:#1d1d1f;font-weight:600"
+            if v >= 4.25:
+                return "background-color:#ffee58;color:#1d1d1f;font-weight:600"
+            return "background-color:#e53935;color:#fff;font-weight:600"
+
+        def style_row(row):
+            p = row["Parameter"]
+            out = [""] * len(row)
+            vals = row[day_labels]
+            if p == "Rating":
+                out[3:] = [rating_color(v) for v in vals]
+            elif p == "1–2★ %":
+                out[3:] = ["background-color:#ffcdd2" if pd.notnull(v) and v > 15 else
+                           ("background-color:#fff9c4" if pd.notnull(v) and v > 8 else "") for v in vals]
+            elif p == "Reviews":
+                prev = None
+                styles = []
+                for v in vals:
+                    if pd.notnull(v) and prev is not None and pd.notnull(prev) and v > prev:
+                        styles.append("color:#1f8a4c;font-weight:600")
+                    else:
+                        styles.append("")
+                    if pd.notnull(v):
+                        prev = v
+                out[3:] = styles
+            elif p == "BSR":
+                prev = None
+                styles = []
+                for v in vals:
+                    if pd.notnull(v) and prev is not None and pd.notnull(prev):
+                        styles.append("color:#d13438" if v > prev * 1.15 else ("color:#1f8a4c" if v < prev * 0.85 else ""))
+                    else:
+                        styles.append("")
+                    if pd.notnull(v):
+                        prev = v
+                out[3:] = styles
+            return out
+
+        def fmt(v, p):
+            if pd.isna(v):
+                return ""
+            if p == "Rating":
+                return f"{v:.1f}"
+            if p == "1–2★ %":
+                return f"{int(v)}%"
+            return f"{int(v)}"
+
+        disp = wide.copy()
+        for col in day_labels:
+            disp[col] = [fmt(v, p) for v, p in zip(wide[col], wide["Parameter"])]
+        # прячем повтор ASIN внутри блока
+        disp["ASIN"] = disp["ASIN"].where(disp["Parameter"] == params_sel[0] if params_sel else True, "")
+        disp["Ист."] = disp["Ист."].where(disp["ASIN"] != "", "")
+
+        # стили считаем по числовым значениям из wide
+        def style_row_num(row):
+            return style_row(wide.loc[row.name])
+        styled = disp.style.apply(style_row_num, axis=1).set_properties(
+            subset=day_labels, **{"text-align": "right"}).set_properties(
+            subset=["ASIN"], **{"font-weight": "600", "font-family": "ui-monospace, Menlo, monospace"})
+
+        st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(disp)} строк")
+        st.dataframe(styled, use_container_width=True, hide_index=True,
+                     height=min(800, 40 + 35 * len(disp)),
+                     column_config={"ASIN": st.column_config.TextColumn(width="medium"),
+                                    "Ист.": st.column_config.TextColumn(width="small"),
+                                    "Parameter": st.column_config.TextColumn("Параметр", width="small")})
+
+        e1, e2 = st.columns([1, 5])
+        e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), "rating_dynamics.csv", "text/csv",
+                           use_container_width=True)
+        try:
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                styled.to_excel(xw, sheet_name="Dynamics", index=False)
+            e2.download_button("⬇ Excel с цветами", buf.getvalue(), "rating_dynamics.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception:
+            pass
 
 # ---------- АНАЛИТИКА ----------
 with tab_an:
