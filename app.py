@@ -165,16 +165,17 @@ def get_runs_history(limit=60):
 
 def get_asin_markets_map(all_tracked):
     if not DATABASE_URL:
-        return {a: "BE" for a in all_tracked}
+        return {a: "—" for a in all_tracked}
     try:
         conn = _conn()
         df_src = pd.read_sql(
             "SELECT DISTINCT ON (asin) asin, source FROM asin_metrics ORDER BY asin, created_at DESC", conn)
         conn.close()
         db_map = dict(zip(df_src["asin"], df_src["source"]))
-        return {a: (db_map.get(a) if db_map.get(a) in MARKET_DOMAINS else "BE") for a in all_tracked}
+        # фактическая страна последнего сбора; "—" если ещё не собирали или не нашли
+        return {a: (db_map.get(a) if db_map.get(a) in MARKET_DOMAINS else "—") for a in all_tracked}
     except Exception:
-        return {a: "BE" for a in all_tracked}
+        return {a: "—" for a in all_tracked}
 
 
 def get_full_history():
@@ -1548,10 +1549,11 @@ with tab_ops:
         # --- одна страна на весь блок: и фильтр списка, и страна для новых ---
         by_country = {}
         for a in tracked:
-            by_country.setdefault(asin_market_map.get(a) if a in dict_map and dict_map[a].get("market") else "—", []).append(a)
+            # страна = из справочника, иначе — откуда реально собрали в последний раз
+            by_country.setdefault(asin_market_map.get(a, "—"), []).append(a)
         counts = " · ".join(f"**{k}**: {len(v)}" for k, v in sorted(by_country.items(), key=lambda kv: (kv[0] == "—", kv[0])))
         st.markdown(f"Всего отслеживается **{len(tracked)}** — {counts} &nbsp; "
-                    f"<span class='muted'>(«—» = страна не задана, коллектор идёт каскадом BE → NL)</span>",
+                    f"<span class='muted'>(страна — из справочника, иначе откуда реально собрали; «—» = ещё не собирали или не нашли)</span>",
                     unsafe_allow_html=True)
 
         c_sel, c_hint = st.columns([1, 3])
