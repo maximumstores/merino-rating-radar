@@ -559,8 +559,17 @@ if not calc_df.empty:
     tot_reviews = int(calc_df["Отзывы"].fillna(0).sum())
     new_reviews = int(calc_df["Δ Отзывы"].fillna(0).clip(lower=0).sum())
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    # разбивка по странам: справочник → иначе откуда реально собрали
+    cty = {}
+    for a in tracked:
+        cty[asin_market_map.get(a, "—")] = cty.get(asin_market_map.get(a, "—"), 0) + 1
+    cty_sorted = sorted(cty.items(), key=lambda kv: (kv[0] == "—", -kv[1]))
+    cty_str = " · ".join(f"{k} {v}" for k, v in cty_sorted)
+    n_cty = sum(1 for k in cty if k != "—")
+
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     kpi(k1, "Позиций", n_total, f"отслеживается {len(tracked)}")
+    kpi(k7, "Стран", n_cty, cty_str)
     kpi(k2, "Средний рейтинг", f"{avg_r:.2f}" if pd.notnull(avg_r) else "—",
         f"взвеш. по отзывам {w_avg:.2f}" if w_avg else "")
     kpi(k3, "ОК", n_ok, f"{n_ok / n_total:.0%} портфеля", PALETTE["ok"])
