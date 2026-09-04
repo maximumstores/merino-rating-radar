@@ -416,7 +416,36 @@ with hdr_r:
     else:
         st.warning("История сборов пуста")
 
-tracked = get_tracked_asins()
+def ensure_kind_column():
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_tracked_with_kind():
+    """{asin: 'child'|'parent'}"""
+    ensure_schema()
+    ensure_kind_column()
+    try:
+        conn = _conn()
+        df = pd.read_sql("SELECT asin, COALESCE(kind, 'child') AS kind FROM tracked_asins ORDER BY asin", conn)
+        conn.close()
+        return dict(zip(df["asin"], df["kind"]))
+    except Exception:
+        return {a: "child" for a in get_tracked_asins()}
+
+
+KIND_LABEL = {"child": "Чайлд", "parent": "Парент"}
+tracked_kind = get_tracked_with_kind()
+tracked = list(tracked_kind.keys())
+tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
 asin_market_map = get_asin_markets_map(tracked)
 full_df = get_full_history()
 ensure_dict_table()
@@ -501,6 +530,7 @@ def build_calc_df(df):
         rows.append({
             "Выбор": False,
             "raw_asin": str(r["asin"]),
+            "kind": tracked_kind.get(str(r["asin"]), "child"),
             "Parent": d.get("parent_asin") or "",
             "Категория": d.get("category") or "—",
             "Подкатегория": d.get("subcategory") or "—",
@@ -646,19 +676,25 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
-    ["📋 Портфель", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление",
-     "ℹ️ Как это работает"])
+tab_port, tab_port_p, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
+    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов",
+     "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
 
 # ---------- ПОРТФЕЛЬ ----------
-with tab_port:
-    if filtered_df.empty:
+def render_portfolio(filtered_df, kind):
+    kind_asins = tracked_by_kind.get(kind, [])
+    filtered_df = filtered_df[filtered_df["kind"] == kind].copy() if not filtered_df.empty else filtered_df
+    if not kind_asins and filtered_df.empty:
+        st.info(f"Список «{KIND_LABEL[kind]}» пуст — добавь ASIN во вкладке «Сбор и управление» → "
+                f"«Загрузка ASIN — Портфель ({KIND_LABEL[kind]})»")
+    elif filtered_df.empty:
         st.warning("В базе нет сохранённых метрик под текущие фильтры")
     else:
         hc, vc = st.columns([3, 1])
-        hc.markdown(f"### Сводный отчёт <span class='muted'>· {len(filtered_df)} из {len(calc_df)} позиций</span>",
+        hc.markdown(f"### Сводный отчёт — {KIND_LABEL[kind]} <span class='muted'>· {len(filtered_df)} из {len(kind_asins)} позиций</span>",
                     unsafe_allow_html=True)
-        view_mode = vc.radio("Вид", options=["Таблица", "Карточки"], horizontal=True, label_visibility="collapsed")
+        view_mode = vc.radio("Вид", options=["Таблица", "Карточки"], horizontal=True, label_visibility="collapsed",
+                             key=f"view_mode_{kind}")
 
         if GROUP_DF_COL:
             st.markdown(f"**Сводка по группам: {group_field}**")
@@ -706,7 +742,7 @@ with tab_port:
                     "BSR": st.column_config.TextColumn("BSR", width="small", disabled=True),
                     "Комментарий": st.column_config.TextColumn("Комментарий", width="large", disabled=True),
                 },
-                use_container_width=True, hide_index=True, key="table_editor",
+                use_container_width=True, hide_index=True, key=f"table_editor_{kind}",
             )
 
             selected_asins = [extract_asin(u) for u in edited_df.loc[edited_df["Выбор"] == True, "ASIN"] if extract_asin(u)]
@@ -716,9 +752,9 @@ with tab_port:
                 a1.markdown(f"**Выбрано: {len(selected_asins)}** · `{', '.join(selected_asins)}`")
             else:
                 a1.caption("Отметьте строки галочкой для массовых действий")
-            if a2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins):
+            if a2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins, key=f"upd_{kind}"):
                 run_collection(selected_asins, "Обновление")
-            if a3.button("✕ Удалить выбранные", use_container_width=True, disabled=not selected_asins):
+            if a3.button("✕ Удалить выбранные", use_container_width=True, disabled=not selected_asins, key=f"del_{kind}"):
                 for a in selected_asins:
                     delete_asin_completely(a)
                 st.success(f"Удалено: {len(selected_asins)}")
@@ -726,7 +762,7 @@ with tab_port:
             csv = filtered_df.drop(columns=["Выбор", "raw_created_at", "Фото", "bad_pct", "five_pct", "margin", "Рейтинг ★"],
                                    errors="ignore") \
                 .to_csv(index=False).encode("utf-8-sig")
-            a4.download_button("⬇ CSV", csv, "rating_radar.csv", "text/csv", use_container_width=True)
+            a4.download_button("⬇ CSV", csv, f"rating_radar_{kind}.csv", "text/csv", use_container_width=True, key=f"csv_{kind}")
 
         else:
             records = filtered_df.to_dict(orient="records")
@@ -758,6 +794,13 @@ with tab_port:
                         tc.markdown(f"Запас до 4.0: **{item['Запас (до 4.0)']}**")
                         st.caption(f"Обновлено: {item['Время сбора']}")
 
+
+
+with tab_port:
+    render_portfolio(filtered_df, "child")
+
+with tab_port_p:
+    render_portfolio(filtered_df, "parent")
 
 # ---------- ДИНАМИКА ПО ДНЯМ (широкая таблица) ----------
 with tab_dyn:
@@ -1474,6 +1517,176 @@ with tab_fc:
             st.dataframe(pf.style.format({"Сейчас": "{:.2f}", "Прогноз +30": "{:.2f}", "Δ": "{:+.2f}", "Тренд ★/мес": "{:+.3f}"}),
                          use_container_width=True, hide_index=True)
 
+def render_asin_manager(kind):
+    tracked_k = tracked_by_kind.get(kind, [])
+    # --- одна страна на весь блок: и фильтр списка, и страна для новых ---
+    by_country = {}
+    for a in tracked_k:
+        # страна = из справочника, иначе — откуда реально собрали в последний раз
+        by_country.setdefault(asin_market_map.get(a, "—"), []).append(a)
+    counts = " · ".join(f"**{k}**: {len(v)}" for k, v in sorted(by_country.items(), key=lambda kv: (kv[0] == "—", kv[0])))
+    st.markdown(f"{KIND_LABEL[kind]} — отслеживается **{len(tracked_k)}** — {counts} &nbsp; "
+                f"<span class='muted'>(страна — из справочника, иначе откуда реально собрали; «—» = ещё не собирали или не нашли)</span>",
+                unsafe_allow_html=True)
+
+    c_sel, c_hint = st.columns([1, 3])
+    country = c_sel.selectbox("Страна", options=["Все страны"] + list(MARKET_DOMAINS.keys()) + ["— без страны"],
+                              index=1, key=f"asin_country_sel_{kind}")
+    c_hint.markdown("<div class='muted' style='margin-top:30px'>Выбранная страна применяется ко всему блоку: "
+                    "показывает ASIN этой страны, новые ASIN из пачки получают её, пересохранение меняет только её список. "
+                    "Форматы: <code>B09NWGDK3S</code> · <code>B09NWGDK3S:DE</code> · ссылка на листинг "
+                    "(страна из суффикса/ссылки имеет приоритет).</div>", unsafe_allow_html=True)
+
+    sel_market = country if country in MARKET_DOMAINS else None
+    if country == "Все страны":
+        display_tracked = tracked_k
+    elif country == "— без страны":
+        display_tracked = by_country.get("—", [])
+    else:
+        display_tracked = by_country.get(country, [])
+
+    # ---- добавить пачку ----
+    st.markdown("**➕ Добавить ASIN** <span class='muted'>— дубли не запишутся, только новые</span>",
+                unsafe_allow_html=True)
+    add_text = st.text_area("Пачка ASIN / ссылок", height=90, key=f"add_asins_text_{kind}",
+                            placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
+                            label_visibility="collapsed")
+    if add_text.strip():
+        new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked, sel_market)
+        p1, p2, p3 = st.columns(3)
+        p1.markdown(f"🟢 **Новых: {len(new_c)}**" + (f"<br><span class='muted'>{', '.join(new_c[:30])}"
+                    f"{' …' if len(new_c) > 30 else ''}</span>" if new_c else ""), unsafe_allow_html=True)
+        p2.markdown(f"🟡 **Уже в базе: {len(dup_c)}**" + (f"<br><span style='color:#b06000'>{', '.join(dup_c[:30])}"
+                    f"{' …' if len(dup_c) > 30 else ''}</span>" if dup_c else ""), unsafe_allow_html=True)
+        p3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**" + (f"<br><span style='color:#c5221f'>{', '.join(inv_c[:15])}"
+                    f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
+                    + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
+                    unsafe_allow_html=True)
+        lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (каскад)")
+        if st.button(lbl, type="primary", disabled=not new_c, key=f"add_asins_btn_{kind}"):
+            ensure_schema()
+            try:
+                conn = _conn()
+                with conn.cursor() as cur:
+                    for code in new_c:
+                        cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, %s) ON CONFLICT (asin) DO UPDATE SET kind = EXCLUDED.kind;", (code, kind))
+                conn.commit()
+                conn.close()
+                save_markets({c: m for c, m in mk_map.items() if c in new_c})
+                st.success(f"Добавлено {len(new_c)} · пропущено как дубли {len(dup_c)}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка добавления: {e}")
+
+    # ---- заменить ASIN ----
+    st.markdown("---")
+    st.markdown("**🔁 Заменить ASIN** <span class='muted'>— старый уходит из отслеживания, новый встаёт на его место "
+                "и наследует категорию/parent/страну из справочника</span>", unsafe_allow_html=True)
+    r1, r2, r3, r4 = st.columns([2, 2, 1.2, 1])
+    old_asin = r1.selectbox("Старый ASIN", options=[""] + tracked_k, key=f"repl_old_{kind}")
+    new_asin_raw = r2.text_input("Новый ASIN / ссылка", key=f"repl_new_{kind}", placeholder="B0XXXXXXXX или ссылка")
+    keep_hist = r3.checkbox("Сохранить историю старого", value=True, key=f"repl_keep_{kind}")
+    new_code = extract_asin(new_asin_raw) if new_asin_raw.strip() else ""
+    new_valid = bool(new_code) and len(new_code) == 10 and new_code != old_asin
+    if new_asin_raw.strip() and not new_valid:
+        r2.caption("⚠️ не похоже на ASIN")
+    elif new_valid and new_code in tracked:
+        r2.caption("⚠️ уже отслеживается — будет просто снят старый")
+    r4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+    if r4.button("Заменить", disabled=not (old_asin and new_valid), key=f"repl_btn_{kind}", use_container_width=True):
+        try:
+            ensure_schema()
+            ensure_dict_table()
+            conn = _conn()
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, %s) ON CONFLICT (asin) DO UPDATE SET kind = EXCLUDED.kind;", (new_code, kind))
+                cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (old_asin,))
+                if not keep_hist:
+                    cur.execute("DELETE FROM asin_metrics WHERE asin = %s;", (old_asin,))
+                d = dict_map.get(old_asin)
+                mk_new = None
+                tail = new_asin_raw.split(":")[-1].upper()
+                if ":" in new_asin_raw and tail in MARKET_DOMAINS:
+                    mk_new = tail
+                else:
+                    for k, dom in MARKET_DOMAINS.items():
+                        if dom in new_asin_raw.lower():
+                            mk_new = k
+                if d or mk_new:
+                    cur.execute(
+                        """
+                        INSERT INTO asin_dictionary (asin, parent_asin, category, subcategory, product_type, brand, market, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (asin) DO UPDATE SET
+                            parent_asin = COALESCE(NULLIF(EXCLUDED.parent_asin, ''), asin_dictionary.parent_asin),
+                            category = COALESCE(NULLIF(EXCLUDED.category, ''), asin_dictionary.category),
+                            subcategory = COALESCE(NULLIF(EXCLUDED.subcategory, ''), asin_dictionary.subcategory),
+                            product_type = COALESCE(NULLIF(EXCLUDED.product_type, ''), asin_dictionary.product_type),
+                            brand = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
+                            market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                            updated_at = NOW();
+                        """,
+                        (new_code, (d or {}).get("parent_asin", ""), (d or {}).get("category", ""),
+                         (d or {}).get("subcategory", ""), (d or {}).get("product_type", ""),
+                         (d or {}).get("brand", ""), mk_new or (d or {}).get("market", "") or ""))
+                cur.execute("INSERT INTO asin_metrics (asin, source, note) VALUES (%s, %s, %s);",
+                            (new_code, "none", f"заменил {old_asin}"))
+            conn.commit()
+            conn.close()
+            st.success(f"{old_asin} → {new_code}. Запусти точечную проверку нового ASIN или дождись автосбора.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка замены: {e}")
+
+    # ---- редактор списка выбранной страны ----
+    st.markdown("---")
+    st.markdown(f"**Список ({country})** — {len(display_tracked)} из {len(tracked_k)} "
+                "<span class='muted'>· удалить — сотри из текста и пересохрани</span>", unsafe_allow_html=True)
+    edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
+                          key=f"edit_tracked_list_{kind}_{country}_{len(display_tracked)}", label_visibility="collapsed")
+    b1, b2, b3 = st.columns([1.2, 1.2, 3])
+    if b1.button("💾 Пересохранить список", key=f"resave_btn_{kind}"):
+        clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, [], None)
+        if sel_market:
+            for code in clean:
+                markets.setdefault(code, sel_market)
+        ensure_schema()
+        try:
+            conn = _conn()
+            with conn.cursor() as cur:
+                # удаляем только из текущего среза; в «Все страны» — полная замена
+                to_remove = [a for a in display_tracked if a not in clean]
+                for a in to_remove:
+                    cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (a,))
+                for code in clean:
+                    cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, %s) ON CONFLICT (asin) DO UPDATE SET kind = EXCLUDED.kind;", (code, kind))
+            conn.commit()
+            conn.close()
+            save_markets(markets)
+            msg = f"Сохранено {len(clean)} ASIN"
+            if to_remove:
+                msg += f" · снято с отслеживания: {len(to_remove)}"
+            if bd:
+                msg += f" · повторов в тексте убрано: {len(bd)}"
+            if inv_c:
+                msg += f" · нераспознано: {len(inv_c)} ({', '.join(inv_c[:5])}{' …' if len(inv_c) > 5 else ''})"
+            st.success(msg)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка сохранения: {e}")
+    if b2.button(f"🗑️ Очистить список ({KIND_LABEL[kind]})", key=f"clear_btn_{kind}"):
+        try:
+            conn = _conn()
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tracked_asins WHERE kind = %s;", (kind,))
+            conn.commit()
+            conn.close()
+            st.success(f"Список «{KIND_LABEL[kind]}» очищен")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка очистки: {e}")
+
+
 # ---------- СБОР И УПРАВЛЕНИЕ ----------
 with tab_ops:
     o1, o2 = st.columns(2)
@@ -1554,173 +1767,10 @@ with tab_ops:
             if miss:
                 st.caption(f"Без записи в справочнике: {len(miss)} ASIN из списка отслеживания")
 
-    with st.expander("Управление списком ASIN", expanded=False):
-        # --- одна страна на весь блок: и фильтр списка, и страна для новых ---
-        by_country = {}
-        for a in tracked:
-            # страна = из справочника, иначе — откуда реально собрали в последний раз
-            by_country.setdefault(asin_market_map.get(a, "—"), []).append(a)
-        counts = " · ".join(f"**{k}**: {len(v)}" for k, v in sorted(by_country.items(), key=lambda kv: (kv[0] == "—", kv[0])))
-        st.markdown(f"Всего отслеживается **{len(tracked)}** — {counts} &nbsp; "
-                    f"<span class='muted'>(страна — из справочника, иначе откуда реально собрали; «—» = ещё не собирали или не нашли)</span>",
-                    unsafe_allow_html=True)
-
-        c_sel, c_hint = st.columns([1, 3])
-        country = c_sel.selectbox("Страна", options=["Все страны"] + list(MARKET_DOMAINS.keys()) + ["— без страны"],
-                                  index=1, key="asin_country_sel")
-        c_hint.markdown("<div class='muted' style='margin-top:30px'>Выбранная страна применяется ко всему блоку: "
-                        "показывает ASIN этой страны, новые ASIN из пачки получают её, пересохранение меняет только её список. "
-                        "Форматы: <code>B09NWGDK3S</code> · <code>B09NWGDK3S:DE</code> · ссылка на листинг "
-                        "(страна из суффикса/ссылки имеет приоритет).</div>", unsafe_allow_html=True)
-
-        sel_market = country if country in MARKET_DOMAINS else None
-        if country == "Все страны":
-            display_tracked = tracked
-        elif country == "— без страны":
-            display_tracked = by_country.get("—", [])
-        else:
-            display_tracked = by_country.get(country, [])
-
-        # ---- добавить пачку ----
-        st.markdown("**➕ Добавить ASIN** <span class='muted'>— дубли не запишутся, только новые</span>",
-                    unsafe_allow_html=True)
-        add_text = st.text_area("Пачка ASIN / ссылок", height=90, key="add_asins_text",
-                                placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
-                                label_visibility="collapsed")
-        if add_text.strip():
-            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked, sel_market)
-            p1, p2, p3 = st.columns(3)
-            p1.markdown(f"🟢 **Новых: {len(new_c)}**" + (f"<br><span class='muted'>{', '.join(new_c[:30])}"
-                        f"{' …' if len(new_c) > 30 else ''}</span>" if new_c else ""), unsafe_allow_html=True)
-            p2.markdown(f"🟡 **Уже в базе: {len(dup_c)}**" + (f"<br><span style='color:#b06000'>{', '.join(dup_c[:30])}"
-                        f"{' …' if len(dup_c) > 30 else ''}</span>" if dup_c else ""), unsafe_allow_html=True)
-            p3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**" + (f"<br><span style='color:#c5221f'>{', '.join(inv_c[:15])}"
-                        f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
-                        + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
-                        unsafe_allow_html=True)
-            lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (каскад)")
-            if st.button(lbl, type="primary", disabled=not new_c, key="add_asins_btn"):
-                ensure_schema()
-                try:
-                    conn = _conn()
-                    with conn.cursor() as cur:
-                        for code in new_c:
-                            cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
-                    conn.commit()
-                    conn.close()
-                    save_markets({c: m for c, m in mk_map.items() if c in new_c})
-                    st.success(f"Добавлено {len(new_c)} · пропущено как дубли {len(dup_c)}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка добавления: {e}")
-
-        # ---- заменить ASIN ----
-        st.markdown("---")
-        st.markdown("**🔁 Заменить ASIN** <span class='muted'>— старый уходит из отслеживания, новый встаёт на его место "
-                    "и наследует категорию/parent/страну из справочника</span>", unsafe_allow_html=True)
-        r1, r2, r3, r4 = st.columns([2, 2, 1.2, 1])
-        old_asin = r1.selectbox("Старый ASIN", options=[""] + tracked, key="repl_old")
-        new_asin_raw = r2.text_input("Новый ASIN / ссылка", key="repl_new", placeholder="B0XXXXXXXX или ссылка")
-        keep_hist = r3.checkbox("Сохранить историю старого", value=True, key="repl_keep")
-        new_code = extract_asin(new_asin_raw) if new_asin_raw.strip() else ""
-        new_valid = bool(new_code) and len(new_code) == 10 and new_code != old_asin
-        if new_asin_raw.strip() and not new_valid:
-            r2.caption("⚠️ не похоже на ASIN")
-        elif new_valid and new_code in tracked:
-            r2.caption("⚠️ уже отслеживается — будет просто снят старый")
-        r4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if r4.button("Заменить", disabled=not (old_asin and new_valid), key="repl_btn", use_container_width=True):
-            try:
-                ensure_schema()
-                ensure_dict_table()
-                conn = _conn()
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (new_code,))
-                    cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (old_asin,))
-                    if not keep_hist:
-                        cur.execute("DELETE FROM asin_metrics WHERE asin = %s;", (old_asin,))
-                    d = dict_map.get(old_asin)
-                    mk_new = None
-                    tail = new_asin_raw.split(":")[-1].upper()
-                    if ":" in new_asin_raw and tail in MARKET_DOMAINS:
-                        mk_new = tail
-                    else:
-                        for k, dom in MARKET_DOMAINS.items():
-                            if dom in new_asin_raw.lower():
-                                mk_new = k
-                    if d or mk_new:
-                        cur.execute(
-                            """
-                            INSERT INTO asin_dictionary (asin, parent_asin, category, subcategory, product_type, brand, market, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT (asin) DO UPDATE SET
-                                parent_asin = COALESCE(NULLIF(EXCLUDED.parent_asin, ''), asin_dictionary.parent_asin),
-                                category = COALESCE(NULLIF(EXCLUDED.category, ''), asin_dictionary.category),
-                                subcategory = COALESCE(NULLIF(EXCLUDED.subcategory, ''), asin_dictionary.subcategory),
-                                product_type = COALESCE(NULLIF(EXCLUDED.product_type, ''), asin_dictionary.product_type),
-                                brand = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
-                                market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
-                                updated_at = NOW();
-                            """,
-                            (new_code, (d or {}).get("parent_asin", ""), (d or {}).get("category", ""),
-                             (d or {}).get("subcategory", ""), (d or {}).get("product_type", ""),
-                             (d or {}).get("brand", ""), mk_new or (d or {}).get("market", "") or ""))
-                    cur.execute("INSERT INTO asin_metrics (asin, source, note) VALUES (%s, %s, %s);",
-                                (new_code, "none", f"заменил {old_asin}"))
-                conn.commit()
-                conn.close()
-                st.success(f"{old_asin} → {new_code}. Запусти точечную проверку нового ASIN или дождись автосбора.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка замены: {e}")
-
-        # ---- редактор списка выбранной страны ----
-        st.markdown("---")
-        st.markdown(f"**Список ({country})** — {len(display_tracked)} из {len(tracked)} "
-                    "<span class='muted'>· удалить — сотри из текста и пересохрани</span>", unsafe_allow_html=True)
-        edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
-                              key=f"edit_tracked_list_{country}_{len(display_tracked)}", label_visibility="collapsed")
-        b1, b2, b3 = st.columns([1.2, 1.2, 3])
-        if b1.button("💾 Пересохранить список", key="resave_btn"):
-            clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, [], None)
-            if sel_market:
-                for code in clean:
-                    markets.setdefault(code, sel_market)
-            ensure_schema()
-            try:
-                conn = _conn()
-                with conn.cursor() as cur:
-                    # удаляем только из текущего среза; в «Все страны» — полная замена
-                    to_remove = [a for a in display_tracked if a not in clean]
-                    for a in to_remove:
-                        cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (a,))
-                    for code in clean:
-                        cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
-                conn.commit()
-                conn.close()
-                save_markets(markets)
-                msg = f"Сохранено {len(clean)} ASIN"
-                if to_remove:
-                    msg += f" · снято с отслеживания: {len(to_remove)}"
-                if bd:
-                    msg += f" · повторов в тексте убрано: {len(bd)}"
-                if inv_c:
-                    msg += f" · нераспознано: {len(inv_c)} ({', '.join(inv_c[:5])}{' …' if len(inv_c) > 5 else ''})"
-                st.success(msg)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка сохранения: {e}")
-        if b2.button("🗑️ Очистить весь список", key="clear_btn"):
-            try:
-                conn = _conn()
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM tracked_asins;")
-                conn.commit()
-                conn.close()
-                st.success("Список очищен")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка очистки: {e}")
+    with st.expander("📥 Загрузка ASIN — 📋 Портфель (Чайлд)", expanded=False):
+        render_asin_manager("child")
+    with st.expander("📥 Загрузка ASIN — 📋 Портфель (Парент)", expanded=False):
+        render_asin_manager("parent")
 
     st.markdown("### История прогонов")
     runs = get_runs_history()
