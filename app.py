@@ -676,9 +676,9 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_port_p, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
-    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов",
-     "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
+tab_port, tab_port_p, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
+    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)",
+     "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
 
 # ---------- ПОРТФЕЛЬ ----------
 def render_portfolio(filtered_df, kind):
@@ -803,20 +803,25 @@ with tab_port_p:
     render_portfolio(filtered_df, "parent")
 
 # ---------- ДИНАМИКА ПО ДНЯМ (широкая таблица) ----------
-with tab_dyn:
-    st.markdown("### Динамика по дням")
+def render_dynamics(filtered_df, hist_df, kind):
+    st.markdown(f"### Динамика по дням — {KIND_LABEL[kind]}")
+    kind_asins = set(tracked_by_kind.get(kind, []))
+    filtered_df = filtered_df[filtered_df["kind"] == kind].copy() if not filtered_df.empty else filtered_df
+    hist_df = hist_df[hist_df["asin"].isin(kind_asins)].copy() if not hist_df.empty else hist_df
     st.markdown("<div class='muted'>Каждый ASIN — блок строк (Rating / BSR / Reviews / 1–2★), колонки — даты замеров. "
                 "Цвет рейтинга по логике Amazon. Период задаётся фильтром сверху.</div>", unsafe_allow_html=True)
 
-    if hist_df.empty:
+    if not kind_asins:
+        st.info(f"Список «{KIND_LABEL[kind]}» пуст — добавь ASIN во вкладке «Сбор и управление»")
+    elif hist_df.empty:
         st.info("Нет истории под текущие фильтры")
     else:
         d1, d2, d3 = st.columns([2, 1.5, 1.5])
         params_sel = d1.multiselect("Параметры", ["Rating", "BSR", "Reviews", "1–2★ %"],
-                                    default=["Rating", "BSR", "Reviews"])
+                                    default=["Rating", "BSR", "Reviews"], key=f"dyn_params_{kind}")
         sort_by = d2.selectbox("Сортировка ASIN", ["По последнему рейтингу ↑", "По последнему рейтингу ↓",
-                                                   "По падению за период", "По алфавиту"])
-        gran_d = d3.radio("Шаг", ["День", "Неделя"], horizontal=True)
+                                                   "По падению за период", "По алфавиту"], key=f"dyn_sort_{kind}")
+        gran_d = d3.radio("Шаг", ["День", "Неделя"], horizontal=True, key=f"dyn_gran_{kind}")
 
         h = hist_df.copy()
         h["day"] = (h["created_local"].dt.to_period("W").dt.start_time if gran_d == "Неделя"
@@ -998,17 +1003,24 @@ with tab_dyn:
         styled = disp.style.apply(style_row_num, axis=1)
 
         e1, e2 = st.columns([1, 5])
-        e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), "rating_dynamics.csv", "text/csv",
-                           use_container_width=True)
+        e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), f"rating_dynamics_{kind}.csv", "text/csv",
+                           use_container_width=True, key=f"dyn_csv_{kind}")
         try:
             import io
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as xw:
                 styled.to_excel(xw, sheet_name="Dynamics", index=False)
-            e2.download_button("⬇ Excel с цветами", buf.getvalue(), "rating_dynamics.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            e2.download_button("⬇ Excel с цветами", buf.getvalue(), f"rating_dynamics_{kind}.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dyn_xlsx_{kind}")
         except Exception:
             pass
+
+
+with tab_dyn:
+    render_dynamics(filtered_df, hist_df, "child")
+
+with tab_dyn_p:
+    render_dynamics(filtered_df, hist_df, "parent")
 
 # ---------- АНАЛИТИКА ----------
 with tab_an:
