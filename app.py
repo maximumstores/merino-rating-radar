@@ -682,7 +682,7 @@ with tab_port:
                     "ASIN": st.column_config.LinkColumn("ASIN", width="medium", disabled=True,
                                                         display_text=r"/dp/([A-Z0-9]{10})"),
                     "Фото": st.column_config.ImageColumn("Фото", width="small"),
-                    "Источник": st.column_config.TextColumn("Ист.", width="small", disabled=True),
+                    "Источник": st.column_config.TextColumn("Страна", width="small", disabled=True),
                     "Категория": st.column_config.TextColumn("Категория", width="medium", disabled=True),
                     "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
                     "Рейтинг ★": st.column_config.TextColumn("Рейтинг", width="small", disabled=True),
@@ -739,7 +739,7 @@ with tab_port:
                         cnt = str(int(item["Отзывы"])) if pd.notnull(item["Отзывы"]) else "—"
                         d_c = f" (+{int(item['Δ Отзывы'])})" if pd.notnull(item["Δ Отзывы"]) and item["Δ Отзывы"] > 0 else ""
                         tc.markdown(f"**{r_val}★**{d_r} · {cnt} отз.{d_c}")
-                        tc.markdown(f"Источник `{item['Источник']}` · BSR `{item['BSR']}`")
+                        tc.markdown(f"Страна `{item['Источник']}` · BSR `{item['BSR']}`")
                         if item.get("Категория", "—") != "—":
                             tc.markdown(f"<span class='muted'>{item['Категория']}"
                                         f"{' · ' + item['Parent'] if item['Parent'] else ''}</span>", unsafe_allow_html=True)
@@ -807,7 +807,7 @@ with tab_dyn:
             for pname in params_sel:
                 row = param_map[pname].loc[a].tolist()
                 blocks.append([a, src_map.get(a, ""), pname] + row)
-        wide = pd.DataFrame(blocks, columns=["ASIN", "Ист.", "Parameter"] + day_labels)
+        wide = pd.DataFrame(blocks, columns=["ASIN", "Страна", "Parameter"] + day_labels)
 
         # --- стилизация ---
         def rating_color(v):
@@ -873,9 +873,9 @@ with tab_dyn:
         is_group = disp["Parameter"] == "Группа (ср. ★)"
         disp["ASIN"] = [
             (a if g else (f"https://www.{MARKET_DOMAINS.get(src, 'amazon.com.be')}/dp/{a}" if f else ""))
-            for a, src, f, g in zip(wide["ASIN"], wide["Ист."], first_row, is_group)
+            for a, src, f, g in zip(wide["ASIN"], wide["Страна"], first_row, is_group)
         ]
-        disp["Ист."] = disp["Ист."].where(first_row, "")
+        disp["Страна"] = disp["Страна"].where(first_row, "")
 
         # ---- рендер HTML: ссылки на ASIN, цветные ячейки, липкая шапка ----
         def cell_style(p, v, prev):
@@ -891,7 +891,7 @@ with tab_dyn:
                 return "color:#d13438" if v > prev * 1.15 else ("color:#1f8a4c" if v < prev * 0.85 else "")
             return ""
 
-        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Ист.", "Параметр"] + day_labels)
+        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Страна", "Параметр"] + day_labels)
         trs = []
         for _, r in wide.iterrows():
             p = r["Parameter"]
@@ -900,12 +900,12 @@ with tab_dyn:
             if is_grp:
                 a_cell = f"<b>{r['ASIN']}</b>"
             elif first:
-                a_cell = (f"<a href='https://www.{MARKET_DOMAINS.get(r['Ист.'], 'amazon.com.be')}/dp/{r['ASIN']}' "
+                a_cell = (f"<a href='https://www.{MARKET_DOMAINS.get(r['Страна'], 'amazon.com.be')}/dp/{r['ASIN']}' "
                           f"target='_blank' style='font-family:ui-monospace,Menlo,monospace;font-weight:600;"
                           f"color:{PALETTE['accent']};text-decoration:none'>{r['ASIN']}</a>")
             else:
                 a_cell = ""
-            tds = [f"<td class='c-asin'>{a_cell}</td>", f"<td>{r['Ист.'] if first else ''}</td>",
+            tds = [f"<td class='c-asin'>{a_cell}</td>", f"<td>{r['Страна'] if first else ''}</td>",
                    f"<td>{'<b>' + p + '</b>' if is_grp else p}</td>"]
             prev = None
             for col in day_labels:
@@ -1273,7 +1273,7 @@ with tab_bot:
                        "new_ratings", "in_rating", "new_neg", "after"]].copy()
             show["bucket"] = show["bucket"].dt.strftime("%d.%m.%Y")
             show["after"] = show["after"].map({True: "после", False: "до"})
-            show.columns = ["ASIN", "Ист.", "Период", "Было ★", "Стало ★", "Δ★", "Было оценок", "Стало оценок",
+            show.columns = ["ASIN", "Страна", "Период", "Было ★", "Стало ★", "Δ★", "Было оценок", "Стало оценок",
                             "Новых", "Входящий ★", "Новых 1–2★", "Бот"]
             st.dataframe(show.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
                                             "Входящий ★": "{:.2f}", "Было оценок": "{:.0f}", "Стало оценок": "{:.0f}",
@@ -1661,3 +1661,30 @@ with tab_ops:
             show["started_at"] = show["started_at"].dt.strftime("%d.%m.%Y %H:%M")
             show.columns = [f"Старт ({tz_short})", "Статус", "ASIN", "Валидных", "Успех, %", "Длит., мин"]
             st.dataframe(show, use_container_width=True, hide_index=True, height=260)
+
+
+# ==================== КАК ЭТО РАБОТАЕТ ====================
+st.markdown("<br>", unsafe_allow_html=True)
+with st.expander("ℹ️ Как работает Rating Radar", expanded=False):
+    st.markdown(
+        """
+<style>
+.hiw { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:14px; }
+.hiw .card { background:#fff; border:1px solid #e5e5ea; border-radius:12px; padding:14px 16px; }
+.hiw .t { font-weight:650; font-size:14px; margin-bottom:6px; }
+.hiw .d { font-size:13px; color:#3a3a3c; line-height:1.45; }
+.hiw code { background:#f2f2f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+.hiw-note { font-size:12px; color:#6e6e73; margin-top:12px; }
+</style>
+<div class="hiw">
+  <div class="card"><div class="t">1 · Сбор</div><div class="d">Раз в день (по умолчанию 13:00 Киев) или вручную коллектор обходит список ASIN и снимает с витрины Amazon: рейтинг, число оценок, % по звёздам, BSR, фото. Страна берётся из справочника (US → amazon.com), иначе каскад BE → NL. Вся история копится в базе.</div></div>
+  <div class="card"><div class="t">2 · Статус</div><div class="d">Логика Amazon: <b>🟢 ≥ 4.5</b> — норма · <b>🟡 4.3–4.4</b> — внимание · <b>🔴 ≤ 4.2</b> — риск · ⚪ — нет данных. «Запас» — сколько единичных оценок выдержит рейтинг до падения к 4.0.</div></div>
+  <div class="card"><div class="t">3 · Справочник и группы</div><div class="d">Категории, parent, вид, страна — из spr (ссылка на Google Sheet или файл). Селектор «Группировать по» в фильтрах включает разрез по группам во всех вкладках.</div></div>
+  <div class="card"><div class="t">4 · Динамика по дням</div><div class="d">Широкая таблица ASIN × даты: рейтинг / BSR / оценки / % негатива. Зелёные оценки — выросли, красный BSR — просел. Выгрузка в Excel с цветами.</div></div>
+  <div class="card"><div class="t">5 · Бот возвратов</div><div class="d">Маркер ИИ-бота Amazon: рейтинг упал, а оценок почти не прибавилось → пришли пустые 1–2★. Считаем по дням/неделям прирост оценок, их входящий рейтинг и долю негатива, сравнение до/после даты внедрения. Аномалии — отдельной таблицей.</div></div>
+  <div class="card"><div class="t">6 · Прогноз</div><div class="d">Линейный тренд по истории каждого ASIN: рейтинг и число оценок на горизонте 7–90 дней, интервал 95%, «дней до 4.2». Сводный прогноз по портфелю — кто пробьёт красную зону.</div></div>
+</div>
+<div class="hiw-note">Ограничение: витринный рейтинг округлён до 0.1, гистограмма — до 1%. На больших базах (тысячи оценок) входящий рейтинг и число новых 1–2★ — оценка, не точный счёт. Чем чаще замеры — тем точнее.</div>
+""",
+        unsafe_allow_html=True,
+    )
