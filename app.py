@@ -636,8 +636,9 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops = st.tabs(
-    ["📋 Портфель", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление"])
+tab_port, tab_dyn, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
+    ["📋 Портфель", "📅 Динамика по дням", "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление",
+     "ℹ️ Как это работает"])
 
 # ---------- ПОРТФЕЛЬ ----------
 with tab_port:
@@ -1544,27 +1545,39 @@ with tab_ops:
                 st.caption(f"Без записи в справочнике: {len(miss)} ASIN из списка отслеживания")
 
     with st.expander("Управление списком ASIN", expanded=False):
-        h1, h2 = st.columns([3, 1])
-        h1.markdown(
-            "**Форматы:** `B09NWGDK3S` · `B0H6YBDKXJ:US` · `B09NWGDK3S:DE` · `B09NWGDK3S:BE` · "
-            "`https://www.amazon.com/dp/B0H6YBDKXJ`")
-        market_filter = h2.selectbox("Фильтр по стране", options=["Все страны"] + list(MARKET_DOMAINS.keys()),
-                                     index=0, key="market_filter_select")
-        display_tracked = tracked if market_filter == "Все страны" else [
-            a for a in tracked if asin_market_map.get(a, "BE") == market_filter or a.endswith(f":{market_filter}")]
-
-        # ---- быстрое добавление с проверкой дублей ----
-        st.markdown("**➕ Добавить ASIN в список** <span class='muted'>— дубли не запишутся, только новые</span>",
+        # --- одна страна на весь блок: и фильтр списка, и страна для новых ---
+        by_country = {}
+        for a in tracked:
+            by_country.setdefault(asin_market_map.get(a) if a in dict_map and dict_map[a].get("market") else "—", []).append(a)
+        counts = " · ".join(f"**{k}**: {len(v)}" for k, v in sorted(by_country.items(), key=lambda kv: (kv[0] == "—", kv[0])))
+        st.markdown(f"Всего отслеживается **{len(tracked)}** — {counts} &nbsp; "
+                    f"<span class='muted'>(«—» = страна не задана, коллектор идёт каскадом BE → NL)</span>",
                     unsafe_allow_html=True)
-        ad1, ad2 = st.columns([4, 1])
-        add_text = ad1.text_area("Пачка ASIN / ссылок", height=90, key="add_asins_text",
-                                 placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
-                                 label_visibility="collapsed")
-        add_market = ad2.selectbox("Страна", options=["— (каскад)"] + list(MARKET_DOMAINS.keys()), index=1,
-                                   key="add_market_sel")
+
+        c_sel, c_hint = st.columns([1, 3])
+        country = c_sel.selectbox("Страна", options=["Все страны"] + list(MARKET_DOMAINS.keys()) + ["— без страны"],
+                                  index=1, key="asin_country_sel")
+        c_hint.markdown("<div class='muted' style='margin-top:30px'>Выбранная страна применяется ко всему блоку: "
+                        "показывает ASIN этой страны, новые ASIN из пачки получают её, пересохранение меняет только её список. "
+                        "Форматы: <code>B09NWGDK3S</code> · <code>B09NWGDK3S:DE</code> · ссылка на листинг "
+                        "(страна из суффикса/ссылки имеет приоритет).</div>", unsafe_allow_html=True)
+
+        sel_market = country if country in MARKET_DOMAINS else None
+        if country == "Все страны":
+            display_tracked = tracked
+        elif country == "— без страны":
+            display_tracked = by_country.get("—", [])
+        else:
+            display_tracked = by_country.get(country, [])
+
+        # ---- добавить пачку ----
+        st.markdown("**➕ Добавить ASIN** <span class='muted'>— дубли не запишутся, только новые</span>",
+                    unsafe_allow_html=True)
+        add_text = st.text_area("Пачка ASIN / ссылок", height=90, key="add_asins_text",
+                                placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
+                                label_visibility="collapsed")
         if add_text.strip():
-            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked,
-                                                              add_market if add_market in MARKET_DOMAINS else None)
+            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked, sel_market)
             p1, p2, p3 = st.columns(3)
             p1.markdown(f"🟢 **Новых: {len(new_c)}**" + (f"<br><span class='muted'>{', '.join(new_c[:30])}"
                         f"{' …' if len(new_c) > 30 else ''}</span>" if new_c else ""), unsafe_allow_html=True)
@@ -1574,7 +1587,8 @@ with tab_ops:
                         f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
                         + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
                         unsafe_allow_html=True)
-            if st.button(f"➕ Добавить {len(new_c)} новых", type="primary", disabled=not new_c, key="add_asins_btn"):
+            lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (каскад)")
+            if st.button(lbl, type="primary", disabled=not new_c, key="add_asins_btn"):
                 ensure_schema()
                 try:
                     conn = _conn()
@@ -1588,38 +1602,95 @@ with tab_ops:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка добавления: {e}")
-        st.markdown("---")
 
-        st.markdown(f"**Текущие ASIN (`{market_filter}`)** — {len(display_tracked)} из {len(tracked)} "
-                    "<span class='muted'>(полное редактирование: удалить — сотри из текста и пересохрани)</span>",
-                    unsafe_allow_html=True)
+        # ---- заменить ASIN ----
+        st.markdown("---")
+        st.markdown("**🔁 Заменить ASIN** <span class='muted'>— старый уходит из отслеживания, новый встаёт на его место "
+                    "и наследует категорию/parent/страну из справочника</span>", unsafe_allow_html=True)
+        r1, r2, r3, r4 = st.columns([2, 2, 1.2, 1])
+        old_asin = r1.selectbox("Старый ASIN", options=[""] + tracked, key="repl_old")
+        new_asin_raw = r2.text_input("Новый ASIN / ссылка", key="repl_new", placeholder="B0XXXXXXXX или ссылка")
+        keep_hist = r3.checkbox("Сохранить историю старого", value=True, key="repl_keep")
+        new_code = extract_asin(new_asin_raw) if new_asin_raw.strip() else ""
+        new_valid = bool(new_code) and len(new_code) == 10 and new_code != old_asin
+        if new_asin_raw.strip() and not new_valid:
+            r2.caption("⚠️ не похоже на ASIN")
+        elif new_valid and new_code in tracked:
+            r2.caption("⚠️ уже отслеживается — будет просто снят старый")
+        r4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if r4.button("Заменить", disabled=not (old_asin and new_valid), key="repl_btn", use_container_width=True):
+            try:
+                ensure_schema()
+                ensure_dict_table()
+                conn = _conn()
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (new_code,))
+                    cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (old_asin,))
+                    if not keep_hist:
+                        cur.execute("DELETE FROM asin_metrics WHERE asin = %s;", (old_asin,))
+                    d = dict_map.get(old_asin)
+                    mk_new = None
+                    tail = new_asin_raw.split(":")[-1].upper()
+                    if ":" in new_asin_raw and tail in MARKET_DOMAINS:
+                        mk_new = tail
+                    else:
+                        for k, dom in MARKET_DOMAINS.items():
+                            if dom in new_asin_raw.lower():
+                                mk_new = k
+                    if d or mk_new:
+                        cur.execute(
+                            """
+                            INSERT INTO asin_dictionary (asin, parent_asin, category, subcategory, product_type, brand, market, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT (asin) DO UPDATE SET
+                                parent_asin = COALESCE(NULLIF(EXCLUDED.parent_asin, ''), asin_dictionary.parent_asin),
+                                category = COALESCE(NULLIF(EXCLUDED.category, ''), asin_dictionary.category),
+                                subcategory = COALESCE(NULLIF(EXCLUDED.subcategory, ''), asin_dictionary.subcategory),
+                                product_type = COALESCE(NULLIF(EXCLUDED.product_type, ''), asin_dictionary.product_type),
+                                brand = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
+                                market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                                updated_at = NOW();
+                            """,
+                            (new_code, (d or {}).get("parent_asin", ""), (d or {}).get("category", ""),
+                             (d or {}).get("subcategory", ""), (d or {}).get("product_type", ""),
+                             (d or {}).get("brand", ""), mk_new or (d or {}).get("market", "") or ""))
+                    cur.execute("INSERT INTO asin_metrics (asin, source, note) VALUES (%s, %s, %s);",
+                                (new_code, "none", f"заменил {old_asin}"))
+                conn.commit()
+                conn.close()
+                st.success(f"{old_asin} → {new_code}. Запусти точечную проверку нового ASIN или дождись автосбора.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка замены: {e}")
+
+        # ---- редактор списка выбранной страны ----
+        st.markdown("---")
+        st.markdown(f"**Список ({country})** — {len(display_tracked)} из {len(tracked)} "
+                    "<span class='muted'>· удалить — сотри из текста и пересохрани</span>", unsafe_allow_html=True)
         edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
-                              key=f"edit_tracked_list_{market_filter}", label_visibility="collapsed")
-        b0, b1, b2 = st.columns([1.2, 1, 1])
-        default_market = b0.selectbox("Страна для новых ASIN", options=["— (каскад BE/NL)"] + list(MARKET_DOMAINS.keys()),
-                                      index=1, help="Записывается в справочник; при прогоне коллектор пойдёт на этот домен")
-        if b1.button("💾 Пересохранить список"):
-            existing_for_check = [] if market_filter == "Все страны" else tracked
-            clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, existing_for_check, None)
-            # явные :XX / ссылки — всегда; страна по умолчанию — только для действительно новых ASIN
-            if default_market in MARKET_DOMAINS:
+                              key=f"edit_tracked_list_{country}_{len(display_tracked)}", label_visibility="collapsed")
+        b1, b2, b3 = st.columns([1.2, 1.2, 3])
+        if b1.button("💾 Пересохранить список", key="resave_btn"):
+            clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, [], None)
+            if sel_market:
                 for code in clean:
-                    if code not in markets and code not in dict_map and code not in tracked:
-                        markets[code] = default_market
+                    markets.setdefault(code, sel_market)
             ensure_schema()
             try:
                 conn = _conn()
                 with conn.cursor() as cur:
-                    if market_filter == "Все страны":
-                        cur.execute("DELETE FROM tracked_asins;")
+                    # удаляем только из текущего среза; в «Все страны» — полная замена
+                    to_remove = [a for a in display_tracked if a not in clean]
+                    for a in to_remove:
+                        cur.execute("DELETE FROM tracked_asins WHERE asin = %s;", (a,))
                     for code in clean:
                         cur.execute("INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING;", (code,))
                 conn.commit()
                 conn.close()
                 save_markets(markets)
                 msg = f"Сохранено {len(clean)} ASIN"
-                if dup_c:
-                    msg += f" · уже были: {len(dup_c)}"
+                if to_remove:
+                    msg += f" · снято с отслеживания: {len(to_remove)}"
                 if bd:
                     msg += f" · повторов в тексте убрано: {len(bd)}"
                 if inv_c:
@@ -1628,7 +1699,7 @@ with tab_ops:
                 st.rerun()
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
-        if b2.button("🗑️ Очистить весь список"):
+        if b2.button("🗑️ Очистить весь список", key="clear_btn"):
             try:
                 conn = _conn()
                 with conn.cursor() as cur:
@@ -1663,28 +1734,119 @@ with tab_ops:
             st.dataframe(show, use_container_width=True, hide_index=True, height=260)
 
 
-# ==================== КАК ЭТО РАБОТАЕТ ====================
-st.markdown("<br>", unsafe_allow_html=True)
-with st.expander("ℹ️ Как работает Rating Radar", expanded=False):
+# ---------- КАК ЭТО РАБОТАЕТ ----------
+with tab_help:
     st.markdown(
         """
 <style>
-.hiw { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:14px; }
-.hiw .card { background:#fff; border:1px solid #e5e5ea; border-radius:12px; padding:14px 16px; }
-.hiw .t { font-weight:650; font-size:14px; margin-bottom:6px; }
-.hiw .d { font-size:13px; color:#3a3a3c; line-height:1.45; }
-.hiw code { background:#f2f2f7; padding:1px 5px; border-radius:4px; font-size:12px; }
-.hiw-note { font-size:12px; color:#6e6e73; margin-top:12px; }
+.hw h2 { font-size:22px; font-weight:700; margin:22px 0 8px; letter-spacing:-.02em; }
+.hw h3 { font-size:15px; font-weight:650; margin:14px 0 6px; }
+.hw p, .hw li { font-size:14px; line-height:1.5; color:#1d1d1f; }
+.hw .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; margin:8px 0 6px; }
+.hw .card { background:#fff; border:1px solid #e5e5ea; border-radius:12px; padding:14px 16px; }
+.hw .card .t { font-weight:650; font-size:14px; margin-bottom:6px; }
+.hw .card .d { font-size:13px; color:#3a3a3c; line-height:1.45; }
+.hw code { background:#f2f2f7; padding:1px 6px; border-radius:4px; font-size:12.5px; }
+.hw .flow { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0 14px; }
+.hw .step { background:#fff; border:1px solid #e5e5ea; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; }
+.hw .arr { color:#8e8e93; }
+.hw table { border-collapse:collapse; font-size:13px; margin:6px 0 10px; }
+.hw th, .hw td { border-bottom:1px solid #e5e5ea; padding:6px 12px; text-align:left; vertical-align:top; }
+.hw th { color:#6e6e73; font-weight:600; background:#f5f5f7; }
+.hw .b { display:inline-block; padding:1px 9px; border-radius:999px; color:#fff; font-size:12px; font-weight:600; }
+.hw .note { background:#fff8e1; border:1px solid #ffe082; border-radius:10px; padding:10px 14px; font-size:13px; margin:10px 0; }
+.hw .ok { background:#e8f5e9; border:1px solid #a5d6a7; border-radius:10px; padding:10px 14px; font-size:13px; margin:10px 0; }
 </style>
-<div class="hiw">
-  <div class="card"><div class="t">1 · Сбор</div><div class="d">Раз в день (по умолчанию 13:00 Киев) или вручную коллектор обходит список ASIN и снимает с витрины Amazon: рейтинг, число оценок, % по звёздам, BSR, фото. Страна берётся из справочника (US → amazon.com), иначе каскад BE → NL. Вся история копится в базе.</div></div>
-  <div class="card"><div class="t">2 · Статус</div><div class="d">Логика Amazon: <b>🟢 ≥ 4.5</b> — норма · <b>🟡 4.3–4.4</b> — внимание · <b>🔴 ≤ 4.2</b> — риск · ⚪ — нет данных. «Запас» — сколько единичных оценок выдержит рейтинг до падения к 4.0.</div></div>
-  <div class="card"><div class="t">3 · Справочник и группы</div><div class="d">Категории, parent, вид, страна — из spr (ссылка на Google Sheet или файл). Селектор «Группировать по» в фильтрах включает разрез по группам во всех вкладках.</div></div>
-  <div class="card"><div class="t">4 · Динамика по дням</div><div class="d">Широкая таблица ASIN × даты: рейтинг / BSR / оценки / % негатива. Зелёные оценки — выросли, красный BSR — просел. Выгрузка в Excel с цветами.</div></div>
-  <div class="card"><div class="t">5 · Бот возвратов</div><div class="d">Маркер ИИ-бота Amazon: рейтинг упал, а оценок почти не прибавилось → пришли пустые 1–2★. Считаем по дням/неделям прирост оценок, их входящий рейтинг и долю негатива, сравнение до/после даты внедрения. Аномалии — отдельной таблицей.</div></div>
-  <div class="card"><div class="t">6 · Прогноз</div><div class="d">Линейный тренд по истории каждого ASIN: рейтинг и число оценок на горизонте 7–90 дней, интервал 95%, «дней до 4.2». Сводный прогноз по портфелю — кто пробьёт красную зону.</div></div>
+<div class="hw">
+
+<h2>Что это</h2>
+<p><b>Rating Radar</b> — мониторинг индивидуальных рейтингов чайлд-ASIN. На основных маркетплейсах рейтинг чайлда скрыт под парентом, поэтому радар снимает его с витрины напрямую и копит историю по дням: рейтинг, число оценок, распределение звёзд, BSR. На этой истории строятся статусы, динамика, детектор бота возвратов и прогноз.</p>
+
+<h2>Как идёт сбор</h2>
+<div class="flow">
+  <span class="step">1. Список ASIN</span><span class="arr">→</span>
+  <span class="step">2. Страна из справочника</span><span class="arr">→</span>
+  <span class="step">3. Витрина Amazon</span><span class="arr">→</span>
+  <span class="step">4. Парсинг метрик</span><span class="arr">→</span>
+  <span class="step">5. База (история)</span><span class="arr">→</span>
+  <span class="step">6. Дашборд</span>
 </div>
-<div class="hiw-note">Ограничение: витринный рейтинг округлён до 0.1, гистограмма — до 1%. На больших базах (тысячи оценок) входящий рейтинг и число новых 1–2★ — оценка, не точный счёт. Чем чаще замеры — тем точнее.</div>
+<div class="grid">
+  <div class="card"><div class="t">Когда</div><div class="d">Автосбор раз в сутки в заданное время (по умолчанию 13:00 Киев, вкладка «Сбор и управление») — либо вручную кнопкой «Запустить прогон». Отдельно — «Точечная проверка» для нескольких позиций и «Обновить выбранные» из таблицы портфеля.</div></div>
+  <div class="card"><div class="t">Откуда</div><div class="d">Если у ASIN в справочнике стоит страна (например <code>US</code>) — коллектор идёт на <code>amazon.com</code>. Если страны нет — каскад <code>amazon.com.be → amazon.nl</code> (там чайлды показываются отдельно). Если и там пусто — фолбэк по письменным ревью, помечается как «неполные данные».</div></div>
+  <div class="card"><div class="t">Что снимается</div><div class="d">Рейтинг (0.1), число оценок, гистограмма звёзд в %, BSR, фото. Каждый замер пишется отдельной строкой — ничего не перезаписывается, история сохраняется полностью.</div></div>
+</div>
+
+<h2>Статусы и цвета</h2>
+<p>Пороги — по логике Amazon, одинаковые во всех вкладках:</p>
+<table>
+<tr><th>Статус</th><th>Рейтинг</th><th>Что значит</th></tr>
+<tr><td><span class="b" style="background:#1f8a4c">ОК</span></td><td>≥ 4.5</td><td>Норма, ничего не делаем</td></tr>
+<tr><td><span class="b" style="background:#c77800">Внимание</span></td><td>4.3 – 4.4</td><td>Рейтинг начал проседать, смотрим на негатив и запас</td></tr>
+<tr><td><span class="b" style="background:#d13438">Риск</span></td><td>≤ 4.2</td><td>Красная зона, нужны меры</td></tr>
+<tr><td><span class="b" style="background:#8e8e93">Нет данных</span></td><td>—</td><td>Витрина не отдала рейтинг (нет оценок, вариация, капча)</td></tr>
+</table>
+<h3>Дополнительные показатели</h3>
+<ul>
+  <li><b>1–2★ %</b> — доля единиц и двоек из гистограммы. Подсветка: &gt; 8% жёлтая, &gt; 15% красная.</li>
+  <li><b>Запас (до 4.0)</b> — сколько единичных оценок выдержит рейтинг, прежде чем упадёт к 4.0. Формула: <code>оценок × (рейтинг − 4.0) / 3</code>. Чем меньше — тем уязвимее позиция.</li>
+  <li><b>Δ★ / Δ отз.</b> — изменение к предыдущему замеру.</li>
+  <li><b>Тренд</b> — ↓ если негатив &gt; 20% или рейтинг &lt; 4.2; ↑ если негатив &lt; 8% и рейтинг ≥ 4.5.</li>
+</ul>
+
+<h2>Фильтры и группировка</h2>
+<p>Панель сверху действует на все вкладки сразу: ASIN, категория, parent, страна, статус, тумблер «Только США», часовой пояс, период истории. <b>«Группировать по»</b> включает разрез по категории / подкатегории / виду / parent / бренду / стране — появляется сводка по группам в портфеле, заголовки групп в таблице по дням, разрез по группам в аналитике и в боте.</p>
+
+<h2>Справочник</h2>
+<p>Группы и страны берутся из spr (Google Sheet или CSV/XLSX), загрузка во вкладке «Сбор и управление» → «Справочник». Колонки распознаются по названию:</p>
+<table>
+<tr><th>В радаре</th><th>Колонка в spr</th></tr>
+<tr><td>Категория</td><td><code>Category+parent</code> (или <code>категория</code>, <code>category</code>)</td></tr>
+<tr><td>Подкатегория</td><td><code>Parent group</code> (или <code>subcategory</code>)</td></tr>
+<tr><td>Вид</td><td><code>тип</code> / <code>type</code> / <code>вид</code></td></tr>
+<tr><td>Parent</td><td><code>Parent ASIN</code></td></tr>
+<tr><td>Страна</td><td><code>market</code> / <code>country</code> / <code>страна</code> — US, BE, NL, DE, UK, FR, IT, ES</td></tr>
+</table>
+<p>Строки с пометкой в «Архив» пропускаются. Режим «дополнить» обновляет существующие записи и добавляет новые, «заменить» — стирает справочник и грузит заново.</p>
+
+<h2>Вкладки</h2>
+<div class="grid">
+  <div class="card"><div class="t">📋 Портфель</div><div class="d">Текущее состояние каждой позиции: статус, рейтинг, оценки, дельты, негатив, запас, BSR. Галочки → массовое обновление или удаление. Вид «Карточки» — то же с фото. Выгрузка CSV.</div></div>
+  <div class="card"><div class="t">📅 Динамика по дням</div><div class="d">Таблица ASIN × даты, как в гугл-шите: Rating / BSR / Reviews / 1–2★. Рейтинг закрашен по статусу, зелёные Reviews — выросли, красный BSR — просел на 15%+. Шаг день или неделя, сортировка по падению за период. Выгрузка в Excel с цветами.</div></div>
+  <div class="card"><div class="t">📊 Аналитика</div><div class="d">Портфель целиком: распределение по статусам, средний рейтинг и % риска по дням, рейтинг × оценки (кто крупный и падает), топ по негативу, самый тонкий запас, разрез по странам и группам, тепловая карта Δ рейтинга, прирост оценок.</div></div>
+  <div class="card"><div class="t">🤖 Бот возвратов</div><div class="d">Детектор ИИ-бота возвратов Amazon — см. ниже.</div></div>
+  <div class="card"><div class="t">📈 Прогноз</div><div class="d">Линейный тренд по истории ASIN: рейтинг и оценки на 7–90 дней вперёд, 95% интервал, «дней до 4.2», скорость оценок в день, гистограмма звёзд. Сводный прогноз по портфелю на +30 дней — кто пробьёт красную зону.</div></div>
+  <div class="card"><div class="t">⚙️ Сбор и управление</div><div class="d">Ручной прогон, автосбор, точечная проверка, справочник, список ASIN (добавление с проверкой дублей, редактирование, очистка), история прогонов.</div></div>
+</div>
+
+<h2>Детектор бота возвратов</h2>
+<p><b>Гипотеза.</b> Новый ИИ-бот Amazon при возврате просит покупателя поставить оценку без текста. Такие оценки — в основном 1–2★. На витрине это выглядит так: <b>рейтинг падает, а число оценок почти не растёт</b>. Обычный негативный отзыв двигает обе цифры; бот двигает только рейтинг.</p>
+<h3>Что считаем между двумя замерами</h3>
+<ul>
+  <li><b>Новых оценок</b> = оценок сейчас − оценок в прошлый раз.</li>
+  <li><b>Входящий рейтинг</b> = средний балл именно новых оценок: <code>(R₂·N₂ − R₁·N₁) / (N₂ − N₁)</code>. Если по портфелю он ниже ~3 — заходит негатив.</li>
+  <li><b>Новых 1–2★</b> ≈ Δ(% негатива × оценок) — сколько единиц/двоек добавилось.</li>
+  <li><b>Аномалия</b> = рейтинг упал на ≥ порог (по умолчанию 0.1) <u>и</u> оценок прибавилось меньше порога % от базы (по умолчанию 0.5%). Оба порога настраиваются.</li>
+</ul>
+<h3>Что показываем</h3>
+<ul>
+  <li>KPI «до / после» даты внедрения (по умолчанию 20.08.2026): новых оценок, из них негатив, доля негатива во входящих, входящий рейтинг, число аномалий.</li>
+  <li>Прирост оценок и негатива по дням/неделям с линией внедрения; входящий рейтинг и аномалии по периодам.</li>
+  <li>Карта аномалий: каждая точка — замер ASIN, ось X прирост оценок %, ось Y Δ рейтинга; красная зона — «упал без роста».</li>
+  <li>Таблица аномалий с CSV; разрез по группам и по ASIN до/после.</li>
+</ul>
+<div class="note"><b>Оговорка про точность.</b> Витринный рейтинг округлён до 0.1, гистограмма — до 1%. На большой базе (тысячи оценок) падение на 0.1 при +2 оценках математически означает, что реальный рейтинг был у границы округления — поэтому «входящий рейтинг» и «новых 1–2★» это оценка, не точный счёт. Сигнал надёжный на уровне портфеля и категорий, на уровне одного крупного ASIN — смотрим серию замеров, не один. Чем чаще сбор — тем точнее.</div>
+
+<h2>Типовой сценарий</h2>
+<ol>
+  <li>Загрузить spr → включить «Группировать по: Категория».</li>
+  <li>Добавить US-ASIN пачкой (страна US) → запустить прогон.</li>
+  <li>Через несколько дней: «Портфель» — кто ушёл в жёлтую/красную зону; «Динамика» — где именно упало; «Бот возвратов» — вырос ли негатив после внедрения и в каких категориях.</li>
+  <li>«Прогноз» — кому осталось меньше всего дней до 4.2, туда усилия в первую очередь.</li>
+</ol>
+<div class="ok"><b>Ограничение источника.</b> Официальный API Amazon отдаёт только текстовые отзывы, не оценки — поэтому всё берётся с витрины через скрейпинг. Это же причина, почему иногда встречается «Нет данных»: капча, вариация, временная недоступность. Такие позиции подхватятся на следующем прогоне.</div>
+
+</div>
 """,
         unsafe_allow_html=True,
     )
