@@ -47,7 +47,9 @@ PALETTE = {
     "muted": "#6e6e73",
 }
 STATUS_COLOR = {"ОК": PALETTE["ok"], "Внимание": PALETTE["warn"],
-                "Риск": PALETTE["risk"], "Нет данных": PALETTE["none"]}
+                "Риск": PALETTE["risk"], "Нет данных": PALETTE["none"],
+                "🟢 ОК": PALETTE["ok"], "🟡 Внимание": PALETTE["warn"],
+                "🔴 Риск": PALETTE["risk"], "⚪ Нет данных": PALETTE["none"]}
 
 st.markdown(
     """
@@ -108,8 +110,12 @@ def kpi(col, label, value, sub="", color=None):
     )
 
 
+def status_key(text):
+    return str(text).split(" ", 1)[-1] if str(text)[:1] in "🟢🟡🔴⚪" else str(text)
+
+
 def badge(text):
-    return f"<span class='badge' style='background:{STATUS_COLOR.get(text, PALETTE['none'])}'>{text}</span>"
+    return f"<span class='badge' style='background:{STATUS_COLOR.get(status_key(text), PALETTE['none'])}'>{status_key(text)}</span>"
 
 
 clean_db_trash()
@@ -520,15 +526,30 @@ def build_calc_df(df):
     return pd.DataFrame(rows)
 
 
+def rating_emoji(r):
+    if r is None or pd.isna(r):
+        return "⚪"
+    if r >= 4.45:
+        return "🟢"
+    if r >= 4.25:
+        return "🟡"
+    return "🔴"
+
+
 calc_df = build_calc_df(full_df)
+if not calc_df.empty:
+    for c in ["Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "margin"]:
+        calc_df[c] = pd.to_numeric(calc_df[c], errors="coerce")
+    calc_df["Рейтинг ★"] = [f"{rating_emoji(r)} {r:.2f}" if pd.notnull(r) else "⚪ —" for r in calc_df["Рейтинг"]]
+    calc_df["Статус"] = [f"{rating_emoji(r)} {s_}" for r, s_ in zip(calc_df["Рейтинг"], calc_df["Статус"])]
 
 # ==================== KPI ====================
 if not calc_df.empty:
     n_total = len(calc_df)
-    n_risk = int((calc_df["Статус"] == "Риск").sum())
-    n_warn = int((calc_df["Статус"] == "Внимание").sum())
-    n_ok = int((calc_df["Статус"] == "ОК").sum())
-    n_none = int((calc_df["Статус"] == "Нет данных").sum())
+    n_risk = int(calc_df["Статус"].str.endswith("Риск").sum())
+    n_warn = int(calc_df["Статус"].str.endswith("Внимание").sum())
+    n_ok = int(calc_df["Статус"].str.endswith("ОК").sum())
+    n_none = int(calc_df["Статус"].str.endswith("Нет данных").sum())
     avg_r = calc_df["Рейтинг"].mean()
     w_avg = None
     if calc_df["Отзывы"].fillna(0).sum() > 0:
@@ -569,7 +590,7 @@ with fc3:
 with fc4:
     sel_sources = st.multiselect("Страна", options=all_sources, default=[], placeholder="Все")
 with fc5:
-    sel_status = st.multiselect("Статус", options=["ОК", "Внимание", "Риск", "Нет данных"], default=[],
+    sel_status = st.multiselect("Статус", options=["🟢 ОК", "🟡 Внимание", "🔴 Риск", "⚪ Нет данных"], default=[],
                                 placeholder="Все")
 with fc6:
     st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
@@ -597,7 +618,7 @@ if not calc_df.empty:
         & calc_df["Категория"].isin(sel_cats if sel_cats else all_cats)
         & (calc_df["Parent"].isin(sel_parents) if sel_parents else True)
         & calc_df["Источник"].isin(src_ok)
-        & calc_df["Статус"].isin(sel_status if sel_status else ["ОК", "Внимание", "Риск", "Нет данных"])
+        & (calc_df["Статус"].isin(sel_status) if sel_status else True)
     ].copy()
     if GROUP_DF_COL:
         filtered_df["_group"] = filtered_df[GROUP_DF_COL].replace("", "—")
@@ -632,9 +653,9 @@ with tab_port:
             st.markdown(f"**Сводка по группам: {group_field}**")
             gsum = filtered_df.groupby("_group").agg(
                 Позиций=("raw_asin", "count"), Рейтинг=("Рейтинг", "mean"),
-                Отзывов=("Отзывы", "sum"), Риск=("Статус", lambda x: int((x == "Риск").sum())),
-                Внимание=("Статус", lambda x: int((x == "Внимание").sum())),
-                ОК=("Статус", lambda x: int((x == "ОК").sum())),
+                Отзывов=("Отзывы", "sum"), Риск=("Статус", lambda x: int(x.str.endswith("Риск").sum())),
+                Внимание=("Статус", lambda x: int(x.str.endswith("Внимание").sum())),
+                ОК=("Статус", lambda x: int(x.str.endswith("ОК").sum())),
                 Негатив=("bad_pct", "mean")).reset_index().rename(columns={"_group": group_field})
             gsum = gsum.sort_values("Рейтинг")
             st.dataframe(gsum.style.format({"Рейтинг": "{:.2f}", "Отзывов": "{:,.0f}", "Негатив": "{:.0f}%"}),
@@ -643,7 +664,7 @@ with tab_port:
 
         if view_mode == "Таблица":
             cols_order = ["Выбор", "Статус", "Время сбора", "ASIN", "Фото", "Источник", "Категория", "Parent",
-                          "Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR",
+                          "Рейтинг ★", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR",
                           "Комментарий"]
             if GROUP_DF_COL:
                 cols_order = [GROUP_DF_COL] + [c for c in cols_order if c != GROUP_DF_COL]
@@ -664,8 +685,7 @@ with tab_port:
                     "Источник": st.column_config.TextColumn("Ист.", width="small", disabled=True),
                     "Категория": st.column_config.TextColumn("Категория", width="medium", disabled=True),
                     "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
-                    "Рейтинг": st.column_config.ProgressColumn("Рейтинг", format="%.2f", min_value=1.0, max_value=5.0,
-                                                               width="medium"),
+                    "Рейтинг ★": st.column_config.TextColumn("Рейтинг", width="small", disabled=True),
                     "Δ Рейтинг": st.column_config.NumberColumn("Δ★", format="%+.2f", width="small", disabled=True),
                     "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
                     "Δ Отзывы": st.column_config.NumberColumn("Δ отз.", format="%+d", width="small", disabled=True),
@@ -692,7 +712,8 @@ with tab_port:
                     delete_asin_completely(a)
                 st.success(f"Удалено: {len(selected_asins)}")
                 st.rerun()
-            csv = filtered_df.drop(columns=["Выбор", "raw_created_at", "Фото", "bad_pct", "five_pct", "margin"]) \
+            csv = filtered_df.drop(columns=["Выбор", "raw_created_at", "Фото", "bad_pct", "five_pct", "margin", "Рейтинг ★"],
+                                   errors="ignore") \
                 .to_csv(index=False).encode("utf-8-sig")
             a4.download_button("⬇ CSV", csv, "rating_radar.csv", "text/csv", use_container_width=True)
 
@@ -856,21 +877,71 @@ with tab_dyn:
         ]
         disp["Ист."] = disp["Ист."].where(first_row, "")
 
-        # стили считаем по числовым значениям из wide
+        # ---- рендер HTML: ссылки на ASIN, цветные ячейки, липкая шапка ----
+        def cell_style(p, v, prev):
+            if p == "Группа (ср. ★)":
+                return rating_color(v) if pd.notnull(v) else "background:#e8e8ed"
+            if p == "Rating":
+                return rating_color(v)
+            if p == "1–2★ %" and pd.notnull(v):
+                return "background:#ffcdd2" if v > 15 else ("background:#fff9c4" if v > 8 else "")
+            if p == "Reviews" and pd.notnull(v) and prev is not None and pd.notnull(prev) and v > prev:
+                return "color:#1f8a4c;font-weight:600"
+            if p == "BSR" and pd.notnull(v) and prev is not None and pd.notnull(prev):
+                return "color:#d13438" if v > prev * 1.15 else ("color:#1f8a4c" if v < prev * 0.85 else "")
+            return ""
+
+        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Ист.", "Параметр"] + day_labels)
+        trs = []
+        for _, r in wide.iterrows():
+            p = r["Parameter"]
+            is_grp = p == "Группа (ср. ★)"
+            first = (not is_grp) and p == (params_sel[0] if params_sel else "")
+            if is_grp:
+                a_cell = f"<b>{r['ASIN']}</b>"
+            elif first:
+                a_cell = (f"<a href='https://www.{MARKET_DOMAINS.get(r['Ист.'], 'amazon.com.be')}/dp/{r['ASIN']}' "
+                          f"target='_blank' style='font-family:ui-monospace,Menlo,monospace;font-weight:600;"
+                          f"color:{PALETTE['accent']};text-decoration:none'>{r['ASIN']}</a>")
+            else:
+                a_cell = ""
+            tds = [f"<td class='c-asin'>{a_cell}</td>", f"<td>{r['Ист.'] if first else ''}</td>",
+                   f"<td>{'<b>' + p + '</b>' if is_grp else p}</td>"]
+            prev = None
+            for col in day_labels:
+                v = r[col]
+                tds.append(f"<td style='{cell_style(p, v, prev)}'>{fmt(v, p)}</td>")
+                if pd.notnull(v):
+                    prev = v
+            row_cls = "grp" if is_grp else ("blk" if first else "")
+            trs.append(f"<tr class='{row_cls}'>{''.join(tds)}</tr>")
+
+        html = f"""
+<style>
+.dyn-wrap {{ max-height: 760px; overflow: auto; border:1px solid #e5e5ea; border-radius:12px; background:#fff; }}
+.dyn {{ border-collapse: separate; border-spacing:0; font-size:13px; min-width:100%; }}
+.dyn th {{ position: sticky; top:0; background:#f5f5f7; color:#6e6e73; font-weight:600; text-align:right;
+           padding:8px 10px; border-bottom:1px solid #e5e5ea; white-space:nowrap; z-index:2; }}
+.dyn th:nth-child(-n+3) {{ text-align:left; }}
+.dyn td {{ padding:6px 10px; border-bottom:1px solid #f0f0f2; text-align:right; white-space:nowrap; }}
+.dyn td:nth-child(-n+3) {{ text-align:left; }}
+.dyn td.c-asin {{ position: sticky; left:0; background:#fff; z-index:1; min-width:120px; }}
+.dyn th:first-child {{ position: sticky; left:0; z-index:3; }}
+.dyn tr.blk td {{ border-top:1px solid #d9d9de; }}
+.dyn tr.grp td {{ background:#e8e8ed; border-top:2px solid #c7c7cc; }}
+</style>
+<div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
+"""
+        st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
+        st.markdown(html, unsafe_allow_html=True)
+
+        # Styler — только для выгрузки в Excel
         def style_row_num(row):
             return style_row(wide.loc[row.name])
-        styled = disp.style.apply(style_row_num, axis=1).set_properties(
-            subset=day_labels, **{"text-align": "right"}).set_properties(
-            subset=["ASIN"], **{"font-weight": "600", "font-family": "ui-monospace, Menlo, monospace"})
-
-        st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(disp)} строк")
-        st.dataframe(styled, use_container_width=True, hide_index=True,
-                     height=min(800, 40 + 35 * len(disp)),
-                     column_config={"ASIN": st.column_config.LinkColumn("ASIN", width="medium",
-                                                                        display_text=r"/dp/([A-Z0-9]{10})"),
-                                    "Ист.": st.column_config.TextColumn(width="small"),
-                                    "Parameter": st.column_config.TextColumn("Параметр", width="small"),
-                                    **{d: st.column_config.TextColumn(d, width="small") for d in day_labels}})
+        disp = wide.copy()
+        for col in day_labels:
+            disp[col] = [fmt(v, p) for v, p in zip(wide[col], wide["Parameter"])]
+        styled = disp.style.apply(style_row_num, axis=1)
 
         e1, e2 = st.columns([1, 5])
         e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), "rating_dynamics.csv", "text/csv",
@@ -929,7 +1000,7 @@ with tab_an:
             st.markdown(f"**Разрез по: {group_field}** — средний рейтинг и доля позиций в риске")
             gb = filtered_df.groupby("_group").agg(
                 avg=("Рейтинг", "mean"), n=("raw_asin", "count"),
-                risk=("Статус", lambda x: (x == "Риск").mean() * 100),
+                risk=("Статус", lambda x: x.str.endswith("Риск").mean() * 100),
                 neg=("bad_pct", "mean")).reset_index().sort_values("avg")
             fig = go.Figure()
             fig.add_trace(go.Bar(x=gb["_group"], y=gb["avg"], name="Средний ★", text=gb["avg"].round(2),
