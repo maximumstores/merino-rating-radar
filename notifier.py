@@ -46,6 +46,7 @@ DROP_THRESHOLD = float(_cfg("ALERT_DROP", "0.1"))       # падение рей�
 GROWTH_THRESHOLD = float(_cfg("ALERT_GROWTH", "0.5"))   # прирост оценок, % от базы
 RISK_LEVEL = 4.24
 WARN_LEVEL = 4.45
+DASHBOARD_URL = _cfg("DASHBOARD_URL", "https://rating-radar.streamlit.app")
 
 SUBS_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_subscribers (
@@ -273,8 +274,9 @@ def build_alerts():
 
 
 def format_report(alerts, kind_label=None, header="Rating Radar"):
+    link = f"\n\n<a href=\"{DASHBOARD_URL}\">Открыть дашборд →</a>"
     if alerts.empty:
-        return f"<b>{header}</b>\nПрогон завершён — изменений по порогам нет."
+        return f"<b>{header}</b>\nПрогон завершён — изменений по порогам нет." + link
 
     bots = alerts[alerts["bot_anomaly"]]
     drops = alerts[(~alerts["bot_anomaly"]) & (alerts["d_rating"] < 0)]
@@ -305,7 +307,7 @@ def format_report(alerts, kind_label=None, header="Rating Radar"):
     block("📈 Рост", ups, limit=6)
 
     lines.append(f"<i>{datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M')} UTC</i>")
-    return "\n".join(lines)
+    return "\n".join(lines) + link
 
 
 def _filter_for_subscriber(alerts, sub):
@@ -378,7 +380,9 @@ HELP = """<b>Rating Radar</b> — алерты по рейтингам Amazon.
 /country US,BE или all — по каким странам
 /drop 0.1 — порог падения рейтинга
 /only_status on|off — только смена цвета и аномалии
-/help — эта справка"""
+/help — эта справка
+
+<a href="{url}">Дашборд Rating Radar →</a>""".replace("{url}", DASHBOARD_URL)
 
 
 def get_subscriber(chat_id):
@@ -449,7 +453,8 @@ def handle_command(msg):
                      f"Страны: <code>{sub['countries']}</code>\n"
                      f"Порог падения: <code>{float(sub['min_drop']):.2f}\u2605</code>\n"
                      f"Только смена цвета: <code>{'да' if sub['only_status_change'] else 'нет'}</code>\n\n"
-                     f"<b>Портфель</b>\n{portfolio_summary()}")
+                     f"<b>Портфель</b>\n{portfolio_summary()}"
+                     f"\n\n<a href=\"{DASHBOARD_URL}\">Открыть дашборд →</a>")
 
     elif cmd == "/report":
         send_message(chat_id, format_report(build_alerts(), header="Rating Radar — по запросу"))
