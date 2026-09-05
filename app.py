@@ -28,15 +28,19 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROP
 
 from collector import (
     check_asin,
-    ensure_reviews_schema,
-    fetch_reviews,
-    save_reviews,
+    check_asin_api,
     clean_db_trash,
     delete_asin_completely,
+    ensure_reviews_schema,
     ensure_schema,
     extract_asin,
+    extract_children,
+    fetch_product_json,
+    fetch_reviews,
+    fetch_reviews_api,
     finish_run,
     get_tracked_asins,
+    save_reviews,
     save_to_db,
     start_run,
 )
@@ -380,6 +384,34 @@ def save_markets(markets):
     conn.close()
 
 
+def enrich_dictionary_from_api(res: dict):
+    """Пишет parent / категорию / страну из structured API в справочник.
+    Значения из загруженного spr не затираются — они приоритетнее."""
+    asin = res.get("asin")
+    if not asin:
+        return
+    path = [x.strip() for x in (res.get("category_path") or "").split("›") if x.strip()]
+    category = path[-1] if path else ""
+    subcat = path[-2] if len(path) > 1 else ""
+    ensure_dict_table()
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO asin_dictionary (asin, parent_asin, category, subcategory, market, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (asin) DO UPDATE SET
+                parent_asin = COALESCE(NULLIF(asin_dictionary.parent_asin, ''), EXCLUDED.parent_asin),
+                category    = COALESCE(NULLIF(asin_dictionary.category, ''), EXCLUDED.category),
+                subcategory = COALESCE(NULLIF(asin_dictionary.subcategory, ''), EXCLUDED.subcategory),
+                market      = COALESCE(NULLIF(asin_dictionary.market, ''), EXCLUDED.market),
+                updated_at  = NOW();
+            """,
+            (asin, res.get("parent_asin") or "", category, subcat, res.get("source") or ""))
+    conn.commit()
+    conn.close()
+
+
 def gsheet_to_csv_url(url: str) -> str:
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
     if not m:
@@ -404,6 +436,7 @@ def parse_hist(raw):
 
 def run_collection(items, label="Прогон"):
     items = with_market(items)
+    use_api = st.session_state.get("use_api_mode", True)
     ensure_schema()
     run_id = start_run(len(items))
     progress = st.progress(0.0, text=f"0/{len(items)}")
@@ -415,7 +448,7 @@ def run_collection(items, label="Прогон"):
             _lines.append(msg)
             log_box.code("\n".join(_lines[-15:]))
         try:
-            res = check_asin(item, log=_log)
+            res = check_asin_api(item, log=_log) if use_api else check_asin(item, log=_log)
         except Exception as e:
             _log(f"Ошибка {item}: {e}")
             res = {"asin": extract_asin(item), "source": "none", "rating": None, "count": None,
@@ -424,6 +457,11 @@ def run_collection(items, label="Прогон"):
             save_to_db(res)   # пишем даже неудачный замер — иначе дыра в истории
         except Exception as e:
             _log(f"Не сохранился {item}: {e}")
+        if res.get("parent_asin") or res.get("category_path"):
+            try:
+                enrich_dictionary_from_api(res)   # API отдал parent/категорию — в справочник
+            except Exception:
+                pass
         if res.get("source") in VALID_SOURCES:
             ok += 1
         progress.progress(i / len(items), text=f"{i}/{len(items)}")
@@ -456,6 +494,13 @@ with hdr_r:
             f"валидных **{int(last_run['ok_count'] or 0)} / {int(last_run['asin_count'] or 0)}**")
     else:
         st.warning("История сборов пуста")
+    st.markdown(
+        "<div style='margin-top:6px'>"
+        "<a href='https://t.me/RatingRadar_bot' target='_blank' "
+        "style='display:inline-block;background:#229ED9;color:#fff;padding:6px 14px;border-radius:999px;"
+        "font-size:13px;font-weight:600;text-decoration:none'>✈️ Алерты в Telegram — @RatingRadar_bot</a>"
+        "<span class='muted' style='margin-left:10px'>подписка в один клик: /start</span></div>",
+        unsafe_allow_html=True)
 
 def ensure_kind_column():
     if not DATABASE_URL:
@@ -941,8 +986,16 @@ with tab_ai:
                         _l.append(m)
                         log_box.code("\n".join(_l[-10:]))
                     try:
-                        data = fetch_reviews(a, market=rv_market, star_filter="critical",
-                                             pages=int(rv_pages), log=_log)
+                        if st.session_state.get("use_api_mode", True):
+                            data = fetch_reviews_api(a, market=rv_market, star_filter="critical",
+                                                     pages=int(rv_pages), log=_log)
+                            if not data["reviews"]:
+                                _log(f"  {a}: API пусто, пробую HTML")
+                                data = fetch_reviews(a, market=rv_market, star_filter="critical",
+                                                     pages=int(rv_pages), log=_log)
+                        else:
+                            data = fetch_reviews(a, market=rv_market, star_filter="critical",
+                                                 pages=int(rv_pages), log=_log)
                         total_saved += save_reviews(data)
                     except Exception as e:
                         _log(f"{a}: ошибка {e}")
@@ -1917,6 +1970,18 @@ def render_asin_manager(kind):
 # ---------- СБОР И УПРАВЛЕНИЕ ----------
 with tab_ops:
     o1, o2 = st.columns(2)
+    st.session_state.setdefault("use_api_mode", True)
+    mode_c1, mode_c2 = st.columns([1.2, 3])
+    st.session_state["use_api_mode"] = mode_c1.toggle(
+        "Structured API", value=st.session_state["use_api_mode"],
+        help="Amazon Product API Scrapingdog (JSON) вместо парсинга HTML")
+    mode_c2.markdown(
+        "<div class='muted' style='margin-top:22px'><b>Structured API</b> отдаёт рейтинг, число отзывов, "
+        "<b>parent ASIN</b>, категорию и цену готовым JSON — надёжнее HTML и не ломается от вёрстки. "
+        "Parent и категория при этом сами пишутся в справочник. Если API не ответил — откат на HTML-парсер.</div>",
+        unsafe_allow_html=True)
+    st.markdown("---")
+
     with o1:
         st.markdown("### Ручной прогон")
         st.caption("Сбор по всему списку прямо сейчас")
@@ -1953,6 +2018,68 @@ with tab_ops:
             raw_list = [a.strip() for a in re.split(r"[\s,]+", adhoc_input) if a.strip()]
             if raw_list:
                 run_collection(raw_list, "Проверка")
+
+    st.markdown("---")
+    with st.expander("👨‍👦 Подтянуть чайлдов из паренты", expanded=False):
+        st.markdown("<div class='muted'>Structured API возвращает все варианты (цвета и размеры) одним запросом. "
+                    "Вводишь парент или любой чайлд — получаешь весь список и добавляешь нужные в отслеживание.</div>",
+                    unsafe_allow_html=True)
+        k1, k2, k3 = st.columns([2, 1, 1])
+        parent_in = k1.text_input("ASIN паренты или чайлда", key="kids_asin", placeholder="B0H8SFPK44 или ссылка")
+        kids_market = k2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="kids_market")
+        k3.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if k3.button("🔍 Найти", disabled=not parent_in.strip(), key="kids_find", use_container_width=True):
+            with st.spinner("Запрашиваю API…"):
+                try:
+                    obj = fetch_product_json(parent_in, kids_market, log=lambda m: None)
+                    st.session_state["kids_found"] = extract_children(obj) if obj else []
+                    st.session_state["kids_parent"] = (obj or {}).get("parent_asin") or extract_asin(parent_in)
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+        kids = st.session_state.get("kids_found")
+        if kids is not None:
+            if not kids:
+                st.warning("Вариантов не найдено — у товара нет вариаций или API не ответил")
+            else:
+                pa = st.session_state.get("kids_parent", "")
+                st.success(f"Найдено вариантов: {len(kids)} · parent: {pa or '—'}")
+                kdf = pd.DataFrame(kids)
+                kdf["уже в базе"] = kdf["asin"].isin(tracked)
+                st.dataframe(kdf.rename(columns={"asin": "ASIN", "value": "Вариант", "dim": "Измерение"}),
+                             use_container_width=True, hide_index=True, height=260)
+                fresh = [k["asin"] for k in kids if k["asin"] not in tracked]
+                kk1, kk2 = st.columns([1, 1])
+                add_kind = kk1.radio("Добавить как", ["Чайлд", "Парент"], horizontal=True, key="kids_kind")
+                if kk2.button(f"➕ Добавить {len(fresh)} новых", type="primary", disabled=not fresh,
+                              key="kids_add", use_container_width=True):
+                    kind_val = "child" if add_kind == "Чайлд" else "parent"
+                    try:
+                        ensure_schema()
+                        conn = _conn()
+                        with conn.cursor() as cur:
+                            for a in fresh:
+                                cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, %s) "
+                                            "ON CONFLICT (asin) DO UPDATE SET kind = EXCLUDED.kind;", (a, kind_val))
+                        conn.commit()
+                        conn.close()
+                        save_markets({a: kids_market for a in fresh})
+                        if pa:
+                            ensure_dict_table()
+                            conn = _conn()
+                            with conn.cursor() as cur:
+                                for a in fresh:
+                                    cur.execute(
+                                        "INSERT INTO asin_dictionary (asin, parent_asin) VALUES (%s, %s) "
+                                        "ON CONFLICT (asin) DO UPDATE SET parent_asin = "
+                                        "COALESCE(NULLIF(asin_dictionary.parent_asin,''), EXCLUDED.parent_asin), "
+                                        "updated_at = NOW();", (a, pa))
+                            conn.commit()
+                            conn.close()
+                        st.success(f"Добавлено {len(fresh)} позиций")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
 
     st.markdown("---")
     with st.expander(f"📚 Справочник ASIN (категории / parent / вид / страна) — загружено: {len(dict_df)}", expanded=False):
@@ -2017,10 +2144,14 @@ with tab_ops:
                 st.error(f"Не читаются подписчики: {e}")
             active_n = int(subs["active"].sum()) if not subs.empty else 0
             t2.metric("Подписчиков", f"{active_n}", delta=f"всего {len(subs)}", delta_color="off")
-            t3.markdown("<div class='muted' style='margin-top:22px'>Подписка — в самом боте: "
-                        "<a href='https://t.me/RatingRadar_bot' target='_blank'>@RatingRadar_bot</a> → <code>/start</code>. "
-                        "Там же настраиваются фильтры: <code>/kind</code>, <code>/country</code>, <code>/drop</code>.</div>",
-                        unsafe_allow_html=True)
+            t3.markdown(
+                "<div style='margin-top:16px'>"
+                "<a href='https://t.me/RatingRadar_bot' target='_blank' "
+                "style='display:inline-block;background:#229ED9;color:#fff;padding:7px 16px;border-radius:999px;"
+                "font-size:14px;font-weight:600;text-decoration:none'>✈️ Открыть @RatingRadar_bot</a>"
+                "<div class='muted' style='margin-top:6px'>Подписка — <code>/start</code> в боте. "
+                "Фильтры: <code>/kind</code>, <code>/country</code>, <code>/drop</code>, <code>/only_status</code>.</div>"
+                "</div>", unsafe_allow_html=True)
 
             b1, b2, b3 = st.columns([1.2, 1.2, 2])
             if b1.button("📤 Отправить отчёт сейчас", key="tg_send_now"):
@@ -2226,6 +2357,13 @@ with tab_help:
   <li>Таблица аномалий с CSV; разрез по группам и по ASIN до/после.</li>
 </ul>
 <div class="note"><b>Оговорка про точность.</b> Витринный рейтинг округлён до 0.1, гистограмма — до 1%. На большой базе (тысячи оценок) падение на 0.1 при +2 оценках математически означает, что реальный рейтинг был у границы округления — поэтому «входящий рейтинг» и «новых 1–2★» это оценка, не точный счёт. Сигнал надёжный на уровне портфеля и категорий, на уровне одного крупного ASIN — смотрим серию замеров, не один. Чем чаще сбор — тем точнее.</div>
+
+<h2>Алерты в Telegram</h2>
+<p>Бот <a href="https://t.me/RatingRadar_bot" target="_blank"><b>@RatingRadar_bot</b></a> — подписка командой <code>/start</code>.
+После каждого сбора присылает: смену цвета листинга, падение рейтинга и аномалии бота возвратов.
+Настройки подписки прямо в чате: <code>/kind child|parent|all</code>, <code>/country US,BE</code>,
+<code>/drop 0.1</code> (порог падения), <code>/only_status on</code> (только смена цвета),
+<code>/report</code> (отчёт по запросу), <code>/status</code> (мои настройки и сводка), <code>/stop</code>.</p>
 
 <h2>Типовой сценарий</h2>
 <ol>
