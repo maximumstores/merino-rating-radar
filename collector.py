@@ -408,4 +408,148 @@ def check_asin(raw_input: str, log=print) -> dict:
 
     log("  результат: данных нет")
     return {"asin": clean_asin, "source": "none", "rating": None, "count": None,
-            "hist": {}, "image_url": None, "bsr": None, "note": "не найден ни на одном маркете"} 
+            "hist": {}, "image_url": None, "bsr": None, "note": "не найден ни на одном маркете"}
+
+
+# ---------------------------------------------------------------- отзывы (тексты)
+REVIEWS_SQL = """
+CREATE TABLE IF NOT EXISTS asin_reviews (
+    id SERIAL PRIMARY KEY,
+    asin TEXT NOT NULL,
+    market TEXT,
+    review_id TEXT,
+    stars NUMERIC(2,1),
+    title TEXT,
+    body TEXT,
+    review_date TEXT,
+    verified BOOLEAN,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (asin, review_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_counts (
+    id SERIAL PRIMARY KEY,
+    asin TEXT NOT NULL,
+    market TEXT,
+    ratings_total INTEGER,      -- всего оценок (с витрины)
+    reviews_with_text INTEGER,  -- из них с текстом (со страницы отзывов)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+REVIEW_DOMAINS = {
+    "US": "https://www.amazon.com/product-reviews/{asin}",
+    "BE": "https://www.amazon.com.be/product-reviews/{asin}?language=en_GB",
+    "NL": "https://www.amazon.nl/product-reviews/{asin}?language=en_GB",
+    "DE": "https://www.amazon.de/product-reviews/{asin}?language=en_GB",
+    "UK": "https://www.amazon.co.uk/product-reviews/{asin}",
+    "FR": "https://www.amazon.fr/product-reviews/{asin}",
+    "IT": "https://www.amazon.it/product-reviews/{asin}",
+    "ES": "https://www.amazon.es/product-reviews/{asin}",
+}
+
+
+def ensure_reviews_schema():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(REVIEWS_SQL)
+        conn.commit()
+
+
+def _reviews_url(asin, market, star_filter=None, page=1):
+    base = REVIEW_DOMAINS.get(market, REVIEW_DOMAINS["BE"]).format(asin=asin)
+    sep = "&" if "?" in base else "?"
+    parts = [f"reviewerType=all_reviews", f"pageNumber={page}", "sortBy=recent"]
+    if star_filter:
+        parts.append(f"filterByStar={star_filter}")   # critical | one_star | two_star | positive
+    return base + sep + "&".join(parts)
+
+
+def parse_reviews_html(html: str) -> dict:
+    """Возвращает {'total_with_text': int|None, 'reviews': [ {...}, ... ]}"""
+    soup = BeautifulSoup(html, "html.parser")
+    out = {"total_with_text": None, "reviews": []}
+
+    node = soup.select_one("[data-hook='cr-filter-info-review-rating-count']")
+    if node:
+        nums = re.findall(r"([0-9][0-9.,\s]*)", node.get_text(" ", strip=True))
+        digits = [int(re.sub(r"[^\d]", "", n)) for n in nums if re.sub(r"[^\d]", "", n)]
+        if len(digits) >= 2:
+            out["total_with_text"] = digits[1]      # «X ratings, Y with reviews»
+        elif digits:
+            out["total_with_text"] = digits[0]
+
+    for card in soup.select("[data-hook='review']"):
+        try:
+            rid = card.get("id")
+            st_node = card.select_one("[data-hook='review-star-rating'], [data-hook='cmps-review-star-rating']")
+            stars = None
+            if st_node:
+                m = re.search(r"([0-9][.,][0-9]|[1-5])", st_node.get_text(" ", strip=True))
+                if m:
+                    stars = float(m.group(1).replace(",", "."))
+            title_node = card.select_one("[data-hook='review-title']")
+            title = title_node.get_text(" ", strip=True) if title_node else ""
+            title = re.sub(r"^[0-9][.,][0-9]\s*(out of|van|sur|von)\s*5\s*", "", title, flags=re.I).strip()
+            body_node = card.select_one("[data-hook='review-body']")
+            body = body_node.get_text(" ", strip=True) if body_node else ""
+            date_node = card.select_one("[data-hook='review-date']")
+            date = date_node.get_text(" ", strip=True) if date_node else ""
+            verified = bool(card.select_one("[data-hook='avp-badge']"))
+            if body or title:
+                out["reviews"].append({"review_id": rid, "stars": stars, "title": title[:300],
+                                       "body": body[:4000], "review_date": date[:100], "verified": verified})
+        except Exception:
+            continue
+    return out
+
+
+def fetch_reviews(asin: str, market: str = "BE", star_filter: str = "critical",
+                  pages: int = 2, log=print) -> dict:
+    """Тянет тексты отзывов. star_filter: critical (1-2★) | positive | None (все)."""
+    clean = extract_asin(asin)
+    if not clean:
+        return {"asin": "", "market": market, "total_with_text": None, "reviews": []}
+
+    all_reviews, total = [], None
+    for page in range(1, max(1, pages) + 1):
+        url = _reviews_url(clean, market, star_filter, page)
+        html = fetch(url)
+        if not html or not sanity_check(html):
+            log(f"  [{market}] отзывы стр.{page}: пусто или капча")
+            break
+        parsed = parse_reviews_html(html)
+        if total is None:
+            total = parsed["total_with_text"]
+        if not parsed["reviews"]:
+            break
+        all_reviews.extend(parsed["reviews"])
+        if len(parsed["reviews"]) < 8:
+            break
+    log(f"  [{market}] отзывов собрано: {len(all_reviews)}")
+    return {"asin": clean, "market": market, "total_with_text": total, "reviews": all_reviews}
+
+
+def save_reviews(data: dict):
+    if not data.get("asin"):
+        return 0
+    ensure_reviews_schema()
+    saved = 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for r in data.get("reviews", []):
+                cur.execute(
+                    """
+                    INSERT INTO asin_reviews (asin, market, review_id, stars, title, body, review_date, verified)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (asin, review_id) DO NOTHING;
+                    """,
+                    (data["asin"], data.get("market"), r.get("review_id"), r.get("stars"),
+                     r.get("title"), r.get("body"), r.get("review_date"), r.get("verified")))
+                saved += cur.rowcount
+            if data.get("total_with_text") is not None:
+                cur.execute(
+                    "INSERT INTO review_counts (asin, market, reviews_with_text) VALUES (%s, %s, %s);",
+                    (data["asin"], data.get("market"), int(data["total_with_text"])))
+        conn.commit()
+    return saved
