@@ -408,4 +408,4 @@ def check_asin(raw_input: str, log=print) -> dict:
 
     log("  результат: данных нет")
     return {"asin": clean_asin, "source": "none", "rating": None, "count": None,
-            "hist": {}, "image_url": None, "bsr": None, "note": "не найден ни на одном маркете"}
+            "hist": {}, "image_url": None, "bsr": None, "note": "не найден ни на одном маркете"} 
