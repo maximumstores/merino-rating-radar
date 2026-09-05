@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 """Rating Radar: каскад BE->NL->reviews + авто-определение страны из ссылок (US, DE, UK, BE, NL и др.)."""
 
 import json
@@ -7,10 +7,10 @@ import re
 import time
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 import psycopg2
 import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -20,7 +20,6 @@ SCRAPE_URL = "https://api.scrapingdog.com/scrape"
 RETRIES = 5
 TIMEOUT = 90
 
-# Маппинг доменов Amazon к кодам стран
 DOMAIN_MARKETS = {
     "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
     "amazon.com.be": ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
@@ -31,6 +30,8 @@ DOMAIN_MARKETS = {
     "amazon.it": ("IT", "https://www.amazon.it/dp/{asin}"),
     "amazon.es": ("ES", "https://www.amazon.es/dp/{asin}"),
 }
+# порядок важен: сначала самые длинные домены, чтобы amazon.com не съел amazon.com.be
+DOMAIN_ORDER = sorted(DOMAIN_MARKETS, key=len, reverse=True)
 
 DEFAULT_MARKETS = [
     ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
@@ -62,37 +63,45 @@ CREATE TABLE IF NOT EXISTS collection_runs (
 
 CREATE TABLE IF NOT EXISTS tracked_asins (
     asin TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'child',
     added_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
 
 def extract_asin(text: str) -> str:
-    """Извлекает 10-значный чистый ASIN из текста или ссылки."""
+    """Извлекает 10-значный чистый ASIN из текста или ссылки. Пустая строка, если не нашёл."""
     text = str(text).strip().upper()
     match = re.search(r"(B[0-9A-Z]{9})", text)
-    return match.group(1) if match else text
+    return match.group(1) if match else ""
 
 
-def extract_asin_and_market(text: str) -> tuple[str, str | None, str | None]:
-    """
-    Возвращает (clean_asin, target_market_code, custom_url_template)
-    Если введена ссылка (например https://www.amazon.com/dp/B0H6YBDKXJ),
-    определит маркет 'US' и соберет данные именно с amazon.com.
-    """
-    clean_asin = extract_asin(text)
+def extract_asin_and_market(text: str):
+    """(clean_asin, market_code | None, url_template | None). Регистр ссылки не важен."""
+    raw = str(text).strip()
+    clean_asin = extract_asin(raw)
     if not clean_asin:
         return "", None, None
 
-    if text.startswith("HTTP://") or text.startswith("HTTPS://"):
+    low = raw.lower()
+
+    # 1) прямая ссылка
+    if low.startswith("http://") or low.startswith("https://"):
         try:
-            parsed = urlparse(text.lower())
-            host = parsed.netloc.replace("www.", "")
-            for domain, (market_code, url_tmpl) in DOMAIN_MARKETS.items():
-                if domain in host:
-                    return clean_asin, market_code, url_tmpl
+            host = urlparse(low).netloc.replace("www.", "")
+            for domain in DOMAIN_ORDER:
+                if host.endswith(domain):
+                    code, tmpl = DOMAIN_MARKETS[domain]
+                    return clean_asin, code, tmpl
         except Exception:
             pass
+
+    # 2) суффикс вида B0XXXXXXXX:US
+    if ":" in raw:
+        tail = raw.rsplit(":", 1)[-1].strip().upper()
+        for domain, (code, tmpl) in DOMAIN_MARKETS.items():
+            if tail == code:
+                return clean_asin, code, tmpl
 
     return clean_asin, None, None
 
@@ -107,12 +116,9 @@ def ensure_schema():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
-            cur.execute(
-                "ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS image_url TEXT;"
-            )
-            cur.execute(
-                "ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr TEXT;"
-            )
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS image_url TEXT;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr TEXT;")
+            cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
         conn.commit()
 
 
@@ -121,9 +127,7 @@ def clean_db_trash():
         ensure_schema()
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM asin_metrics WHERE asin LIKE 'HTTP%' OR LENGTH(asin) > 10;"
-                )
+                cur.execute("DELETE FROM asin_metrics WHERE asin LIKE 'HTTP%' OR LENGTH(asin) > 10;")
             conn.commit()
     except Exception:
         pass
@@ -141,7 +145,7 @@ def delete_asin_completely(asin: str):
         conn.commit()
 
 
-def get_tracked_asins() -> list[str]:
+def get_tracked_asins() -> list:
     ensure_schema()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -149,7 +153,7 @@ def get_tracked_asins() -> list[str]:
             return [row[0] for row in cur.fetchall()]
 
 
-def add_tracked_asins(asins: list[str]):
+def add_tracked_asins(asins: list, kind: str = "child"):
     ensure_schema()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -157,8 +161,9 @@ def add_tracked_asins(asins: list[str]):
                 clean_asin = extract_asin(raw)
                 if clean_asin and len(clean_asin) == 10:
                     cur.execute(
-                        "INSERT INTO tracked_asins (asin) VALUES (%s) ON CONFLICT (asin) DO NOTHING",
-                        (clean_asin,),
+                        "INSERT INTO tracked_asins (asin, kind) VALUES (%s, %s) "
+                        "ON CONFLICT (asin) DO UPDATE SET kind = EXCLUDED.kind",
+                        (clean_asin, kind),
                     )
         conn.commit()
 
@@ -167,7 +172,6 @@ def save_to_db(data: dict):
     clean_asin = extract_asin(data.get("asin", ""))
     if not clean_asin or len(clean_asin) != 10:
         return
-
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -211,7 +215,7 @@ def finish_run(run_id: int, ok_count: int, status: str = "done"):
         conn.commit()
 
 
-def fetch(url: str) -> str | None:
+def fetch(url: str) -> str:
     for attempt in range(1, RETRIES + 1):
         try:
             r = requests.get(
@@ -229,78 +233,93 @@ def fetch(url: str) -> str | None:
 
 def sanity_check(html: str) -> bool:
     low = html.lower()
-    if (
-        "robot check" in low
-        or "captcha" in low
-        or "api-services-support@amazon" in low
-    ):
+    return not ("robot check" in low or "captcha" in low or "api-services-support@amazon" in low)
+
+
+def in_variation(soup: BeautifulSoup) -> bool:
+    """True, если на странице показан рейтинг паренты, а не конкретного чайлда.
+
+    Признак: есть блок выбора вариаций (twister) и при этом рейтинг отдан на уровне
+    родительской карточки. Тогда цифру брать нельзя — уходим на следующий маркет каскада.
+    """
+    try:
+        twister = soup.select_one("#twister, #twisterContainer, #variation_size_name, #variation_color_name")
+        if not twister:
+            return False
+        # На BE/NL у чайлда с собственными отзывами есть свой acrCustomerReviewText.
+        own_reviews = soup.select_one("#acrCustomerReviewText")
+        if own_reviews:
+            digits = re.sub(r"[^\d]", "", own_reviews.get_text())
+            if digits and int(digits) > 0:
+                return False
+        return True
+    except Exception:
         return False
-    return True
 
 
-def parse_bsr(soup: BeautifulSoup, html: str) -> str | None:
-    m = re.search(r"#([0-9,.]+)\s*(?:in|в)\s*([^<\n(\n]+)", html, re.I)
+def parse_bsr(soup: BeautifulSoup, html: str):
+    for sel in ("#SalesRank", "#detailBullets_feature_div", "#productDetails_detailBullets_sections1",
+                "#prodDetails", "#detailBulletsWrapper_feature_div"):
+        node = soup.select_one(sel)
+        if not node:
+            continue
+        text = node.get_text(" ", strip=True)
+        m = re.search(r"(?:#|nr\.?\s*)([0-9][0-9,.\s]*)\s*(?:in|en|dans|im|nella)\s+([^#(\n]{2,40})", text, re.I)
+        if m:
+            return f"#{m.group(1).strip()} {m.group(2).strip()[:30]}"
+    m = re.search(r"(?:#|nr\.?\s*)([0-9][0-9,.]{2,})\s*(?:in|en|dans|im|nella)\s+([^<#(\n]{2,40})", html, re.I)
     if m:
-        return f"#{m.group(1)} {m.group(2).strip()[:30]}"
+        return f"#{m.group(1).strip()} {m.group(2).strip()[:30]}"
+    return None
 
-    bsr_li = soup.select_one("#SalesRank, #detailBullets_feature_div")
-    if bsr_li:
-        text = bsr_li.get_text(" ", strip=True)
-        m2 = re.search(r"#([0-9,.]+)\s*(?:in|в)\s*([^<\n(]+)", text, re.I)
-        if m2:
-            return f"#{m2.group(1)} {m2.group(2).strip()[:30]}"
+
+def parse_review_count(soup: BeautifulSoup, html: str):
+    node = soup.select_one("#acrCustomerReviewText, [data-hook='total-review-count']")
+    if node:
+        digits = re.sub(r"[^\d]", "", node.get_text())
+        if digits:
+            return int(digits)
+    # запасной путь: "1 234 beoordelingen / ratings / évaluations / Bewertungen / valutazioni"
+    m = re.search(r"([0-9][0-9.,\s]{0,12})\s*(?:global\s+)?"
+                  r"(?:ratings?|reviews?|beoordelingen|évaluations|Bewertungen|valoraciones|valutazioni)",
+                  html, re.I)
+    if m:
+        digits = re.sub(r"[^\d]", "", m.group(1))
+        if digits:
+            return int(digits)
     return None
 
 
 def parse_rating(soup: BeautifulSoup, html: str) -> dict:
-    out = {
-        "rating": None,
-        "count": None,
-        "hist": {},
-        "image_url": None,
-        "bsr": None,
-    }
+    out = {"rating": None, "count": None, "hist": {}, "image_url": None, "bsr": None}
 
-    img = soup.select_one(
-        "#landingImage, #imgBlkFront, #main-image"
-    ) or soup.select_one("img[data-old-hires]")
+    img = soup.select_one("#landingImage, #imgBlkFront, #main-image") or soup.select_one("img[data-old-hires]")
     if img:
         out["image_url"] = img.get("data-old-hires") or img.get("src")
 
     out["bsr"] = parse_bsr(soup, html)
 
-    m = re.search(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5", html)
+    m = re.search(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von|di|de)\s*5", html, re.I)
     if m:
         out["rating"] = float(m.group(1).replace(",", "."))
     else:
         pop = soup.select_one("#acrPopover")
-        if pop and pop.get("title"):
-            m2 = re.search(r"([0-9][.,][0-9])", pop["title"])
+        title = pop.get("title") if pop else None
+        if title:
+            m2 = re.search(r"([0-9][.,][0-9])", title)
             if m2:
                 out["rating"] = float(m2.group(1).replace(",", "."))
 
-    cnt = soup.select_one("#acrCustomerReviewText")
-    if cnt:
-        digits = re.sub(r"[^\d]", "", cnt.get_text())
-        if digits:
-            out["count"] = int(digits)
+    out["count"] = parse_review_count(soup, html)
 
-    for row in soup.select(
-        "#histogramTable tr, li[id*='star'], a[href*='filterByStar']"
-    ):
+    for row in soup.select("#histogramTable tr, li[id*='star'], a[href*='filterByStar'], [data-hook='histogram-row']"):
         text = row.get_text(" ", strip=True)
-        m3 = re.search(
-            r"([1-5])\s*(?:star|ster|étoile|Stern).*?(\d{1,3})\s*%",
-            text,
-            re.I,
-        )
+        m3 = re.search(r"([1-5])\s*(?:star|ster|sterren|étoile|Stern|stelle|estrella)[^%]{0,40}?(\d{1,3})\s*%", text, re.I)
         if m3:
             out["hist"][int(m3.group(1))] = int(m3.group(2))
 
     if not out["hist"]:
-        for m4 in re.finditer(
-            r"([1-5])\s*st\w+[^%]{0,60}?(\d{1,3})\s*%", html, re.I
-        ):
+        for m4 in re.finditer(r"([1-5])\s*st\w+[^%]{0,60}?(\d{1,3})\s*%", html, re.I):
             star, pct = int(m4.group(1)), int(m4.group(2))
             if star not in out["hist"]:
                 out["hist"][star] = pct
@@ -317,79 +336,76 @@ def parse_reviews_page(asin: str) -> dict:
     img = soup.select_one("img[data-hook='product-image'], #cm_cr-product_preview img")
     image_url = img.get("src") if img else None
 
-    stars = [
-        float(m.group(1).replace(",", "."))
-        for m in re.finditer(
-            r"([0-9][.,][0-9])\s*(?:out of|van|sur|von)\s*5", html
-        )
-    ]
+    stars = [float(m.group(1).replace(",", "."))
+             for m in re.finditer(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von|di|de)\s*5", html, re.I)]
     stars = stars[1:] if len(stars) > 1 else []
     if not stars:
-        return {
-            "rating": None,
-            "count": None,
-            "image_url": image_url,
-            "bsr": None,
-        }
-    return {
-        "rating": round(sum(stars) / len(stars), 2),
-        "count": len(stars),
-        "image_url": image_url,
-        "bsr": None,
-    }
+        return {"rating": None, "count": None, "image_url": image_url, "bsr": None}
+    return {"rating": round(sum(stars) / len(stars), 2), "count": len(stars),
+            "image_url": image_url, "bsr": None}
 
 
 def check_asin(raw_input: str, log=print) -> dict:
     clean_asin, target_market, custom_tmpl = extract_asin_and_market(raw_input)
+    if not clean_asin:
+        log(f"  пропуск: не распознан ASIN в «{raw_input}»")
+        return {"asin": "", "source": "none", "rating": None, "count": None,
+                "hist": {}, "image_url": None, "bsr": None, "note": "не распознан ASIN"}
+
     log(f"=== {clean_asin} ===")
 
-    # Если была передана прямая ссылка на конкретный маркетплейс (например Amazon US)
+    # 1) явно указанная страна (ссылка или суффикс :US)
     if target_market and custom_tmpl:
         url = custom_tmpl.format(asin=clean_asin)
-        log(f"  [{target_market}] Запрос по прямой ссылке...")
-        html = fetch(url)
-        if html and sanity_check(html):
-            soup = BeautifulSoup(html, "html.parser")
-            data = parse_rating(soup, html)
-            if data["rating"] is not None:
-                log(f"  [{target_market}] OK: rating={data['rating']} count={data['count']}")
-                return {"asin": clean_asin, "source": target_market, **data}
+        log(f"  [{target_market}] прямой запрос…")
+        try:
+            html = fetch(url)
+            if html and sanity_check(html):
+                soup = BeautifulSoup(html, "html.parser")
+                data = parse_rating(soup, html)
+                if data["rating"] is not None:
+                    log(f"  [{target_market}] OK: rating={data['rating']} count={data['count']}")
+                    return {"asin": clean_asin, "source": target_market, **data}
+                log(f"  [{target_market}] рейтинг не найден на странице")
+            else:
+                log(f"  [{target_market}] пусто или капча")
+        except Exception as e:
+            log(f"  [{target_market}] ошибка: {e}")
 
-    # Иначе используем дефолтный каскадный поиск BE -> NL
+    # 2) каскад BE -> NL
     for market, tmpl in DEFAULT_MARKETS:
         url = tmpl.format(asin=clean_asin)
-        html = fetch(url)
-        if not html or not sanity_check(html):
-            continue
+        try:
+            html = fetch(url)
+            if not html or not sanity_check(html):
+                log(f"  [{market}] пусто или капча")
+                continue
+            soup = BeautifulSoup(html, "html.parser")
+            if in_variation(soup):
+                log(f"  [{market}] рейтинг только у паренты — пропуск")
+                continue
+            data = parse_rating(soup, html)
+            if data["rating"] is None:
+                log(f"  [{market}] рейтинг не найден")
+                continue
+            log(f"  [{market}] OK: rating={data['rating']} count={data['count']}")
+            return {"asin": clean_asin, "source": market, **data}
+        except Exception as e:
+            log(f"  [{market}] ошибка: {e}")
 
-        soup = BeautifulSoup(html, "html.parser")
-        if in_variation(soup):
-            continue
-        data = parse_rating(soup, html)
-        if data["rating"] is None:
-            continue
-        log(f"  [{market}] OK: rating={data['rating']} count={data['count']}")
-        return {"asin": clean_asin, "source": market, **data}
-
+    # 3) фолбэк по письменным ревью
     log("  [reviews-only] фолбэк по письменным ревью (BE)")
-    rv = parse_reviews_page(clean_asin)
+    try:
+        rv = parse_reviews_page(clean_asin)
+    except Exception as e:
+        log(f"  [reviews-only] ошибка: {e}")
+        rv = {"rating": None, "count": None, "image_url": None, "bsr": None}
+
     if rv["rating"] is not None:
-        return {
-            "asin": clean_asin,
-            "source": "reviews-only",
-            "rating": rv["rating"],
-            "count": rv["count"],
-            "hist": {},
-            "image_url": rv["image_url"],
-            "bsr": None,
-            "note": "только письменные ревью, данные неполные",
-        }
-    return {
-        "asin": clean_asin,
-        "source": "none",
-        "rating": None,
-        "count": None,
-        "hist": {},
-        "image_url": None,
-        "bsr": None,
-    }
+        return {"asin": clean_asin, "source": "reviews-only", "rating": rv["rating"], "count": rv["count"],
+                "hist": {}, "image_url": rv["image_url"], "bsr": None,
+                "note": "только письменные ревью, данные неполные"}
+
+    log("  результат: данных нет")
+    return {"asin": clean_asin, "source": "none", "rating": None, "count": None,
+            "hist": {}, "image_url": None, "bsr": None, "note": "не найден ни на одном маркете"}
