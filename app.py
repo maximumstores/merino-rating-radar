@@ -28,6 +28,7 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROP
 
 from collector import (
     check_asin,
+    ensure_reviews_schema,
     fetch_reviews,
     save_reviews,
     clean_db_trash,
@@ -496,6 +497,10 @@ tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in 
 asin_market_map = get_asin_markets_map(tracked)
 full_df = get_full_history()
 ensure_dict_table()
+try:
+    ensure_reviews_schema()   # таблицы отзывов — до первого сбора
+except Exception:
+    pass
 dict_df = get_dictionary()
 dict_map = dict_df.set_index("asin").to_dict("index") if not dict_df.empty else {}
 # страна из справочника имеет приоритет над каскадом
