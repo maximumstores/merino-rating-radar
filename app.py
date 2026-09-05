@@ -17,7 +17,7 @@ from sklearn.linear_model import LinearRegression
 # Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
 # ДО импорта collector/notifier — они читают переменные на уровне модуля.
 load_dotenv()
-for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN"):
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"):
     if not os.environ.get(_k):
         try:
             _v = st.secrets.get(_k)
@@ -28,6 +28,8 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN"):
 
 from collector import (
     check_asin,
+    fetch_reviews,
+    save_reviews,
     clean_db_trash,
     delete_asin_completely,
     ensure_schema,
@@ -44,6 +46,13 @@ try:
 except Exception:
     notifier = None
     NOTIFIER_OK = False
+
+try:
+    import ai_insights
+    AI_OK = True
+except Exception:
+    ai_insights = None
+    AI_OK = False
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -714,8 +723,10 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-tab_port, tab_port_p, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops, tab_help = st.tabs(
-    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)",
+(tab_port, tab_port_p, tab_ai, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops,
+ tab_help) = st.tabs(
+    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🧠 AI-анализ",
+     "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)",
      "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
 
 # ---------- ПОРТФЕЛЬ ----------
@@ -839,6 +850,167 @@ with tab_port:
 
 with tab_port_p:
     render_portfolio(filtered_df, "parent")
+
+
+# ---------- AI-АНАЛИЗ ----------
+with tab_ai:
+    if not AI_OK:
+        st.error("Модуль ai_insights.py не найден")
+    elif not ai_insights.API_KEY:
+        st.warning("Не задан ANTHROPIC_API_KEY — добавь в Secrets приложения")
+    else:
+        st.markdown("### AI-анализ")
+        st.markdown("<div class='muted'>Цифры считаются на нашей стороне, модель их только интерпретирует — "
+                    "она ничего не пересчитывает и не выдумывает.</div>", unsafe_allow_html=True)
+
+        sub_digest, sub_reviews, sub_ro = st.tabs(
+            ["📰 Дайджест", "💬 Причины негатива", "🔇 Оценки без текста"])
+
+        # ---------- дайджест ----------
+        with sub_digest:
+            g1, g2, g3 = st.columns([1, 1, 2])
+            dg_days = g1.selectbox("Период", [7, 14, 30], index=0, format_func=lambda d: f"{d} дн.",
+                                   key="ai_days")
+            dg_rollout = g2.date_input("Дата внедрения бота", value=datetime.date(2026, 8, 20), key="ai_rollout")
+            g3.markdown("<div class='muted' style='margin-top:28px'>Один запрос к модели. "
+                        "Подаются агрегаты: статусы, дельты, входящий рейтинг, разрез по категориям, до/после.</div>",
+                        unsafe_allow_html=True)
+
+            c1, c2 = st.columns([1, 1])
+            if c1.button("🧠 Собрать дайджест", type="primary", key="ai_digest_btn"):
+                with st.spinner("Считаю агрегаты и спрашиваю модель…"):
+                    try:
+                        text, agg = ai_insights.weekly_digest(days=dg_days, rollout_date=str(dg_rollout))
+                        st.session_state["ai_digest_text"] = text
+                        st.session_state["ai_digest_agg"] = agg
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+            if c2.button("👁 Показать только агрегаты", key="ai_agg_btn"):
+                try:
+                    st.session_state["ai_digest_agg"] = ai_insights.collect_aggregates(
+                        days=dg_days, rollout_date=str(dg_rollout))
+                    st.session_state.pop("ai_digest_text", None)
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+            if st.session_state.get("ai_digest_text"):
+                st.markdown("---")
+                st.markdown(st.session_state["ai_digest_text"])
+                s1, s2 = st.columns([1, 3])
+                if NOTIFIER_OK and notifier.BOT_TOKEN and s1.button("📤 Отправить в Telegram", key="ai_send_tg"):
+                    try:
+                        body = st.session_state["ai_digest_text"].replace("<", "&lt;").replace(">", "&gt;")
+                        ok_n, total = notifier.broadcast(
+                            f"<b>Rating Radar — дайджест за {dg_days} дн.</b>\n\n{body}"
+                            f"\n\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>")
+                        st.success(f"Отправлено {ok_n} из {total}")
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                s2.download_button("⬇ Скачать текст", st.session_state["ai_digest_text"].encode("utf-8"),
+                                   f"digest_{dg_days}d.md", "text/markdown", key="ai_dl")
+
+            if st.session_state.get("ai_digest_agg"):
+                with st.expander("Агрегаты, которые ушли в модель", expanded=False):
+                    st.json(st.session_state["ai_digest_agg"], expanded=False)
+
+        # ---------- причины негатива ----------
+        with sub_reviews:
+            st.markdown("**Шаг 1. Собрать тексты отзывов 1–2★**")
+            st.markdown("<div class='muted'>Отдельный проход по страницам отзывов — это дополнительные запросы "
+                        "к скрейперу, поэтому делается точечно, а не по всему портфелю.</div>",
+                        unsafe_allow_html=True)
+            f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
+            pool = filtered_df["raw_asin"].tolist() if not filtered_df.empty else all_asins
+            default_pick = filtered_df.nsmallest(5, "Рейтинг")["raw_asin"].tolist() if not filtered_df.empty else []
+            rv_asins = f1.multiselect("ASIN для сбора отзывов", options=pool, default=default_pick,
+                                      key="ai_rv_asins")
+            rv_market = f2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="ai_rv_market")
+            rv_pages = f3.number_input("Страниц", 1, 5, 2, key="ai_rv_pages")
+            f4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            if f4.button("📥 Собрать", disabled=not rv_asins, key="ai_rv_fetch", use_container_width=True):
+                prog = st.progress(0.0)
+                log_box = st.empty()
+                lines, total_saved = [], 0
+                for i, a in enumerate(rv_asins, 1):
+                    def _log(m, _l=lines):
+                        _l.append(m)
+                        log_box.code("\n".join(_l[-10:]))
+                    try:
+                        data = fetch_reviews(a, market=rv_market, star_filter="critical",
+                                             pages=int(rv_pages), log=_log)
+                        total_saved += save_reviews(data)
+                    except Exception as e:
+                        _log(f"{a}: ошибка {e}")
+                    prog.progress(i / len(rv_asins), text=f"{i}/{len(rv_asins)}")
+                st.success(f"Сохранено новых отзывов: {total_saved}")
+
+            st.markdown("---")
+            st.markdown("**Шаг 2. Разбор причин**")
+            a1, a2, a3 = st.columns([2, 1, 1])
+            cats = sorted(set(calc_df["Категория"].tolist())) if not calc_df.empty else []
+            an_cat = a1.selectbox("Категория (или все)", options=["Все"] + [c for c in cats if c != "—"],
+                                  key="ai_an_cat")
+            an_limit = a2.number_input("Сколько отзывов", 10, 200, 60, step=10, key="ai_an_limit")
+            a3.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            run_an = a3.button("🧠 Разобрать", type="primary", key="ai_an_btn", use_container_width=True)
+
+            try:
+                preview = ai_insights.get_reviews_for_analysis(
+                    asins=rv_asins or None,
+                    category=None if an_cat == "Все" else an_cat,
+                    limit=int(an_limit))
+            except Exception as e:
+                preview = pd.DataFrame()
+                st.error(f"Не читаются отзывы: {e}")
+            st.caption(f"В базе под эти условия: {len(preview)} отзывов 1–2★")
+            if not preview.empty:
+                with st.expander("Показать тексты", expanded=False):
+                    st.dataframe(preview[["asin", "stars", "title", "body", "review_date"]],
+                                 use_container_width=True, hide_index=True, height=260)
+
+            if run_an:
+                with st.spinner("Читаю отзывы…"):
+                    try:
+                        ctx = f"Категория: {an_cat}. Бренд: мериносовая одежда, Amazon."
+                        st.session_state["ai_causes"] = ai_insights.analyze_negative_reviews(preview, ctx)
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+            if st.session_state.get("ai_causes"):
+                st.markdown("---")
+                st.markdown(st.session_state["ai_causes"])
+
+        # ---------- rating-only ----------
+        with sub_ro:
+            st.markdown("**Прямая оценка бота: оценки без текста**")
+            st.markdown("<div class='muted'>Всего оценок (с витрины) минус отзывы с текстом (со страницы отзывов). "
+                        "Разница — оценки без текста, включая те, что оставляет бот возвратов. "
+                        "Это точный счёт, в отличие от косвенной аномалии по округлённому рейтингу.</div>",
+                        unsafe_allow_html=True)
+            try:
+                ro = ai_insights.rating_only_estimate()
+            except Exception as e:
+                ro = pd.DataFrame()
+                st.error(f"Ошибка: {e}")
+            if ro.empty:
+                st.info("Нужны собранные отзывы — сделай «Собрать» на вкладке «Причины негатива». "
+                        "Счётчик отзывов с текстом пишется автоматически при сборе.")
+            else:
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Позиций с данными", len(ro))
+                m2.metric("Оценок всего", int(ro["review_count"].sum()))
+                m3.metric("Без текста", int(ro["rating_only"].sum()),
+                          delta=f"{ro['rating_only'].sum() / max(1, ro['review_count'].sum()) * 100:.0f}% от всех",
+                          delta_color="off")
+                show = ro[["asin", "source", "rating", "review_count", "reviews_with_text",
+                           "rating_only", "rating_only_%"]].copy()
+                show.columns = ["ASIN", "Страна", "Рейтинг", "Оценок всего", "С текстом",
+                                "Без текста", "% без текста"]
+                st.dataframe(show, use_container_width=True, hide_index=True, height=380)
+                fig = px.bar(ro.head(20), x="asin", y="rating_only_%", color="rating_only_%",
+                             color_continuous_scale=["#1f8a4c", "#c77800", "#d13438"],
+                             labels={"asin": "", "rating_only_%": "% оценок без текста"})
+                style_fig(fig, 320, showlegend=False, coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True)
 
 # ---------- ДИНАМИКА ПО ДНЯМ (широкая таблица) ----------
 def render_dynamics(filtered_df, hist_df, kind):
@@ -1853,11 +2025,43 @@ with tab_ops:
                     st.success(f"Отправлено {sent} из {total}")
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
+            with st.expander("🩺 Диагностика бота", expanded=False):
+                if st.button("Проверить связь", key="tg_diag"):
+                    d = notifier.diagnose()
+                    ok_token = d.get("bot_username")
+                    if ok_token:
+                        st.success(f"Бот на связи: @{ok_token} · токен {d['token_tail']}")
+                    else:
+                        st.error(f"Бот не отвечает. {d.get('error') or d.get('getMe')}")
+                    if d.get("webhook_url"):
+                        st.error(f"Установлен вебхук: {d['webhook_url']} — из-за него getUpdates не работает. "
+                                 "Нажми «Снять вебхук» ниже.")
+                    if d.get("getUpdates_error"):
+                        st.error(f"getUpdates: {d['getUpdates_error']}")
+                    st.write({
+                        "токен виден": d.get("token_present"),
+                        "DATABASE_URL виден": d.get("db_present"),
+                        "offset": d.get("offset"),
+                        "необработанных сообщений": d.get("pending"),
+                        "они": d.get("pending_texts"),
+                        "подписчиков в базе": d.get("subscribers"),
+                    })
+                d1, d2 = st.columns(2)
+                if d1.button("Снять вебхук", key="tg_drop_wh"):
+                    st.write(notifier.drop_webhook())
+                if d2.button("Сбросить offset на 0", key="tg_reset_off",
+                             help="Перечитать всю очередь Telegram с начала (последние 24ч)"):
+                    notifier.reset_offset(0)
+                    st.success("offset = 0, теперь нажми «Проверить новые команды»")
+
             if b1.button("🔄 Проверить новые команды", key="tg_poll"):
                 try:
                     n = notifier.process_updates()
-                    st.success(f"Обработано команд: {n}")
-                    st.rerun()
+                    if n:
+                        st.success(f"Обработано команд: {n}")
+                        st.rerun()
+                    else:
+                        st.info("Новых команд нет. Если бот молчит — открой «Диагностика бота».")
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
             if b2.button("👁 Показать текст отчёта", key="tg_preview"):
@@ -2026,4 +2230,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
