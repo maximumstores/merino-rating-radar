@@ -559,11 +559,22 @@ def save_reviews(data: dict):
 SD_PRODUCT_URL = "https://api.scrapingdog.com/amazon/product"
 SD_REVIEWS_URL = "https://api.scrapingdog.com/amazon/reviews"
 
-# код рынка -> domain-параметр Scrapingdog
-SD_DOMAIN = {
-    "US": "com", "BE": "com.be", "NL": "nl", "DE": "de",
-    "UK": "co.uk", "FR": "fr", "IT": "it", "ES": "es",
+# код рынка -> (domain, country) для Scrapingdog. Нужны ОБА параметра.
+SD_MARKET = {
+    "US": ("com", "us"),
+    "BE": ("com.be", "be"),
+    "NL": ("nl", "nl"),
+    "DE": ("de", "de"),
+    "UK": ("co.uk", "gb"),
+    "FR": ("fr", "fr"),
+    "IT": ("it", "it"),
+    "ES": ("es", "es"),
 }
+
+
+def _sd_params(market):
+    domain, country = SD_MARKET.get(market, SD_MARKET["BE"])
+    return {"api_key": API_KEY, "domain": domain, "country": country}
 
 
 def _sd_get(url, params, tries=3):
@@ -605,12 +616,16 @@ def _rating(val):
 
 
 def fetch_product_json(asin: str, market: str = "BE", log=print):
-    """Товар через structured API. Возвращает сырой JSON или None."""
+    """Товар через structured API Scrapingdog. Возвращает сырой JSON или None."""
     clean = extract_asin(asin)
-    if not clean or not API_KEY:
+    if not clean:
         return None
-    data = _sd_get(SD_PRODUCT_URL, {"api_key": API_KEY, "asin": clean,
-                                    "domain": SD_DOMAIN.get(market, "com.be")})
+    if not API_KEY:
+        log("  API: SCRAPINGDOG_API_KEY не задан")
+        return None
+    params = _sd_params(market)
+    params["asin"] = clean
+    data = _sd_get(SD_PRODUCT_URL, params)
     obj = _as_obj(data)
     if obj is None:
         log(f"  [{market}] API: пустой ответ")
@@ -695,7 +710,8 @@ def fetch_reviews_api(asin: str, market: str = "BE", pages: int = 2, star_filter
 
     collected, total = [], None
     for page in range(1, max(1, pages) + 1):
-        params = {"api_key": API_KEY, "asin": clean, "domain": SD_DOMAIN.get(market, "com.be"), "page": page}
+        params = _sd_params(market)
+        params.update({"asin": clean, "page": page})
         if star_filter:
             params["filter_by_star"] = star_filter
         data = _sd_get(SD_REVIEWS_URL, params)
@@ -750,5 +766,7 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
     if fallback_html:
         log("  откат на HTML-парсер")
         return check_asin(raw_input, log=log)
+    return {"asin": clean, "source": "none", "rating": None, "count": None,
+            "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
     return {"asin": clean, "source": "none", "rating": None, "count": None,
             "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
