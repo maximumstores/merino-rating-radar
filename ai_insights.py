@@ -245,14 +245,29 @@ CAUSES_SYSTEM = """Ты аналитик отзывов на Amazon для бр�
 3. Если видна разница между ASIN или категориями — отметь одной строкой."""
 
 
+def ensure_reviews_schema():
+    """Дублирует создание таблиц из collector — чтобы чтение не падало до первого сбора."""
+    try:
+        from collector import ensure_reviews_schema as _ensure
+        _ensure()
+        return True
+    except Exception:
+        return False
+
+
 def get_reviews_for_analysis(asins=None, category=None, stars_max=2, limit=60, days=None):
+    ensure_reviews_schema()
     with conn() as c:
         q = ["SELECT r.asin, r.stars, r.title, r.body, r.review_date, r.market FROM asin_reviews r"]
         where, params = ["r.stars <= %s"], [stars_max]
         if category:
-            q.append("JOIN asin_dictionary d ON d.asin = r.asin")
-            where.append("d.category = %s")
-            params.append(category)
+            try:
+                pd.read_sql("SELECT 1 FROM asin_dictionary LIMIT 1", c)
+                q.append("JOIN asin_dictionary d ON d.asin = r.asin")
+                where.append("d.category = %s")
+                params.append(category)
+            except Exception:
+                pass   # справочник ещё не загружен — фильтр по категории пропускаем
         if asins:
             where.append("r.asin = ANY(%s)")
             params.append(list(asins))
@@ -279,6 +294,7 @@ def analyze_negative_reviews(reviews_df, context=""):
 # ================================================================= 3. rating-only
 def rating_only_estimate():
     """Прямая оценка бота: всего оценок минус отзывы с текстом."""
+    ensure_reviews_schema()
     with conn() as c:
         m = pd.read_sql(
             """
