@@ -459,7 +459,7 @@ def ensure_reviews_schema():
 def _reviews_url(asin, market, star_filter=None, page=1):
     base = REVIEW_DOMAINS.get(market, REVIEW_DOMAINS["BE"]).format(asin=asin)
     sep = "&" if "?" in base else "?"
-    parts = [f"reviewerType=all_reviews", f"pageNumber={page}", "sortBy=recent"]
+    parts = ["reviewerType=all_reviews", f"pageNumber={page}", "sortBy=recent"]
     if star_filter:
         parts.append(f"filterByStar={star_filter}")   # critical | one_star | two_star | positive
     return base + sep + "&".join(parts)
@@ -553,3 +553,202 @@ def save_reviews(data: dict):
                     (data["asin"], data.get("market"), int(data["total_with_text"])))
         conn.commit()
     return saved
+
+
+# ================================================================= Scrapingdog structured API
+SD_PRODUCT_URL = "https://api.scrapingdog.com/amazon/product"
+SD_REVIEWS_URL = "https://api.scrapingdog.com/amazon/reviews"
+
+# код рынка -> domain-параметр Scrapingdog
+SD_DOMAIN = {
+    "US": "com", "BE": "com.be", "NL": "nl", "DE": "de",
+    "UK": "co.uk", "FR": "fr", "IT": "it", "ES": "es",
+}
+
+
+def _sd_get(url, params, tries=3):
+    for attempt in range(1, tries + 1):
+        try:
+            r = requests.get(url, params=params, timeout=TIMEOUT)
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except ValueError:
+                    return None
+        except requests.RequestException:
+            pass
+        time.sleep(2 * attempt)
+    return None
+
+
+def _as_obj(payload):
+    """Scrapingdog иногда отдаёт список из одного объекта."""
+    if isinstance(payload, list):
+        return payload[0] if payload else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _num(val):
+    if val is None:
+        return None
+    digits = re.sub(r"[^\d]", "", str(val))
+    return int(digits) if digits else None
+
+
+def _rating(val):
+    if val is None:
+        return None
+    m = re.search(r"([0-9][.,][0-9])|([1-5])", str(val))
+    if not m:
+        return None
+    return float((m.group(0)).replace(",", "."))
+
+
+def fetch_product_json(asin: str, market: str = "BE", log=print):
+    """Товар через structured API. Возвращает сырой JSON или None."""
+    clean = extract_asin(asin)
+    if not clean or not API_KEY:
+        return None
+    data = _sd_get(SD_PRODUCT_URL, {"api_key": API_KEY, "asin": clean,
+                                    "domain": SD_DOMAIN.get(market, "com.be")})
+    obj = _as_obj(data)
+    if obj is None:
+        log(f"  [{market}] API: пустой ответ")
+    return obj
+
+
+def parse_product_json(obj: dict, asin: str, market: str) -> dict:
+    """Приводит JSON Scrapingdog к формату check_asin."""
+    out = {"asin": asin, "source": market, "rating": None, "count": None, "hist": {},
+           "image_url": None, "bsr": None, "note": ""}
+    if not obj:
+        return out
+
+    out["rating"] = _rating(obj.get("average_rating") or obj.get("rating"))
+    out["count"] = _num(obj.get("total_reviews") or obj.get("ratings_total") or obj.get("reviews_count"))
+    out["image_url"] = obj.get("main_image") or (obj.get("images") or [None])[0]
+
+    # BSR: в structured-ответе может лежать по-разному
+    bsr = obj.get("bestsellers_rank") or obj.get("best_sellers_rank") or obj.get("bsr")
+    if isinstance(bsr, list) and bsr:
+        first = bsr[0]
+        if isinstance(first, dict):
+            out["bsr"] = f"#{_num(first.get('rank'))} {str(first.get('category', ''))[:30]}"
+        else:
+            out["bsr"] = str(first)[:40]
+    elif bsr:
+        out["bsr"] = str(bsr)[:40]
+    elif obj.get("product_category"):
+        out["bsr"] = None
+
+    # распределение звёзд, если API его отдаёт
+    hist = obj.get("rating_breakdown") or obj.get("histogram") or obj.get("ratings_breakdown")
+    if isinstance(hist, dict):
+        for k, v in hist.items():
+            m = re.search(r"[1-5]", str(k))
+            if not m:
+                continue
+            pct = _num(v.get("percentage") if isinstance(v, dict) else v)
+            if pct is not None:
+                out["hist"][int(m.group(0))] = pct
+
+    extra = []
+    if obj.get("parent_asin"):
+        extra.append(f"parent {obj['parent_asin']}")
+    if obj.get("product_category"):
+        extra.append(str(obj["product_category"])[:80])
+    if obj.get("price"):
+        extra.append(str(obj["price"]))
+    out["note"] = " · ".join(extra)[:200]
+    out["parent_asin"] = obj.get("parent_asin") or ""
+    out["category_path"] = obj.get("product_category") or ""
+    out["price"] = obj.get("price") or ""
+    return out
+
+
+def extract_children(obj: dict) -> list:
+    """Все чайлды паренты из customization_options (цвета + размеры)."""
+    kids = []
+    opts = (obj or {}).get("customization_options") or {}
+    for _dim, items in opts.items():
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            a = extract_asin(it.get("asin") or it.get("url") or "")
+            if a and len(a) == 10:
+                kids.append({"asin": a, "value": str(it.get("value") or "")[:80], "dim": _dim})
+    seen, out = set(), []
+    for k in kids:
+        if k["asin"] not in seen:
+            seen.add(k["asin"])
+            out.append(k)
+    return out
+
+
+def fetch_reviews_api(asin: str, market: str = "BE", pages: int = 2, star_filter="critical", log=print) -> dict:
+    """Отзывы через structured API. Возвращает тот же формат, что fetch_reviews."""
+    clean = extract_asin(asin)
+    if not clean or not API_KEY:
+        return {"asin": clean, "market": market, "total_with_text": None, "reviews": []}
+
+    collected, total = [], None
+    for page in range(1, max(1, pages) + 1):
+        params = {"api_key": API_KEY, "asin": clean, "domain": SD_DOMAIN.get(market, "com.be"), "page": page}
+        if star_filter:
+            params["filter_by_star"] = star_filter
+        data = _sd_get(SD_REVIEWS_URL, params)
+        obj = _as_obj(data) or {}
+        items = obj.get("customer_reviews") or obj.get("reviews") or (data if isinstance(data, list) else [])
+        if isinstance(items, dict):
+            items = [items]
+        if total is None:
+            total = _num(obj.get("total_reviews_with_text") or obj.get("reviews_count") or obj.get("total_reviews"))
+        if not items:
+            log(f"  [{market}] API отзывы стр.{page}: пусто")
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            body = it.get("review") or it.get("body") or it.get("text") or ""
+            title = it.get("title") or it.get("review_title") or ""
+            if not (body or title):
+                continue
+            collected.append({
+                "review_id": str(it.get("id") or it.get("review_id") or f"{clean}-{page}-{len(collected)}")[:120],
+                "stars": _rating(it.get("rating") or it.get("stars")),
+                "title": str(title)[:300],
+                "body": str(body)[:4000],
+                "review_date": str(it.get("date") or it.get("review_date") or "")[:100],
+                "verified": bool(it.get("verified_purchase") or it.get("verified")),
+            })
+        if len(items) < 5:
+            break
+    log(f"  [{market}] API отзывов собрано: {len(collected)}")
+    return {"asin": clean, "market": market, "total_with_text": total, "reviews": collected}
+
+
+def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=True) -> dict:
+    """Сбор через structured API с откатом на HTML-парсер."""
+    clean, mkt_from_input, _ = extract_asin_and_market(raw_input)
+    if not clean:
+        return {"asin": "", "source": "none", "rating": None, "count": None,
+                "hist": {}, "image_url": None, "bsr": None, "note": "не распознан ASIN"}
+
+    for mkt in [m for m in (market, mkt_from_input, "BE", "NL") if m]:
+        obj = fetch_product_json(clean, mkt, log=log)
+        if not obj:
+            continue
+        parsed = parse_product_json(obj, clean, mkt)
+        if parsed["rating"] is not None:
+            log(f"  [{mkt}] API OK: rating={parsed['rating']} count={parsed['count']}")
+            parsed["_raw"] = obj
+            return parsed
+        log(f"  [{mkt}] API: рейтинга нет в ответе")
+
+    if fallback_html:
+        log("  откат на HTML-парсер")
+        return check_asin(raw_input, log=log)
+    return {"asin": clean, "source": "none", "rating": None, "count": None,
+            "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
