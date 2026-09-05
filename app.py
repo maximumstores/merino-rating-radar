@@ -26,6 +26,13 @@ from collector import (
     start_run,
 )
 
+try:
+    import notifier
+    NOTIFIER_OK = True
+except Exception:
+    notifier = None
+    NOTIFIER_OK = False
+
 load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -388,15 +395,27 @@ def run_collection(items, label="Прогон"):
             log_box.code("\n".join(_lines[-15:]))
         try:
             res = check_asin(item, log=_log)
-            save_to_db(res)
-            if res.get("source") in VALID_SOURCES:
-                ok += 1
         except Exception as e:
             _log(f"Ошибка {item}: {e}")
+            res = {"asin": extract_asin(item), "source": "none", "rating": None, "count": None,
+                   "hist": {}, "image_url": None, "bsr": None, "note": f"ошибка сбора: {e}"[:200]}
+        try:
+            save_to_db(res)   # пишем даже неудачный замер — иначе дыра в истории
+        except Exception as e:
+            _log(f"Не сохранился {item}: {e}")
+        if res.get("source") in VALID_SOURCES:
+            ok += 1
         progress.progress(i / len(items), text=f"{i}/{len(items)}")
     finish_run(run_id, ok, "done")
     st.session_state["last_auto_run"] = time.time()
-    st.success(f"{label} завершён: {ok}/{len(items)} успешно.")
+    msg = f"{label} завершён: {ok}/{len(items)} успешно."
+    if NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
+        try:
+            sent, total = notifier.notify_all(header=f"Rating Radar — {label.lower()} завершён")
+            msg += f" Telegram: отправлено {sent} из {total}."
+        except Exception as e:
+            msg += f" Telegram: ошибка отправки ({e})."
+    st.success(msg)
     st.rerun()
 
 
@@ -1783,6 +1802,65 @@ with tab_ops:
         render_asin_manager("child")
     with st.expander("📥 Загрузка ASIN — 📋 Портфель (Парент)", expanded=False):
         render_asin_manager("parent")
+
+    st.markdown("---")
+    with st.expander("🔔 Telegram-уведомления (@RatingRadar_bot)", expanded=False):
+        if not NOTIFIER_OK:
+            st.error("Модуль notifier.py не найден или не импортируется")
+        elif not notifier.BOT_TOKEN:
+            st.warning("Не задан TELEGRAM_BOT_TOKEN — добавь его в Secrets приложения (или в .env локально)")
+        else:
+            st.session_state.setdefault("tg_notify_on", True)
+            t1, t2, t3 = st.columns([1.4, 1.4, 2])
+            st.session_state["tg_notify_on"] = t1.toggle("Слать после каждого прогона",
+                                                         value=st.session_state["tg_notify_on"])
+            try:
+                subs = notifier.get_subscribers(active_only=False)
+            except Exception as e:
+                subs = pd.DataFrame()
+                st.error(f"Не читаются подписчики: {e}")
+            active_n = int(subs["active"].sum()) if not subs.empty else 0
+            t2.metric("Подписчиков", f"{active_n}", delta=f"всего {len(subs)}", delta_color="off")
+            t3.markdown("<div class='muted' style='margin-top:22px'>Подписка — в самом боте: "
+                        "<a href='https://t.me/RatingRadar_bot' target='_blank'>@RatingRadar_bot</a> → <code>/start</code>. "
+                        "Там же настраиваются фильтры: <code>/kind</code>, <code>/country</code>, <code>/drop</code>.</div>",
+                        unsafe_allow_html=True)
+
+            b1, b2, b3 = st.columns([1.2, 1.2, 2])
+            if b1.button("📤 Отправить отчёт сейчас", key="tg_send_now"):
+                try:
+                    sent, total = notifier.notify_all(header="Rating Radar — отчёт по запросу",
+                                                      silent_if_empty=False)
+                    st.success(f"Отправлено {sent} из {total}")
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+            if b2.button("👁 Показать текст отчёта", key="tg_preview"):
+                try:
+                    al = notifier.build_alerts()
+                    st.code(notifier.format_report(al, header="Rating Radar"), language="html")
+                    st.caption(f"Алертов: {len(al)}")
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+            bc = b3.text_input("Разослать своё сообщение", key="tg_broadcast",
+                               placeholder="текст всем подписчикам…")
+            if bc.strip() and b3.button("Разослать", key="tg_bc_btn"):
+                try:
+                    ok_n, total = notifier.broadcast(bc.strip())
+                    st.success(f"Разослано {ok_n} из {total}")
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+            if not subs.empty:
+                show = subs.copy()
+                show["created_at"] = pd.to_datetime(show["created_at"], utc=True).dt.strftime("%d.%m.%Y")
+                show["last_sent_at"] = pd.to_datetime(show["last_sent_at"], utc=True, errors="coerce").dt.strftime("%d.%m %H:%M")
+                show = show[["username", "first_name", "kinds", "countries", "min_drop", "only_status_change",
+                             "active", "created_at", "last_sent_at"]]
+                show.columns = ["Юзернейм", "Имя", "Тип", "Страны", "Порог ★", "Только смена",
+                                "Активен", "Подписан", "Последняя отправка"]
+                st.dataframe(show, use_container_width=True, hide_index=True, height=220)
+            else:
+                st.caption("Подписчиков пока нет — открой бота и отправь /start")
 
     st.markdown("### История прогонов")
     runs = get_runs_history()
