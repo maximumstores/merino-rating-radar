@@ -347,7 +347,161 @@ def broadcast(text):
     return ok, len(subs)
 
 
+# ---------------------------------------------------------------- команды бота
+HELP = """<b>Rating Radar</b> — алерты по рейтингам Amazon.
+
+Присылаю после каждого прогона: смену цвета листинга (\U0001F7E2\U0001F7E1\U0001F534), падение рейтинга и аномалии бота возвратов (рейтинг упал, а оценок почти не прибавилось).
+
+<b>Команды</b>
+/start — подписаться
+/stop — отписаться
+/status — мои настройки и сводка портфеля
+/report — отчёт по последнему прогону
+/kind child|parent|all — чайлды, паренты или всё
+/country US,BE или all — по каким странам
+/drop 0.1 — порог падения рейтинга
+/only_status on|off — только смена цвета и аномалии
+/help — эта справка"""
+
+
+def get_subscriber(chat_id):
+    try:
+        with conn() as c:
+            df = pd.read_sql("SELECT * FROM telegram_subscribers WHERE chat_id = %s", c, params=(chat_id,))
+        return df.iloc[0] if not df.empty else None
+    except Exception:
+        return None
+
+
+def portfolio_summary():
+    try:
+        with conn() as c:
+            df = pd.read_sql(
+                """
+                SELECT DISTINCT ON (asin) asin, rating FROM asin_metrics
+                WHERE asin NOT LIKE 'HTTP%' AND LENGTH(asin) <= 10
+                ORDER BY asin, created_at DESC;
+                """, c)
+            run = pd.read_sql(
+                "SELECT started_at, ok_count, asin_count FROM collection_runs ORDER BY started_at DESC LIMIT 1", c)
+    except Exception:
+        return "не удалось прочитать базу"
+    if df.empty:
+        return "данных пока нет"
+    r = pd.to_numeric(df["rating"], errors="coerce")
+    line = (f"\U0001F7E2 {int((r >= WARN_LEVEL).sum())} · \U0001F7E1 {int(((r > RISK_LEVEL) & (r < WARN_LEVEL)).sum())} · "
+            f"\U0001F534 {int((r <= RISK_LEVEL).sum())} · \u26AA {int(r.isna().sum())} · средний {r.mean():.2f}")
+    if not run.empty:
+        t = pd.to_datetime(run.iloc[0]["started_at"])
+        line += (f"\nПоследний сбор: {t:%d.%m %H:%M} UTC "
+                 f"({int(run.iloc[0]['ok_count'] or 0)}/{int(run.iloc[0]['asin_count'] or 0)})")
+    return line
+
+
+def handle_command(msg):
+    """Обрабатывает одно входящее сообщение Telegram."""
+    chat_id = (msg.get("chat") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+    user = msg.get("from", {}) or {}
+    if not chat_id:
+        return
+    if not text.startswith("/"):
+        send_message(chat_id, HELP)
+        return
+
+    cmd, _, arg = text.partition(" ")
+    cmd = cmd.split("@")[0].lower()
+    arg = arg.strip()
+
+    if cmd == "/start":
+        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"), active=True)
+        send_message(chat_id, "\u2705 Подписка оформлена. Буду присылать отчёт после каждого сбора.\n\n" + HELP)
+
+    elif cmd == "/stop":
+        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"), active=False)
+        send_message(chat_id, "Отписал. /start — включить снова.")
+
+    elif cmd == "/status":
+        sub = get_subscriber(chat_id)
+        if sub is None:
+            send_message(chat_id, "Ты не подписан. /start — подписаться.")
+            return
+        send_message(chat_id,
+                     f"<b>Подписка</b>: {'активна' if sub['active'] else 'выключена'}\n"
+                     f"Тип: <code>{sub['kinds']}</code>\n"
+                     f"Страны: <code>{sub['countries']}</code>\n"
+                     f"Порог падения: <code>{float(sub['min_drop']):.2f}\u2605</code>\n"
+                     f"Только смена цвета: <code>{'да' if sub['only_status_change'] else 'нет'}</code>\n\n"
+                     f"<b>Портфель</b>\n{portfolio_summary()}")
+
+    elif cmd == "/report":
+        send_message(chat_id, format_report(build_alerts(), header="Rating Radar — по запросу"))
+
+    elif cmd == "/kind":
+        val = {"child": "child", "чайлд": "child", "parent": "parent", "парент": "parent",
+               "all": "child,parent", "все": "child,parent"}.get(arg.lower())
+        if not val:
+            send_message(chat_id, "Формат: /kind child | parent | all")
+            return
+        set_subscriber_field(chat_id, "kinds", val)
+        send_message(chat_id, f"Тип обновлён: <code>{val}</code>")
+
+    elif cmd == "/country":
+        val = "all" if arg.lower() in ("all", "все", "") else ",".join(
+            c.strip().upper() for c in arg.split(",") if c.strip())
+        set_subscriber_field(chat_id, "countries", val)
+        send_message(chat_id, f"Страны обновлены: <code>{val}</code>")
+
+    elif cmd == "/drop":
+        try:
+            v = float(arg.replace(",", "."))
+            assert 0 <= v <= 5
+        except Exception:
+            send_message(chat_id, "Формат: /drop 0.1")
+            return
+        set_subscriber_field(chat_id, "min_drop", v)
+        send_message(chat_id, f"Порог падения: <code>{v:.2f}\u2605</code>")
+
+    elif cmd == "/only_status":
+        v = arg.lower() in ("on", "да", "true", "1", "yes")
+        set_subscriber_field(chat_id, "only_status_change", v)
+        send_message(chat_id, f"Только смена цвета и аномалии: <code>{'да' if v else 'нет'}</code>")
+
+    else:
+        send_message(chat_id, HELP)
+
+
+def process_updates(timeout=0, max_updates=50):
+    """Разбирает накопившиеся команды одним запросом (без отдельного воркера).
+
+    Вызывается из дашборда при загрузке страницы и после прогона. Возвращает
+    число обработанных сообщений. Безопасно вызывать часто — при пустой очереди
+    это один быстрый HTTP-запрос.
+    """
+    if not BOT_TOKEN:
+        return 0
+    ensure_subs_schema()
+    offset = int(get_state("update_offset", 0) or 0)
+    res = tg_call("getUpdates", offset=offset + 1, timeout=timeout,
+                  limit=max_updates, allowed_updates=["message"])
+    if not res.get("ok"):
+        return 0
+    handled = 0
+    for upd in res.get("result", []):
+        offset = max(offset, upd["update_id"])
+        if "message" in upd:
+            try:
+                handle_command(upd["message"])
+                handled += 1
+            except Exception:
+                pass
+    if res.get("result"):
+        set_state("update_offset", offset)
+    return handled
+
+
 if __name__ == "__main__":
     ensure_subs_schema()
+    print("команд обработано:", process_updates())
     n, total = notify_all(silent_if_empty=False)
     print(f"отправлено {n} из {total}")
