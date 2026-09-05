@@ -2082,12 +2082,16 @@ with tab_ops:
 
             if not subs.empty:
                 show = subs.copy()
-                show["created_at"] = pd.to_datetime(show["created_at"], utc=True).dt.strftime("%d.%m.%Y")
-                show["last_sent_at"] = pd.to_datetime(show["last_sent_at"], utc=True, errors="coerce").dt.strftime("%d.%m %H:%M")
-                show = show[["username", "first_name", "kinds", "countries", "min_drop", "only_status_change",
-                             "active", "created_at", "last_sent_at"]]
-                show.columns = ["Юзернейм", "Имя", "Тип", "Страны", "Порог ★", "Только смена",
-                                "Активен", "Подписан", "Последняя отправка"]
+                for col, fmt_ in (("created_at", "%d.%m.%Y"), ("last_sent_at", "%d.%m %H:%M")):
+                    if col in show.columns:
+                        show[col] = pd.to_datetime(show[col], utc=True, errors="coerce").dt.strftime(fmt_)
+                    else:
+                        show[col] = "—"
+                cols_map = {"username": "Юзернейм", "first_name": "Имя", "kinds": "Тип", "countries": "Страны",
+                            "min_drop": "Порог ★", "only_status_change": "Только смена", "active": "Активен",
+                            "created_at": "Подписан", "last_sent_at": "Последняя отправка"}
+                have = [c for c in cols_map if c in show.columns]
+                show = show[have].rename(columns=cols_map)
                 st.dataframe(show, use_container_width=True, hide_index=True, height=220)
             else:
                 st.caption("Подписчиков пока нет — открой бота и отправь /start")
