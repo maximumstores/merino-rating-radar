@@ -107,8 +107,8 @@ def set_state(key, value):
 
 def get_subscribers(active_only=True):
     ensure_subs_schema()
-    q = "SELECT chat_id, username, first_name, kinds, countries, min_drop, only_status_change, active, created_at " \
-        "FROM telegram_subscribers"
+    q = ("SELECT chat_id, username, first_name, kinds, countries, min_drop, only_status_change, "
+         "active, created_at, last_sent_at FROM telegram_subscribers")
     if active_only:
         q += " WHERE active = TRUE"
     q += " ORDER BY created_at"
