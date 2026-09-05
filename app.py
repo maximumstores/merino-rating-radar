@@ -411,6 +411,7 @@ def run_collection(items, label="Прогон"):
     msg = f"{label} завершён: {ok}/{len(items)} успешно."
     if NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
         try:
+            notifier.process_updates()
             sent, total = notifier.notify_all(header=f"Rating Radar — {label.lower()} завершён")
             msg += f" Telegram: отправлено {sent} из {total}."
         except Exception as e:
@@ -462,6 +463,13 @@ def get_tracked_with_kind():
 
 
 KIND_LABEL = {"child": "Чайлд", "parent": "Парент"}
+# разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера
+if NOTIFIER_OK and notifier.BOT_TOKEN:
+    try:
+        notifier.process_updates()
+    except Exception:
+        pass
+
 tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
 tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
@@ -1832,6 +1840,13 @@ with tab_ops:
                     sent, total = notifier.notify_all(header="Rating Radar — отчёт по запросу",
                                                       silent_if_empty=False)
                     st.success(f"Отправлено {sent} из {total}")
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+            if b1.button("🔄 Проверить новые команды", key="tg_poll"):
+                try:
+                    n = notifier.process_updates()
+                    st.success(f"Обработано команд: {n}")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
             if b2.button("👁 Показать текст отчёта", key="tg_preview"):
