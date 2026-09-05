@@ -20,13 +20,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+def _cfg(name, default=""):
+    """env → .env → st.secrets (Streamlit Cloud кладёт секреты только туда)."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        import streamlit as st  # noqa: WPS433 — опционально, вне Streamlit не нужен
+        val = st.secrets.get(name)
+        if val:
+            os.environ[name] = str(val)   # чтобы collector.py и остальные тоже увидели
+            return str(val)
+    except Exception:
+        pass
+    return default
+
+
+BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN")
+DATABASE_URL = _cfg("DATABASE_URL")
 API = "https://api.telegram.org/bot{token}/{method}"
 
 # пороги алертов (можно переопределить через env)
-DROP_THRESHOLD = float(os.environ.get("ALERT_DROP", "0.1"))       # падение рейтинга, ★
-GROWTH_THRESHOLD = float(os.environ.get("ALERT_GROWTH", "0.5"))   # прирост оценок, % от базы
+DROP_THRESHOLD = float(_cfg("ALERT_DROP", "0.1"))       # падение рейтинга, ★
+GROWTH_THRESHOLD = float(_cfg("ALERT_GROWTH", "0.5"))   # прирост оценок, % от базы
 RISK_LEVEL = 4.24
 WARN_LEVEL = 4.45
 
