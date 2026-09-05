@@ -768,5 +768,3 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
         return check_asin(raw_input, log=log)
     return {"asin": clean, "source": "none", "rating": None, "count": None,
             "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
-    return {"asin": clean, "source": "none", "rating": None, "count": None,
-            "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
