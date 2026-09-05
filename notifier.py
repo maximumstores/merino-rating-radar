@@ -517,6 +517,58 @@ def process_updates(timeout=0, max_updates=50):
     return handled
 
 
+def diagnose():
+    """Проверка связки: токен, вебхук, очередь обновлений, база подписчиков."""
+    out = {}
+    out["token_present"] = bool(BOT_TOKEN)
+    out["token_tail"] = f"…{BOT_TOKEN[-6:]}" if BOT_TOKEN else "—"
+    out["db_present"] = bool(DATABASE_URL)
+
+    if not BOT_TOKEN:
+        out["error"] = "TELEGRAM_BOT_TOKEN пуст: не виден ни в env, ни в st.secrets"
+        return out
+
+    me = tg_call("getMe")
+    out["getMe"] = me
+    out["bot_username"] = (me.get("result") or {}).get("username") if me.get("ok") else None
+
+    wh = tg_call("getWebhookInfo")
+    out["webhook"] = wh.get("result") if wh.get("ok") else wh
+    out["webhook_url"] = (wh.get("result") or {}).get("url") or ""
+
+    try:
+        out["offset"] = int(get_state("update_offset", 0) or 0)
+    except Exception as e:
+        out["offset"] = f"ошибка чтения состояния: {e}"
+
+    upd = tg_call("getUpdates", offset=(out["offset"] + 1) if isinstance(out["offset"], int) else 1,
+                  timeout=0, limit=10, allowed_updates=["message"])
+    out["getUpdates_ok"] = upd.get("ok")
+    out["getUpdates_error"] = upd.get("description") if not upd.get("ok") else None
+    out["pending"] = len(upd.get("result", [])) if upd.get("ok") else 0
+    out["pending_texts"] = [
+        f"{(u.get('message') or {}).get('text', '')} от @{((u.get('message') or {}).get('from') or {}).get('username', '?')}"
+        for u in upd.get("result", [])[:10]
+    ]
+
+    try:
+        subs = get_subscribers(active_only=False)
+        out["subscribers"] = len(subs)
+    except Exception as e:
+        out["subscribers"] = f"ошибка БД: {e}"
+    return out
+
+
+def drop_webhook():
+    """Снимает вебхук — иначе getUpdates отдаёт 409 Conflict."""
+    return tg_call("deleteWebhook", drop_pending_updates=False)
+
+
+def reset_offset(value=0):
+    set_state("update_offset", int(value))
+    return int(value)
+
+
 if __name__ == "__main__":
     ensure_subs_schema()
     print("команд обработано:", process_updates())
