@@ -14,6 +14,18 @@ import streamlit as st
 from dotenv import load_dotenv
 from sklearn.linear_model import LinearRegression
 
+# Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
+# ДО импорта collector/notifier — они читают переменные на уровне модуля.
+load_dotenv()
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN"):
+    if not os.environ.get(_k):
+        try:
+            _v = st.secrets.get(_k)
+            if _v:
+                os.environ[_k] = str(_v)
+        except Exception:
+            pass
+
 from collector import (
     check_asin,
     clean_db_trash,
@@ -33,7 +45,6 @@ except Exception:
     notifier = None
     NOTIFIER_OK = False
 
-load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 st.set_page_config(
