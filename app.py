@@ -42,50 +42,6 @@ from collector import (
     get_tracked_asins,
     save_reviews,
     save_to_db,
-    start_run,import datetime
-import json
-import os
-import re
-import time
-from zoneinfo import ZoneInfo
-
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import psycopg2
-import streamlit as st
-from dotenv import load_dotenv
-from sklearn.linear_model import LinearRegression
-
-# Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
-# ДО импорта collector/notifier — они читают переменные на уровне модуля.
-load_dotenv()
-for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"):
-    if not os.environ.get(_k):
-        try:
-            _v = st.secrets.get(_k)
-            if _v:
-                os.environ[_k] = str(_v)
-        except Exception:
-            pass
-
-from collector import (
-    check_asin,
-    check_asin_api,
-    clean_db_trash,
-    delete_asin_completely,
-    ensure_reviews_schema,
-    ensure_schema,
-    extract_asin,
-    extract_children,
-    fetch_product_json,
-    fetch_reviews,
-    fetch_reviews_api,
-    finish_run,
-    get_tracked_asins,
-    save_reviews,
-    save_to_db,
     start_run,
 )
 
@@ -2435,4 +2391,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    )
+    ) 
