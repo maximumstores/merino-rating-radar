@@ -384,6 +384,47 @@ def save_markets(markets):
     conn.close()
 
 
+def ensure_settings_table():
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS radar_settings ("
+                        "key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_setting(key, default=None):
+    ensure_settings_table()
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM radar_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+        conn.close()
+        return row[0] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key, value):
+    ensure_settings_table()
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO radar_settings (key, value) VALUES (%s, %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();",
+                        (key, str(value)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def enrich_dictionary_from_api(res: dict):
     """Пишет parent / категорию / страну из structured API в справочник.
     Значения из загруженного spr не затираются — они приоритетнее."""
@@ -1090,6 +1131,9 @@ def render_dynamics(filtered_df, hist_df, kind):
         sort_by = d2.selectbox("Сортировка ASIN", ["По последнему рейтингу ↑", "По последнему рейтингу ↓",
                                                    "По падению за период", "По алфавиту"], key=f"dyn_sort_{kind}")
         gran_d = d3.radio("Шаг", ["День", "Неделя"], horizontal=True, key=f"dyn_gran_{kind}")
+        fill_gaps = d3.checkbox("Заполнять пропуски", value=True, key=f"dyn_fill_{kind}",
+                                help="В дни без сбора показывать последнее известное значение "
+                                     "(курсивом и бледнее). В базу ничего не пишется.")
 
         h = hist_df.copy()
         h["day"] = (h["created_local"].dt.to_period("W").dt.start_time if gran_d == "Неделя"
@@ -1104,6 +1148,15 @@ def render_dynamics(filtered_df, hist_df, kind):
         piv_b = snap_d.pivot(index="asin", columns="day", values="bsr_num").reindex(columns=days)
         piv_c = snap_d.pivot(index="asin", columns="day", values="review_count").reindex(columns=days)
         piv_n = snap_d.pivot(index="asin", columns="day", values="bad").reindex(columns=days)
+
+        # где реально был замер, а где значение будет перенесено
+        measured = {"Rating": piv_r.notna(), "BSR": piv_b.notna(),
+                    "Reviews": piv_c.notna(), "1–2★ %": piv_n.notna()}
+        if fill_gaps:
+            piv_r = piv_r.ffill(axis=1)
+            piv_b = piv_b.ffill(axis=1)
+            piv_c = piv_c.ffill(axis=1)
+            piv_n = piv_n.ffill(axis=1)
 
         # порядок ASIN
         last_r = piv_r.ffill(axis=1).iloc[:, -1]
@@ -1135,6 +1188,15 @@ def render_dynamics(filtered_df, hist_df, kind):
                 row = param_map[pname].loc[a].tolist()
                 blocks.append([a, src_map.get(a, ""), pname] + row)
         wide = pd.DataFrame(blocks, columns=["ASIN", "Страна", "Parameter"] + day_labels)
+
+        carried_rows = []
+        for _, r in wide.iterrows():
+            m = measured.get(r["Parameter"])
+            if m is None or r["ASIN"] not in m.index:
+                carried_rows.append([True] * len(day_labels))
+            else:
+                carried_rows.append([bool(x) for x in m.loc[r["ASIN"]].reindex(days).fillna(False).values])
+        carried = pd.DataFrame(carried_rows, columns=day_labels)
 
         # --- стилизация ---
         def rating_color(v):
@@ -1223,15 +1285,14 @@ def render_dynamics(filtered_df, hist_df, kind):
         for col in day_labels:
             disp[col] = [fmt_cell(v, p) for v, p in zip(wide[col], wide["Parameter"])]
         first_row = disp["Parameter"] == (params_sel[0] if params_sel else "")
-        is_grp = disp["Parameter"] == "Группа (ср. ★)"
-        disp["ASIN"] = [a if (f or g) else "" for a, f, g in zip(wide["ASIN"], first_row, is_grp)]
-        disp["Страна"] = disp["Страна"].where(first_row, "")
         disp = disp.rename(columns={"Parameter": "Параметр"})
 
         def style_rows(row):
             p = wide.loc[row.name, "Parameter"]
             vals = wide.loc[row.name, day_labels]
             out = [""] * len(row)
+            is_measured = (list(carried.loc[row.name]) if row.name in carried.index
+                           else [True] * len(day_labels))
             if p == "Группа (ср. ★)":
                 out = ["background-color:#e8e8ed;font-weight:700"] * len(row)
                 out[3:] = [rating_color(v) for v in vals]
@@ -1241,7 +1302,7 @@ def render_dynamics(filtered_df, hist_df, kind):
             elif p == "1–2★ %":
                 out[3:] = ["background-color:#ffcdd2" if pd.notnull(v) and v > 15 else
                            ("background-color:#fff9c4" if pd.notnull(v) and v > 8 else "") for v in vals]
-            elif p in ("Reviews", "BSR"):
+            elif p in ("Reviews", "BSR"):   # noqa: подсветка динамики ниже
                 prev, styles = None, []
                 for v in vals:
                     st_ = ""
@@ -1255,23 +1316,42 @@ def render_dynamics(filtered_df, hist_df, kind):
                     if pd.notnull(v):
                         prev = v
                 out[3:] = styles
+            for i, ok in enumerate(is_measured):   # перенесённые — курсив и бледнее
+                if not ok:
+                    out[3 + i] = ((out[3 + i] + ";") if out[3 + i] else "") + "font-style:italic;opacity:.45"
             return out
 
+        def style_asin_col(col):
+            # ASIN виден в каждой строке, но у не-первых строк блока — приглушённый
+            return ["font-weight:600" if f else "color:#b0b0b8" for f in first_row]
+
         styled = (disp.style.apply(style_rows, axis=1)
-                  .set_properties(subset=["ASIN"], **{"font-weight": "600"}))
+                  .apply(style_asin_col, subset=["ASIN"]))
 
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
+
+        # ASIN дублируем в каждую строку блока — иначе при скролле непонятно, чья строка
+        disp["ASIN"] = [a if a else "" for a in wide["ASIN"]]
+        disp["Страна"] = list(wide["Страна"])
+
+        def _col(label, width, pin=False):
+            try:
+                return st.column_config.TextColumn(label, width=width, pinned=pin)
+            except TypeError:      # старые версии Streamlit без pinned
+                return st.column_config.TextColumn(label, width=width)
+
+        cfg = {
+            "ASIN": _col("ASIN", "medium", pin=True),
+            "Страна": _col("Страна", "small", pin=True),
+            "Параметр": _col("Параметр", "small", pin=True),
+        }
+        cfg.update({d: st.column_config.TextColumn(d, width="small") for d in day_labels})
 
         sel = st.dataframe(
             styled, use_container_width=True, hide_index=True,
             height=min(760, 40 + 35 * len(disp)),
             on_select="rerun", selection_mode="multi-row", key=f"dyn_table_{kind}",
-            column_config={
-                "ASIN": st.column_config.TextColumn("ASIN", width="medium"),
-                "Страна": st.column_config.TextColumn("Страна", width="small"),
-                "Параметр": st.column_config.TextColumn("Параметр", width="small"),
-                **{d: st.column_config.TextColumn(d, width="small") for d in day_labels},
-            },
+            column_config=cfg,
         )
 
         picked_rows = []
@@ -1296,7 +1376,10 @@ def render_dynamics(filtered_df, hist_df, kind):
 
         st.markdown("<div class='muted' style='margin-top:4px'>"
                     "🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · зелёные Reviews — прибавились · "
-                    "красный BSR — просел более чем на 15%</div>", unsafe_allow_html=True)
+                    "красный BSR — просел более чем на 15%"
+                    + (" · <i>курсивом и бледнее</i> — сбора в этот день не было, "
+                       "показано последнее известное значение" if fill_gaps else "")
+                    + "</div>", unsafe_allow_html=True)
 
         e1, e2 = st.columns([1, 5])
         e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), f"rating_dynamics_{kind}.csv", "text/csv",
@@ -2020,10 +2103,32 @@ with tab_ops:
                 run_collection(tracked, "Прогон")
 
         st.markdown("### Автосбор")
+        saved_time = get_setting("auto_time", "13:00")
+        try:
+            _h, _m = (int(x) for x in str(saved_time).split(":")[:2])
+        except Exception:
+            _h, _m = 13, 0
+        saved_on = str(get_setting("auto_enabled", "0")) == "1"
+
         t1, t2 = st.columns(2)
-        target_daily_time = t1.time_input("Время ежедневного сбора", value=datetime.time(13, 0), key="daily_run_time")
+        target_daily_time = t1.time_input("Время ежедневного сбора", value=datetime.time(_h, _m),
+                                          key="daily_run_time")
         t2.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        auto_timer_active = t2.checkbox("Автосбор включён", value=False)
+        auto_timer_active = t2.checkbox("Автосбор включён", value=saved_on, key="auto_enabled_cb")
+
+        # сохраняем только при реальном изменении
+        if target_daily_time.strftime("%H:%M") != str(saved_time):
+            set_setting("auto_time", target_daily_time.strftime("%H:%M"))
+        if auto_timer_active != saved_on:
+            set_setting("auto_enabled", "1" if auto_timer_active else "0")
+
+        st.caption(f"Сохранено: {target_daily_time:%H:%M} {tz_short}, "
+                   f"автосбор {'включён' if auto_timer_active else 'выключен'} — настройка хранится в базе "
+                   "и переживает перезапуск.")
+        st.warning("Автосбор в браузере срабатывает, только пока вкладка открыта. Для сбора без участия "
+                   "человека нужен внешний запуск radar_scheduled.py по расписанию (cron / Railway / VPS) — "
+                   "он читает то же время из базы.", icon="⚠️")
+
         if auto_timer_active and tracked:
             now_tz = datetime.datetime.now(ZoneInfo(selected_tz))
             sched = datetime.datetime.combine(now_tz.date(), target_daily_time, tzinfo=ZoneInfo(selected_tz))
@@ -2405,4 +2510,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
