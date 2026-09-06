@@ -1,0 +1,27 @@
+name: Rating Radar — команды бота
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # раз в 10 минут разбираем /start и остальные команды
+  workflow_dispatch:
+
+concurrency:
+  group: radar-bot
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Разобрать команды
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python -c "import notifier; print('обработано:', notifier.process_updates())"
