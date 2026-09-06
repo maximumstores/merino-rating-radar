@@ -1321,27 +1321,30 @@ def render_dynamics(filtered_df, hist_df, kind):
                     out[3 + i] = ((out[3 + i] + ";") if out[3 + i] else "") + "font-style:italic;opacity:.45"
             return out
 
-        def style_asin_col(col):
-            # ASIN виден в каждой строке, но у не-первых строк блока — приглушённый
-            return ["font-weight:600" if f else "color:#b0b0b8" for f in first_row]
-
-        styled = (disp.style.apply(style_rows, axis=1)
-                  .apply(style_asin_col, subset=["ASIN"]))
+        styled = disp.style.apply(style_rows, axis=1)
 
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
 
-        # ASIN дублируем в каждую строку блока — иначе при скролле непонятно, чья строка
-        disp["ASIN"] = [a if a else "" for a in wide["ASIN"]]
-        disp["Страна"] = list(wide["Страна"])
+        # ASIN в каждой строке блока + ссылка на листинг в нужной стране
+        is_group_row = list(wide["Parameter"] == "Группа (ср. ★)")
+        disp["ASIN"] = [
+            "" if g else f"https://www.{MARKET_DOMAINS.get(c, 'amazon.com.be')}/dp/{a}"
+            for a, c, g in zip(wide["ASIN"], wide["Страна"], is_group_row)
+        ]
+        disp["Страна"] = [a if g else c for a, c, g in zip(wide["ASIN"], wide["Страна"], is_group_row)]
 
-        def _col(label, width, pin=False):
+        def _col(label, width, pin=False, link=False):
+            kind = st.column_config.LinkColumn if link else st.column_config.TextColumn
+            kw = {"width": width}
+            if link:
+                kw["display_text"] = r"/dp/([A-Z0-9]{10})"
             try:
-                return st.column_config.TextColumn(label, width=width, pinned=pin)
+                return kind(label, pinned=pin, **kw)
             except TypeError:      # старые версии Streamlit без pinned
-                return st.column_config.TextColumn(label, width=width)
+                return kind(label, **kw)
 
         cfg = {
-            "ASIN": _col("ASIN", "medium", pin=True),
+            "ASIN": _col("ASIN", "medium", pin=True, link=True),
             "Страна": _col("Страна", "small", pin=True),
             "Параметр": _col("Параметр", "small", pin=True),
         }
@@ -2510,4 +2513,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
