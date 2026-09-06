@@ -1,0 +1,37 @@
+name: Rating Radar — сбор
+
+on:
+  schedule:
+    # каждые 30 минут; скрипт сам решает, пора ли собирать
+    # (сверяется с временем и галочкой из базы и проверяет, не собирали ли уже сегодня)
+    - cron: "*/30 * * * *"
+  workflow_dispatch:        # кнопка «запустить вручную» во вкладке Actions
+
+concurrency:
+  group: radar-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Запустить сбор
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCRAPINGDOG_API_KEY: ${{ secrets.SCRAPINGDOG_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RADAR_TZ: Europe/Kyiv
+          BSR_RETRIES: "3"
+        run: python radar_scheduled.py
