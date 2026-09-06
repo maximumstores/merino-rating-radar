@@ -1267,7 +1267,7 @@ def render_dynamics(filtered_df, hist_df, kind):
         ]
         disp["Страна"] = disp["Страна"].where(first_row, "")
 
-        # ---- рендер: нативная таблица с выбором строк ----
+        # ---- рендер: HTML-таблица (заливка + кликабельные ASIN + липкие колонки) ----
         def fmt_cell(v, p):
             if pd.isna(v):
                 return ""
@@ -1279,93 +1279,74 @@ def render_dynamics(filtered_df, hist_df, kind):
                 return f"{int(v)}%"
             return f"{int(v)}"
 
-        row_asin = ["" if p == "Группа (ср. ★)" else a
-                    for a, p in zip(wide["ASIN"], wide["Parameter"])]
+        def cell_style(p, v, prev):
+            if p in ("Группа (ср. ★)", "Rating"):
+                return rating_color(v)
+            if p == "1–2★ %" and pd.notnull(v):
+                return "background:#ffcdd2" if v > 15 else ("background:#fff9c4" if v > 8 else "")
+            if p == "Reviews" and pd.notnull(v) and prev is not None and pd.notnull(prev) and v > prev:
+                return "color:#1f8a4c;font-weight:600"
+            if p == "BSR" and pd.notnull(v) and prev is not None and pd.notnull(prev):
+                return "color:#d13438" if v > prev * 1.15 else ("color:#1f8a4c" if v < prev * 0.85 else "")
+            return ""
 
-        disp = wide.copy()
-        for col in day_labels:
-            disp[col] = [fmt_cell(v, p) for v, p in zip(wide[col], wide["Parameter"])]
-        first_row = list(disp["Parameter"] == (params_sel[0] if params_sel else ""))
-        disp = disp.rename(columns={"Parameter": "Параметр"})
+        first_param = params_sel[0] if params_sel else ""
+        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Страна", "Параметр"] + day_labels)
+        trs = []
+        for _, r in wide.iterrows():
+            p = r["Parameter"]
+            is_grp = p == "Группа (ср. ★)"
+            head = is_grp or p == first_param
+            if is_grp:
+                a_cell, c_cell = f"<b>{r['ASIN']}</b>", ""
+            elif head:
+                dom = MARKET_DOMAINS.get(r["Страна"], "amazon.com.be")
+                a_cell = (f"<a href='https://www.{dom}/dp/{r['ASIN']}' target='_blank'>{r['ASIN']}</a>")
+                c_cell = r["Страна"]
+            else:
+                a_cell, c_cell = "", ""
+            tds = [f"<td class='c-asin'>{a_cell}</td>", f"<td class='c-cty'>{c_cell}</td>",
+                   f"<td class='c-par'>{'<b>' + p + '</b>' if is_grp else p}</td>"]
+            prev = None
+            for i, col in enumerate(day_labels):
+                v = r[col]
+                st_ = cell_style(p, v, prev)
+                if not carried.loc[r.name, col]:
+                    st_ = (st_ + ";" if st_ else "") + "font-style:italic;opacity:.45"
+                tds.append(f"<td style='{st_}'>{fmt_cell(v, p)}</td>")
+                if pd.notnull(v):
+                    prev = v
+            trs.append(f"<tr class='{'grp' if is_grp else ('blk' if head else '')}'>{''.join(tds)}</tr>")
 
-        def style_rows(row):
-            p = wide.loc[row.name, "Parameter"]
-            vals = wide.loc[row.name, day_labels]
-            out = [""] * len(row)
-            is_measured = (list(carried.loc[row.name]) if row.name in carried.index
-                           else [True] * len(day_labels))
-            if p == "Группа (ср. ★)":
-                out = ["background-color:#e8e8ed;font-weight:700"] * len(row)
-                out[3:] = [rating_color(v) for v in vals]
-                return out
-            if p == "Rating":
-                out[3:] = [rating_color(v) for v in vals]
-            elif p == "1–2★ %":
-                out[3:] = ["background-color:#ffcdd2" if pd.notnull(v) and v > 15 else
-                           ("background-color:#fff9c4" if pd.notnull(v) and v > 8 else "") for v in vals]
-            elif p in ("Reviews", "BSR"):   # noqa: подсветка динамики ниже
-                prev, styles = None, []
-                for v in vals:
-                    st_ = ""
-                    if pd.notnull(v) and prev is not None and pd.notnull(prev):
-                        if p == "Reviews" and v > prev:
-                            st_ = "color:#1f8a4c;font-weight:600"
-                        elif p == "BSR":
-                            st_ = ("color:#d13438" if v > prev * 1.15
-                                   else ("color:#1f8a4c" if v < prev * 0.85 else ""))
-                    styles.append(st_)
-                    if pd.notnull(v):
-                        prev = v
-                out[3:] = styles
-            for i, ok in enumerate(is_measured):   # перенесённые — курсив и бледнее
-                if not ok:
-                    out[3 + i] = ((out[3 + i] + ";") if out[3 + i] else "") + "font-style:italic;opacity:.45"
-            return out
-
-        styled = disp.style.apply(style_rows, axis=1)
+        html = f"""
+<style>
+.dyn-wrap {{ max-height:760px; overflow:auto; border:1px solid #e5e5ea; border-radius:12px; background:#fff; }}
+.dyn {{ border-collapse:separate; border-spacing:0; font-size:13px; min-width:100%; }}
+.dyn th {{ position:sticky; top:0; background:#f5f5f7; color:#6e6e73; font-weight:600; text-align:right;
+           padding:9px 12px; border-bottom:1px solid #e5e5ea; white-space:nowrap; z-index:2; }}
+.dyn th:nth-child(-n+3) {{ text-align:left; }}
+.dyn td {{ padding:7px 12px; border-bottom:1px solid #f0f0f2; text-align:right; white-space:nowrap; }}
+.dyn td:nth-child(-n+3) {{ text-align:left; }}
+.dyn td.c-asin {{ position:sticky; left:0; background:#fff; z-index:1; min-width:130px;
+                  font-family:ui-monospace,Menlo,monospace; font-weight:600; }}
+.dyn td.c-cty {{ position:sticky; left:130px; background:#fff; z-index:1; min-width:64px; }}
+.dyn th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
+.dyn th:nth-child(2) {{ position:sticky; left:130px; z-index:3; }}
+.dyn td.c-asin a {{ color:#0071e3; text-decoration:none; }}
+.dyn td.c-asin a:hover {{ text-decoration:underline; }}
+.dyn tr.blk td {{ border-top:1px solid #d9d9de; }}
+.dyn tr.grp td {{ background:#e8e8ed; border-top:2px solid #c7c7cc; }}
+.dyn tr.grp td.c-asin, .dyn tr.grp td.c-cty {{ background:#e8e8ed; }}
+</style>
+<div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
+"""
 
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
 
-        # ASIN в каждой строке блока + ссылка на листинг в нужной стране
-        is_group_row = list(wide["Parameter"] == "Группа (ср. ★)")
-        # ASIN и страна — только в первой строке блока, дальше пусто
-        show_head = [bool(f or g) for f, g in zip(first_row, is_group_row)]
-        disp["ASIN"] = [a if h else "" for a, h in zip(wide["ASIN"], show_head)]
-        disp["Страна"] = [c if (h and not g) else "" for c, g, h in zip(wide["Страна"], is_group_row, show_head)]
-
-        def _col(label, width, pin=False):
-            try:
-                return st.column_config.TextColumn(label, width=width, pinned=pin)
-            except TypeError:      # старые версии Streamlit без pinned
-                return st.column_config.TextColumn(label, width=width)
-
-        cfg = {
-            "ASIN": _col("ASIN", "medium", pin=True),
-            "Страна": _col("Страна", "small", pin=True),
-            "Параметр": _col("Параметр", "small", pin=True),
-        }
-        cfg.update({d: st.column_config.TextColumn(d, width="small") for d in day_labels})
-
-        sel = st.dataframe(
-            styled, use_container_width=True, hide_index=True,
-            height=min(760, 40 + 35 * len(disp)),
-            on_select="rerun", selection_mode="multi-row", key=f"dyn_table_{kind}",
-            column_config=cfg,
-        )
-
-        picked_rows = []
-        try:
-            picked_rows = sel.selection["rows"]
-        except Exception:
-            pass
-        picked = sorted({row_asin[i] for i in picked_rows if i < len(row_asin) and row_asin[i]})
-
         u1, u2, u3 = st.columns([3, 1, 1])
-        if picked:
-            u1.markdown(f"**Отмечено: {len(picked)}** · `{', '.join(picked[:12])}`"
-                        f"{' …' if len(picked) > 12 else ''}")
-        else:
-            u1.caption("Отметь галочками строки нужных ASIN — годится любая строка блока")
+        picked = u1.multiselect("Обновить ASIN", options=list(order), default=[],
+                                placeholder="выбери ASIN для пересбора", key=f"dyn_upd_{kind}",
+                                label_visibility="collapsed")
         if u2.button(f"↻ Обновить ({len(picked)})", disabled=not picked, type="primary",
                      key=f"dyn_upd_btn_{kind}", use_container_width=True):
             run_collection(picked, "Обновление")
@@ -1373,12 +1354,33 @@ def render_dynamics(filtered_df, hist_df, kind):
                      help="Пересобрать все ASIN из таблицы"):
             run_collection(list(order), "Обновление")
 
-        st.markdown("<div class='muted' style='margin-top:4px'>"
+        st.markdown(html, unsafe_allow_html=True)
+        st.markdown("<div class='muted' style='margin-top:6px'>"
                     "🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · зелёные Reviews — прибавились · "
                     "красный BSR — просел более чем на 15%"
                     + (" · <i>курсивом и бледнее</i> — сбора в этот день не было, "
                        "показано последнее известное значение" if fill_gaps else "")
                     + "</div>", unsafe_allow_html=True)
+
+        # Styler — только для выгрузки в Excel
+        disp = wide.copy()
+        for col in day_labels:
+            disp[col] = [fmt_cell(v, p) for v, p in zip(wide[col], wide["Parameter"])]
+
+        def style_rows(row):
+            p = wide.loc[row.name, "Parameter"]
+            vals = wide.loc[row.name, day_labels]
+            out = [""] * len(row)
+            prev = None
+            styles = []
+            for v in vals:
+                styles.append(cell_style(p, v, prev))
+                if pd.notnull(v):
+                    prev = v
+            out[3:] = styles
+            return out
+
+        styled = disp.style.apply(style_rows, axis=1)
 
         e1, e2 = st.columns([1, 5])
         e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), f"rating_dynamics_{kind}.csv", "text/csv",
