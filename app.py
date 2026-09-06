@@ -42,6 +42,50 @@ from collector import (
     get_tracked_asins,
     save_reviews,
     save_to_db,
+    start_run,import datetime
+import json
+import os
+import re
+import time
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import psycopg2
+import streamlit as st
+from dotenv import load_dotenv
+from sklearn.linear_model import LinearRegression
+
+# Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
+# ДО импорта collector/notifier — они читают переменные на уровне модуля.
+load_dotenv()
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"):
+    if not os.environ.get(_k):
+        try:
+            _v = st.secrets.get(_k)
+            if _v:
+                os.environ[_k] = str(_v)
+        except Exception:
+            pass
+
+from collector import (
+    check_asin,
+    check_asin_api,
+    clean_db_trash,
+    delete_asin_completely,
+    ensure_reviews_schema,
+    ensure_schema,
+    extract_asin,
+    extract_children,
+    fetch_product_json,
+    fetch_reviews,
+    fetch_reviews_api,
+    finish_run,
+    get_tracked_asins,
+    save_reviews,
+    save_to_db,
     start_run,
 )
 
@@ -1260,6 +1304,20 @@ def render_dynamics(filtered_df, hist_df, kind):
 <div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
 """
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
+
+        # ---- точечное обновление прямо из таблицы ----
+        u1, u2, u3 = st.columns([3, 1, 1])
+        upd_pick = u1.multiselect("Обновить ASIN из таблицы", options=list(order), default=[],
+                                  placeholder="выбери один или несколько", key=f"dyn_upd_{kind}",
+                                  label_visibility="collapsed")
+        u2.markdown("<div style='margin-top:2px'></div>", unsafe_allow_html=True)
+        if u2.button(f"↻ Обновить ({len(upd_pick)})", disabled=not upd_pick,
+                     key=f"dyn_upd_btn_{kind}", use_container_width=True, type="primary"):
+            run_collection(upd_pick, "Обновление")
+        if u3.button(f"↻ Все ({len(order)})", key=f"dyn_upd_all_{kind}", use_container_width=True,
+                     help="Пересобрать все ASIN, показанные в таблице"):
+            run_collection(list(order), "Обновление")
+
         st.markdown(html, unsafe_allow_html=True)
 
         # Styler — только для выгрузки в Excel
