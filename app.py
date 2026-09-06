@@ -1134,10 +1134,7 @@ def render_dynamics(filtered_df, hist_df, kind):
         fill_gaps = d3.checkbox("Заполнять пропуски", value=True, key=f"dyn_fill_{kind}",
                                 help="В дни без сбора показывать последнее известное значение "
                                      "(курсивом и бледнее). В базу ничего не пишется.")
-        links_mode = d3.checkbox("Ссылки на ASIN", value=False, key=f"dyn_links_{kind}",
-                                 help="Streamlit не умеет одновременно заливку ячеек и ссылки. "
-                                      "С галочкой ASIN кликабельны, а рейтинг помечается кружком "
-                                      "🟢🟡🔴 вместо заливки.")
+
 
         h = hist_df.copy()
         h["day"] = (h["created_local"].dt.to_period("W").dt.start_time if gran_d == "Неделя"
@@ -1275,9 +1272,9 @@ def render_dynamics(filtered_df, hist_df, kind):
             if pd.isna(v):
                 return ""
             if p == "Группа (ср. ★)":
-                return f"{rating_emoji(v)} {v:.2f}" if links_mode else f"{v:.2f}"
+                return f"{v:.2f}"
             if p == "Rating":
-                return f"{rating_emoji(v)} {v:.1f}" if links_mode else f"{v:.1f}"
+                return f"{v:.1f}"
             if p == "1–2★ %":
                 return f"{int(v)}%"
             return f"{int(v)}"
@@ -1326,7 +1323,6 @@ def render_dynamics(filtered_df, hist_df, kind):
             return out
 
         styled = disp.style.apply(style_rows, axis=1)
-        table_data = disp if links_mode else styled   # Styler отключает LinkColumn
 
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
 
@@ -1334,34 +1330,24 @@ def render_dynamics(filtered_df, hist_df, kind):
         is_group_row = list(wide["Parameter"] == "Группа (ср. ★)")
         # ASIN и страна — только в первой строке блока, дальше пусто
         show_head = [bool(f or g) for f, g in zip(first_row, is_group_row)]
-        if links_mode:
-            disp["ASIN"] = [
-                (a if g else f"https://www.{MARKET_DOMAINS.get(c, 'amazon.com.be')}/dp/{a}") if h else ""
-                for a, c, g, h in zip(wide["ASIN"], wide["Страна"], is_group_row, show_head)
-            ]
-        else:
-            disp["ASIN"] = [a if h else "" for a, h in zip(wide["ASIN"], show_head)]
+        disp["ASIN"] = [a if h else "" for a, h in zip(wide["ASIN"], show_head)]
         disp["Страна"] = [c if (h and not g) else "" for c, g, h in zip(wide["Страна"], is_group_row, show_head)]
 
-        def _col(label, width, pin=False, link=False):
-            kind = st.column_config.LinkColumn if link else st.column_config.TextColumn
-            kw = {"width": width}
-            if link:
-                kw["display_text"] = r"/dp/([A-Z0-9]{10})"
+        def _col(label, width, pin=False):
             try:
-                return kind(label, pinned=pin, **kw)
+                return st.column_config.TextColumn(label, width=width, pinned=pin)
             except TypeError:      # старые версии Streamlit без pinned
-                return kind(label, **kw)
+                return st.column_config.TextColumn(label, width=width)
 
         cfg = {
-            "ASIN": _col("ASIN", "medium", pin=True, link=links_mode),
+            "ASIN": _col("ASIN", "medium", pin=True),
             "Страна": _col("Страна", "small", pin=True),
             "Параметр": _col("Параметр", "small", pin=True),
         }
         cfg.update({d: st.column_config.TextColumn(d, width="small") for d in day_labels})
 
         sel = st.dataframe(
-            table_data, use_container_width=True, hide_index=True,
+            styled, use_container_width=True, hide_index=True,
             height=min(760, 40 + 35 * len(disp)),
             on_select="rerun", selection_mode="multi-row", key=f"dyn_table_{kind}",
             column_config=cfg,
@@ -1388,9 +1374,8 @@ def render_dynamics(filtered_df, hist_df, kind):
             run_collection(list(order), "Обновление")
 
         st.markdown("<div class='muted' style='margin-top:4px'>"
-                    + ("🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · ASIN кликабельны" if links_mode else
-                       "🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · зелёные Reviews — прибавились · "
-                       "красный BSR — просел более чем на 15%")
+                    "🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · зелёные Reviews — прибавились · "
+                    "красный BSR — просел более чем на 15%"
                     + (" · <i>курсивом и бледнее</i> — сбора в этот день не было, "
                        "показано последнее известное значение" if fill_gaps else "")
                     + "</div>", unsafe_allow_html=True)
