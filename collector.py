@@ -7,8 +7,12 @@ import re
 import time
 from urllib.parse import urlparse
 
+import threading
+from contextlib import contextmanager
+
 import psycopg2
 import requests
+from psycopg2 import extras, pool
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -19,6 +23,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SCRAPE_URL = "https://api.scrapingdog.com/scrape"
 RETRIES = 5
 TIMEOUT = 90
+BSR_RETRIES = int(os.environ.get("BSR_RETRIES", "5"))   # доборы BSR/гистограммы, если не распарсились
 
 DOMAIN_MARKETS = {
     "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
@@ -32,6 +37,7 @@ DOMAIN_MARKETS = {
 }
 # порядок важен: сначала самые длинные домены, чтобы amazon.com не съел amazon.com.be
 DOMAIN_ORDER = sorted(DOMAIN_MARKETS, key=len, reverse=True)
+MARKET_DOMAIN_BY_CODE = {code: domain for domain, (code, _t) in DOMAIN_MARKETS.items()}
 
 DEFAULT_MARKETS = [
     ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
@@ -106,7 +112,39 @@ def extract_asin_and_market(text: str):
     return clean_asin, None, None
 
 
+# ---- пул соединений: при десятках потоков открывать коннект на каждую запись нельзя ----
+_POOL = None
+_POOL_LOCK = threading.Lock()
+POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+
+
+def _get_pool():
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                if not DATABASE_URL:
+                    raise ValueError("DATABASE_URL не найден в .env")
+                _POOL = pool.ThreadedConnectionPool(1, POOL_MAX, DATABASE_URL)
+    return _POOL
+
+
+@contextmanager
+def db():
+    """Соединение из пула. Возвращается обратно даже при ошибке."""
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        yield conn
+    finally:
+        try:
+            p.putconn(conn)
+        except Exception:
+            pass
+
+
 def get_db_connection():
+    """Совместимость со старым кодом: отдельное соединение вне пула."""
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL не найден в .env")
     return psycopg2.connect(DATABASE_URL)
@@ -191,6 +229,29 @@ def save_to_db(data: dict):
                 ),
             )
         conn.commit()
+
+
+def save_batch(rows: list) -> int:
+    """Пишет пачку замеров одним запросом. rows — список dict как из check_asin."""
+    clean = []
+    for d in rows:
+        a = extract_asin(d.get("asin", ""))
+        if not a or len(a) != 10:
+            continue
+        clean.append((a, d.get("source"), d.get("rating"), d.get("count"),
+                      json.dumps(d.get("hist", {})), d.get("image_url"),
+                      d.get("bsr"), d.get("note", "")))
+    if not clean:
+        return 0
+    with db() as conn:
+        with conn.cursor() as cur:
+            extras.execute_values(
+                cur,
+                "INSERT INTO asin_metrics "
+                "(asin, source, rating, review_count, histogram_json, image_url, bsr, note) VALUES %s",
+                clean, page_size=200)
+        conn.commit()
+    return len(clean)
 
 
 def start_run(asin_count: int) -> int:
@@ -388,7 +449,16 @@ def check_asin(raw_input: str, log=print) -> dict:
             if data["rating"] is None:
                 log(f"  [{market}] рейтинг не найден")
                 continue
-            log(f"  [{market}] OK: rating={data['rating']} count={data['count']}")
+            if not data.get("bsr") or not data.get("hist"):
+                extra = enrich_bsr_hist(clean_asin, market,
+                                        need_bsr=not data.get("bsr"),
+                                        need_hist=not data.get("hist"),
+                                        tries=max(1, BSR_RETRIES - 1), log=log)
+                data["bsr"] = data.get("bsr") or extra["bsr"]
+                if not data.get("hist") and extra["hist"]:
+                    data["hist"] = extra["hist"]
+            log(f"  [{market}] OK: rating={data['rating']} count={data['count']} "
+                f"bsr={data.get('bsr') or '—'}")
             return {"asin": clean_asin, "source": market, **data}
         except Exception as e:
             log(f"  [{market}] ошибка: {e}")
@@ -745,6 +815,57 @@ def fetch_reviews_api(asin: str, market: str = "BE", pages: int = 2, star_filter
     return {"asin": clean, "market": market, "total_with_text": total, "reviews": collected}
 
 
+def enrich_bsr_hist(asin: str, market: str, need_bsr=True, need_hist=True,
+                    tries: int = None, log=print) -> dict:
+    """Добирает BSR и гистограмму звёзд со страницы товара.
+
+    Amazon отдаёт блок с BSR не на каждой выдаче (разные шаблоны страницы,
+    ленивая подгрузка), поэтому пробуем несколько раз, чередуя варианты URL,
+    пока не получим нужное. Возвращает {'bsr': ..., 'hist': {...}}.
+    """
+    tries = BSR_RETRIES if tries is None else tries
+    out = {"bsr": None, "hist": {}}
+    clean = extract_asin(asin)
+    if not clean:
+        return out
+
+    domain = MARKET_DOMAIN_BY_CODE.get(market, "amazon.com.be")
+    variants = [
+        f"https://www.{domain}/dp/{clean}",
+        f"https://www.{domain}/dp/{clean}?language=en_GB",
+        f"https://www.{domain}/gp/product/{clean}",
+        f"https://www.{domain}/dp/{clean}?th=1&psc=1",
+    ]
+
+    for attempt in range(1, max(1, tries) + 1):
+        url = variants[(attempt - 1) % len(variants)]
+        html = fetch(url)
+        if not html or not sanity_check(html):
+            log(f"  [{market}] добор BSR попытка {attempt}/{tries}: пусто или капча")
+            time.sleep(1)
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        if need_bsr and not out["bsr"]:
+            out["bsr"] = parse_bsr(soup, html)
+        if need_hist and not out["hist"]:
+            data = parse_rating(soup, html)
+            if data.get("hist"):
+                out["hist"] = data["hist"]
+
+        got_bsr = out["bsr"] or not need_bsr
+        got_hist = out["hist"] or not need_hist
+        if got_bsr and got_hist:
+            log(f"  [{market}] добор ок с попытки {attempt}"
+                f"{': BSR ' + str(out['bsr']) if out['bsr'] else ''}")
+            return out
+        log(f"  [{market}] добор попытка {attempt}/{tries}: "
+            f"BSR {'есть' if out['bsr'] else 'нет'}, гистограмма {'есть' if out['hist'] else 'нет'}")
+        time.sleep(1)
+
+    return out
+
+
 def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=True) -> dict:
     """Сбор через structured API с откатом на HTML-парсер."""
     clean, mkt_from_input, _ = extract_asin_and_market(raw_input)
@@ -759,6 +880,14 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
         parsed = parse_product_json(obj, clean, mkt)
         if parsed["rating"] is not None:
             log(f"  [{mkt}] API OK: rating={parsed['rating']} count={parsed['count']}")
+            # structured API не отдаёт BSR и распределение звёзд — добираем со страницы
+            if not parsed.get("bsr") or not parsed.get("hist"):
+                extra = enrich_bsr_hist(clean, mkt,
+                                        need_bsr=not parsed.get("bsr"),
+                                        need_hist=not parsed.get("hist"), log=log)
+                parsed["bsr"] = parsed.get("bsr") or extra["bsr"]
+                if not parsed.get("hist") and extra["hist"]:
+                    parsed["hist"] = extra["hist"]
             parsed["_raw"] = obj
             return parsed
         log(f"  [{mkt}] API: рейтинга нет в ответе")
