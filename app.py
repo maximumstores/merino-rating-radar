@@ -2125,9 +2125,9 @@ with tab_ops:
         st.caption(f"Сохранено: {target_daily_time:%H:%M} {tz_short}, "
                    f"автосбор {'включён' if auto_timer_active else 'выключен'} — настройка хранится в базе "
                    "и переживает перезапуск.")
-        st.warning("Автосбор в браузере срабатывает, только пока вкладка открыта. Для сбора без участия "
-                   "человека нужен внешний запуск radar_scheduled.py по расписанию (cron / Railway / VPS) — "
-                   "он читает то же время из базы.", icon="⚠️")
+        st.success("Сбор идёт через GitHub Actions — каждые 30 минут воркер проверяет это время и "
+                   "запускает прогон, когда пора. Вкладку держать открытой не нужно. "
+                   "Логи прогонов: репозиторий → Actions → «Rating Radar — сбор».", icon="✅")
 
         if auto_timer_active and tracked:
             now_tz = datetime.datetime.now(ZoneInfo(selected_tz))
