@@ -840,7 +840,9 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     out["parent_asin"] = obj.get("parent_asin") or ""
     out["category_path"] = obj.get("product_category") or ""
     out["price"] = str(obj.get("price") or obj.get("exact_price") or "").strip()[:40]
-    out["brand"] = str(obj.get("brand") or obj.get("merchant_info") or obj.get("sold_by") or "").strip()[:60]
+    out["brand"] = extract_brand(obj)
+    out["coupon"] = bool(obj.get("is_coupon_exists"))
+    out["availability"] = str(obj.get("availability_status") or "")[:60]
     out["title"] = str(obj.get("title") or "")[:200]
     return out
 
@@ -1075,6 +1077,54 @@ def _value_search(obj):
 def _clean_rank(num: str):
     digits = re.sub(r"[^\d]", "", num)
     return int(digits) if digits else None
+
+
+BRAND_KEYS = ["brand", "marke", "marque", "marca", "merk", "бренд", "manufacturer", "hersteller"]
+
+
+def extract_brand(obj: dict) -> str:
+    """Бренд из structured API: явное поле → brand_url → product_information → продавец → заголовок."""
+    if not isinstance(obj, dict):
+        return ""
+
+    # 1) явное поле
+    for k in ("brand", "brand_name"):
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:60]
+
+    # 2) ссылка на бренд: ...&field-brandtextbin=Merino.tech
+    bu = obj.get("brand_url") or ""
+    if isinstance(bu, str):
+        m = re.search(r"field-brandtextbin=([^&]+)", bu)
+        if m:
+            from urllib.parse import unquote_plus
+            val = unquote_plus(m.group(1)).strip()
+            if val:
+                return val[:60]
+
+    # 3) product_information: Brand / Marke / Marque / Marca
+    pi = obj.get("product_information")
+    if isinstance(pi, dict):
+        for k, v in pi.items():
+            if any(bk == str(k).strip().lower() or str(k).strip().lower().startswith(bk)
+                   for bk in BRAND_KEYS):
+                if isinstance(v, str) and v.strip():
+                    return v.strip()[:60]
+
+    # 4) продавец (в шите «Наименование» часто именно он)
+    for k in ("merchant_info", "sold_by", "seller_name"):
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:60]
+
+    # 5) первые слова заголовка — как последний вариант
+    title = str(obj.get("title") or "").strip()
+    if title:
+        first = title.split()[0].strip(",.:;")
+        if len(first) > 1:
+            return first[:60]
+    return ""
 
 
 def extract_bsr_json(product_json: dict, country_code: str = "be"):
