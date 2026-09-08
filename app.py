@@ -1387,8 +1387,15 @@ if nav == "🥊 Конкуренты":
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
-        with st.spinner("Загружаю таблицу конкурентов…"):
-            hist = get_competitor_history(tuple(asins), comp_days)
+        st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN")
+        try:
+            with st.spinner("Загружаю данные…"):
+                hist = get_competitor_history(tuple(asins), comp_days)
+        except Exception as e:
+            st.error(f"Не удалось прочитать историю: {e}")
+            hist = pd.DataFrame()
+        if not asins:
+            st.warning("В этой стране и группах нет ASIN — проверь фильтры выше")
         if hist.empty:
             st.warning("По этой стране ещё нет замеров — запусти прогон")
         else:
@@ -1556,6 +1563,8 @@ if nav == "🥊 Конкуренты":
                                   if a in piv[m].index)
                            or a not in piv["Rating"].index]
 
+            st.caption(f"Замеров в базе: {len(hist)} · дней: {len(days_c)} · "
+                       f"позиций с данными: {piv['Rating'].shape[0]}")
             vmode = st.radio("Вид", ["Список позиций", "По датам (как в шите)"], horizontal=True,
                              key=f"comp_view_{sel_mkt}", label_visibility="collapsed")
 
