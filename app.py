@@ -17,7 +17,8 @@ from sklearn.linear_model import LinearRegression
 # Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
 # ДО импорта collector/notifier — они читают переменные на уровне модуля.
 load_dotenv()
-for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"):
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY",
+           "GITHUB_TOKEN", "GITHUB_REPO"):
     if not os.environ.get(_k):
         try:
             _v = st.secrets.get(_k)
@@ -27,8 +28,10 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROP
             pass
 
 from collector import (
+    bsr_to_int,
     check_asin,
     check_asin_api,
+    ensure_competitor_schema,
     clean_db_trash,
     delete_asin_completely,
     ensure_reviews_schema,
@@ -475,11 +478,52 @@ def parse_hist(raw):
         return None
 
 
+GH_REPO = os.environ.get("GITHUB_REPO", "maximumstores/merino-rating-radar")
+BROWSER_RUN_LIMIT = int(os.environ.get("BROWSER_RUN_LIMIT", "80"))
+
+
+def dispatch_github_run(force=True, workflow="collect.yml"):
+    """Запускает сбор в GitHub Actions. Возвращает (ok, сообщение)."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return False, "Не задан GITHUB_TOKEN — добавь personal access token с правом actions:write в Secrets"
+    try:
+        import requests
+        r = requests.post(
+            f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow}/dispatches",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"},
+            json={"ref": "main", "inputs": {"force": "true" if force else "false"}},
+            timeout=30)
+        if r.status_code == 204:
+            return True, "Сбор запущен в GitHub Actions"
+        return False, f"GitHub ответил {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def actions_button(key, label="🚀 Запустить сбор в GitHub Actions"):
+    if st.button(label, key=key, use_container_width=True,
+                 help="Сбор пойдёт на серверах GitHub в 10 параллельных потоков. "
+                      "Вкладку можно закрыть, отчёт придёт в Telegram."):
+        ok, msg = dispatch_github_run()
+        (st.success if ok else st.error)(msg)
+        if ok:
+            st.markdown(f"[Открыть лог прогона →](https://github.com/{GH_REPO}/actions)")
+
+
 def run_collection(items, label="Прогон"):
     items = with_market(items)
     use_api = st.session_state.get("use_api_mode", True)
     ensure_schema()
     run_id = start_run(len(items))
+
+    if len(items) > BROWSER_RUN_LIMIT:
+        st.warning(f"В списке {len(items)} позиций. Сбор в браузере на такой длине часто обрывается — "
+                   f"Streamlit разрывает соединение. Надёжнее запустить в GitHub Actions: "
+                   f"10 параллельных шардов, несколько минут, вкладку можно закрыть.", icon="⚠️")
+        actions_button(f"gh_run_{label}_{len(items)}")
+        st.caption("Если всё же нужен сбор здесь — он пойдёт ниже, но может не дойти до конца.")
 
     st.session_state["stop_run"] = False
     head_l, head_r = st.columns([3, 1])
@@ -604,7 +648,7 @@ def get_tracked_with_kind():
         return {a: "child" for a in get_tracked_asins()}
 
 
-KIND_LABEL = {"child": "Чайлд", "parent": "Парент"}
+KIND_LABEL = {"child": "Чайлд", "parent": "Парент", "competitor": "Конкурент"}
 # разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера
 if NOTIFIER_OK and notifier.BOT_TOKEN:
     try:
@@ -619,7 +663,8 @@ asin_market_map = get_asin_markets_map(tracked)
 full_df = get_full_history()
 ensure_dict_table()
 try:
-    ensure_reviews_schema()   # таблицы отзывов — до первого сбора
+    ensure_reviews_schema()      # таблицы отзывов — до первого сбора
+    ensure_competitor_schema()   # comp_group / title в справочнике
 except Exception:
     pass
 dict_df = get_dictionary()
@@ -728,6 +773,17 @@ def build_calc_df(df):
             "Комментарий": r["note"] if pd.notnull(r["note"]) else "",
         })
     return pd.DataFrame(rows)
+
+
+def rating_color(v):
+    """Заливка ячейки рейтинга по логике Amazon."""
+    if v is None or pd.isna(v):
+        return ""
+    if v >= 4.45:
+        return "background-color:#7ee36b;color:#1d1d1f;font-weight:600"
+    if v >= 4.25:
+        return "background-color:#ffee58;color:#1d1d1f;font-weight:600"
+    return "background-color:#e53935;color:#fff;font-weight:600"
 
 
 def rating_emoji(r):
@@ -857,9 +913,9 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-(tab_port, tab_port_p, tab_ai, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops,
+(tab_port, tab_port_p, tab_comp, tab_ai, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops,
  tab_help) = st.tabs(
-    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🧠 AI-анализ",
+    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
      "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)",
      "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
 
@@ -993,6 +1049,393 @@ with tab_port:
 
 with tab_port_p:
     render_portfolio(filtered_df, "parent")
+
+
+
+# ---------- КОНКУРЕНТЫ ----------
+def get_competitors():
+    """Список конкурентов: ASIN, группа, страна, бренд, название."""
+    try:
+        conn = _conn()
+        df = pd.read_sql(
+            """
+            SELECT t.asin,
+                   COALESCE(d.comp_group, '') AS grp,
+                   COALESCE(d.market, '')     AS market,
+                   COALESCE(d.brand, '')      AS brand,
+                   COALESCE(d.title, '')      AS title
+            FROM tracked_asins t
+            LEFT JOIN asin_dictionary d ON d.asin = t.asin
+            WHERE t.kind = 'competitor'
+            ORDER BY grp, brand, t.asin;
+            """, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["asin", "grp", "market", "brand", "title"])
+
+
+def save_competitors(asins, group, market):
+    ensure_schema()
+    ensure_competitor_schema()
+    conn = _conn()
+    with conn.cursor() as cur:
+        for a in asins:
+            cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, 'competitor') "
+                        "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';", (a,))
+            cur.execute(
+                """
+                INSERT INTO asin_dictionary (asin, comp_group, market, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (asin) DO UPDATE SET
+                    comp_group = EXCLUDED.comp_group,
+                    market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                    updated_at = NOW();
+                """, (a, group, market or ""))
+    conn.commit()
+    conn.close()
+
+
+def get_competitor_history(asins, days):
+    if not asins:
+        return pd.DataFrame()
+    try:
+        conn = _conn()
+        df = pd.read_sql(
+            """
+            SELECT asin, source, rating, review_count, bsr, bsr_num, price, created_at
+            FROM asin_metrics
+            WHERE asin = ANY(%s) AND created_at >= NOW() - (%s || ' days')::interval
+            ORDER BY created_at ASC;
+            """, conn, params=(list(asins), str(int(days))))
+        conn.close()
+        df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+        for c in ("rating", "review_count", "bsr_num"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["price_num"] = pd.to_numeric(
+            df["price"].astype(str).str.replace(r"[^\d,.]", "", regex=True)
+            .str.replace(r"\.(?=\d{3}\b)", "", regex=True).str.replace(",", "."),
+            errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+with tab_comp:
+    st.markdown("### Мониторинг конкурентов")
+    st.markdown("<div class='muted'>ASIN конкурентов разложены по товарным группам и странам. "
+                "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
+                "как в гугл-таблице.</div>", unsafe_allow_html=True)
+
+    comp_df = get_competitors()
+
+    def parse_comp_table(raw_df):
+        """Приводит любую таблицу к колонкам asin / group / market."""
+        cols = {c: str(c).strip().lower() for c in raw_df.columns}
+        alias = {
+            "asin": ["asin", "child", "код", "артикул"],
+            "group": ["group", "группа", "категория", "category", "лист", "sheet", "comp_group"],
+            "market": ["market", "страна", "country", "домен", "domain"],
+            "brand": ["brand", "бренд", "наименование"],
+        }
+        mapping = {}
+        for target, names in alias.items():
+            for n in names:
+                for c, lc in cols.items():
+                    if c in mapping.values():
+                        continue
+                    if lc == n or (len(n) > 3 and lc.startswith(n)):
+                        mapping[target] = c
+                        break
+                if target in mapping:
+                    break
+        if "asin" not in mapping:
+            return pd.DataFrame()
+        out = pd.DataFrame()
+        out["asin"] = raw_df[mapping["asin"]].apply(lambda v: extract_asin(v) or "")
+        out["group"] = (raw_df[mapping["group"]].astype(str).str.strip()
+                        if "group" in mapping else "")
+        out["market"] = (raw_df[mapping["market"]].astype(str).str.upper().str.strip()
+                         if "market" in mapping else "")
+        out["brand"] = (raw_df[mapping["brand"]].astype(str).str.strip()
+                        if "brand" in mapping else "")
+        out.loc[~out["market"].isin(MARKET_DOMAINS), "market"] = ""
+        out = out[out["asin"].str.len() == 10].drop_duplicates("asin", keep="last")
+        return out.reset_index(drop=True)
+
+
+    def save_competitors_table(df, default_market):
+        ensure_schema()
+        ensure_competitor_schema()
+        conn = _conn()
+        with conn.cursor() as cur:
+            for r in df.itertuples(index=False):
+                cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, 'competitor') "
+                            "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';", (r.asin,))
+                cur.execute(
+                    """
+                    INSERT INTO asin_dictionary (asin, comp_group, market, brand, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (asin) DO UPDATE SET
+                        comp_group = COALESCE(NULLIF(EXCLUDED.comp_group, ''), asin_dictionary.comp_group),
+                        market     = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                        brand      = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
+                        updated_at = NOW();
+                    """,
+                    (r.asin, r.group, r.market or default_market or "", r.brand))
+        conn.commit()
+        conn.close()
+
+
+    with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
+        load_mode = st.radio("Способ загрузки",
+                             ["Одна группа (пачкой)", "Таблицей: ASIN + группа + страна"],
+                             horizontal=True, key="comp_load_mode")
+
+        if load_mode == "Таблицей: ASIN + группа + страна":
+            st.markdown("<div class='muted'>Вставь из гугл-шита или загрузи файл. Колонки распознаются "
+                        "по названию: <code>ASIN</code>, <code>группа</code>/<code>group</code>, "
+                        "<code>страна</code>/<code>market</code>, <code>бренд</code>. "
+                        "Можно вставлять прямо со вкладками — как копируется из таблицы.</div>",
+                        unsafe_allow_html=True)
+            t1, t2 = st.columns([3, 1])
+            pasted = t1.text_area(
+                "Вставь таблицу (первая строка — заголовки)", height=160, key="comp_paste_tbl",
+                placeholder=("ASIN\tГруппа\tСтрана\n"
+                             "B08DG72NWJ\tMen LS\tDE\n"
+                             "B09X77F1X1\tMen LS\tDE\n"
+                             "B0B28QM7RQ\tMen Pants\tUS"))
+            up = t2.file_uploader("…или файл", type=["csv", "xlsx"], key="comp_file")
+            def_mkt = t2.selectbox("Страна по умолчанию", options=list(MARKET_DOMAINS.keys()), index=3,
+                                   key="comp_def_mkt", help="Для строк, где страна не указана")
+
+            raw = None
+            try:
+                if up is not None:
+                    raw = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
+                elif pasted.strip():
+                    import io as _io
+                    txt = pasted.strip()
+                    sep = "\t" if "\t" in txt else (";" if ";" in txt.splitlines()[0] else ",")
+                    raw = pd.read_csv(_io.StringIO(txt), sep=sep, engine="python")
+            except Exception as e:
+                st.error(f"Не разобрал таблицу: {e}")
+
+            if raw is not None and not raw.empty:
+                parsed = parse_comp_table(raw)
+                if parsed.empty:
+                    st.error("Не нашёл колонку с ASIN")
+                else:
+                    known = set(comp_df["asin"].tolist())
+                    fresh = parsed[~parsed["asin"].isin(known)]
+                    st.markdown(f"Распознано **{len(parsed)}** строк · новых **{len(fresh)}** · "
+                                f"уже есть **{len(parsed) - len(fresh)}**")
+                    by_g = (parsed.groupby(["group", "market"]).size()
+                            .reset_index(name="ASIN").rename(columns={"group": "Группа", "market": "Страна"}))
+                    by_g["Страна"] = by_g["Страна"].replace("", def_mkt + " (по умолч.)")
+                    st.dataframe(by_g, use_container_width=True, hide_index=True,
+                                 height=min(260, 40 + 35 * len(by_g)))
+                    if st.button(f"➕ Загрузить {len(parsed)} позиций", type="primary", key="comp_tbl_add"):
+                        try:
+                            save_competitors_table(parsed, def_mkt)
+                            st.success(f"Загружено {len(parsed)} · новых {len(fresh)}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+
+        known_groups = sorted({g for g in comp_df["grp"].tolist() if g})
+        g1, g2, g3 = st.columns([2, 1, 1])
+        if load_mode != "Одна группа (пачкой)":
+            g1, g2, g3 = st.empty(), st.empty(), st.empty()
+        grp_mode = g1.radio("Группа", ["Выбрать", "Новая"], horizontal=True, key="comp_grp_mode",
+                            label_visibility="collapsed") if load_mode == "Одна группа (пачкой)" else None
+        if grp_mode == "Выбрать" and known_groups:
+            comp_group = g1.selectbox("Товарная группа", options=known_groups, key="comp_grp_sel")
+        else:
+            comp_group = g1.text_input("Товарная группа", key="comp_grp_new",
+                                       placeholder="Men LS, Men Pants, Men Sets, Women LS…")
+        comp_market = g2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=3,
+                                   key="comp_market", help="DE, US, CA… — к какому маркету относится пачка")
+        g3.markdown("<div class='muted' style='margin-top:28px'>Одна пачка = одна группа + одна страна. "
+                    "Страна из ссылки перебивает выбор.</div>", unsafe_allow_html=True)
+
+        comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
+                                 placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\nB07NGJLLH4")
+        if comp_text.strip():
+            existing = comp_df["asin"].tolist()
+            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(comp_text, existing, comp_market)
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"🟢 **Новых: {len(new_c)}**")
+            c2.markdown(f"🟡 **Уже есть: {len(dup_c)}**")
+            c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
+                        + (f" · повторов: {len(bd)}" if bd else ""))
+            if st.button(f"➕ Добавить {len(new_c)} в «{comp_group or '—'}» → {comp_market}",
+                         type="primary", disabled=not (new_c and comp_group), key="comp_add"):
+                try:
+                    save_competitors(new_c, comp_group.strip(), comp_market)
+                    st.success(f"Добавлено {len(new_c)} конкурентов в группу «{comp_group}»")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+    if comp_df.empty:
+        st.info("Конкуренты пока не добавлены — открой блок выше и загрузи первую группу")
+    else:
+        # ---- страна → её группы ----
+        comp_df["market"] = comp_df["market"].replace("", "—")
+        mkts = sorted({m for m in comp_df["market"].tolist() if m})
+        cnt_by_mkt = comp_df.groupby("market")["asin"].count().to_dict()
+
+        f1, f2, f3, f4 = st.columns([1.3, 2, 1.1, 1.3])
+        sel_mkt = f1.selectbox("Страна", options=mkts, key="comp_f_mkt",
+                               format_func=lambda m: f"{m} · {cnt_by_mkt.get(m, 0)} ASIN")
+        in_mkt = comp_df[comp_df["market"] == sel_mkt]
+        groups_all = sorted({g for g in in_mkt["grp"].tolist() if g})
+        sel_groups = f2.multiselect("Группы", options=groups_all, default=groups_all,
+                                    key=f"comp_f_grp_{sel_mkt}",
+                                    placeholder="все группы этой страны")
+        comp_days = f3.selectbox("Период", [7, 14, 30, 60, 90], index=2,
+                                 format_func=lambda d: f"{d} дн.", key="comp_f_days")
+        metrics = f4.multiselect("Метрики", ["BSR", "Reviews", "Rating", "Price"],
+                                 default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics")
+
+        use_groups = sel_groups or groups_all
+        view = in_mkt[in_mkt["grp"].isin(use_groups)]
+        asins = view["asin"].tolist()
+
+        # плашки по группам этой страны
+        chips = " ".join(
+            f"<span style='display:inline-block;background:#fff;border:1px solid #e5e5ea;border-radius:999px;"
+            f"padding:3px 12px;margin:2px 4px 2px 0;font-size:12.5px'>{g} · "
+            f"<b>{len(in_mkt[in_mkt['grp'] == g])}</b></span>" for g in groups_all)
+        st.markdown(f"<div style='margin:6px 0 10px'>{chips}</div>", unsafe_allow_html=True)
+
+        r1, r2, r3 = st.columns([3, 1, 1])
+        r1.markdown(f"**{sel_mkt}** · групп: {len(use_groups)} · ASIN: {len(asins)}")
+        if r2.button(f"▶ Прогнать {sel_mkt} ({len(asins)})", key="comp_run_mkt", type="primary",
+                     use_container_width=True, disabled=not asins):
+            run_collection(asins, f"Конкуренты ({sel_mkt})")
+        if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
+            run_collection(comp_df["asin"].tolist(), "Конкуренты")
+
+        hist = get_competitor_history(asins, comp_days)
+        if hist.empty:
+            st.warning("По этой стране ещё нет замеров — запусти прогон")
+        else:
+            hist["day"] = hist["created_at"].dt.tz_convert(ZoneInfo(selected_tz)).dt.floor("D")
+            snap = hist.sort_values("created_at").groupby(["asin", "day"]).last().reset_index()
+            days_c = sorted(snap["day"].unique())
+            labels = [pd.Timestamp(d).strftime("%d.%m") for d in days_c]
+
+            piv = {
+                "BSR": snap.pivot(index="asin", columns="day", values="bsr_num").reindex(columns=days_c),
+                "Reviews": snap.pivot(index="asin", columns="day", values="review_count").reindex(columns=days_c),
+                "Rating": snap.pivot(index="asin", columns="day", values="rating").reindex(columns=days_c),
+                "Price": snap.pivot(index="asin", columns="day", values="price_num").reindex(columns=days_c),
+            }
+            meta = view.set_index("asin")
+
+            def fmt_v(metric, v):
+                if pd.isna(v):
+                    return ""
+                if metric == "Rating":
+                    return f"{v:.1f}"
+                if metric == "Price":
+                    return f"{v:,.2f}".replace(",", " ")
+                return f"{int(v):,}".replace(",", " ")
+
+            def cell_css(metric, v, prev):
+                if pd.isna(v):
+                    return ""
+                if metric == "Rating":
+                    return rating_color(v)
+                if prev is None or pd.isna(prev) or v == prev:
+                    return ""
+                if metric == "BSR":        # меньше — лучше
+                    return "background:#c8f7c5" if v < prev else "background:#ffcdd2"
+                if metric == "Reviews":
+                    return "background:#c8f7c5" if v > prev else "background:#ffe0b2"
+                if metric == "Price":      # конкурент снизил цену — тревога
+                    return "background:#ffcdd2" if v < prev else "background:#c8f7c5"
+                return ""
+
+            ncols = 4 + len(labels)
+            rows_html = []
+            for grp in use_groups:
+                grp_asins = view[view["grp"] == grp]["asin"].tolist()
+                if not grp_asins:
+                    continue
+                rows_html.append(
+                    f"<tr class='ghead'><td colspan='{ncols}'>▸ {grp} "
+                    f"<span style='font-weight:400;color:#6e6e73'>· {sel_mkt} · "
+                    f"{len(grp_asins)} ASIN</span></td></tr>")
+                for metric in metrics:
+                    table = piv[metric]
+                    present = [a for a in grp_asins if a in table.index]
+                    if not present:
+                        continue
+                    rows_html.append(f"<tr class='mhead'><td colspan='{ncols}'>{metric}</td></tr>")
+                    for a in present:
+                        m = meta.loc[a] if a in meta.index else {}
+                        brand = str(m.get("brand", "") or "")[:22]
+                        title = str(m.get("title", "") or "")[:70]
+                        dom = MARKET_DOMAINS.get(sel_mkt, "amazon.com.be")
+                        tds = [f"<td class='c-brand'>{brand}</td>",
+                               f"<td class='c-asin'><a href='https://www.{dom}/dp/{a}' target='_blank'>{a}</a></td>",
+                               f"<td class='c-cty'>{sel_mkt}</td>",
+                               f"<td class='c-title' title='{title}'>{title}</td>"]
+                        prev = None
+                        for d in days_c:
+                            v = table.loc[a, d]
+                            tds.append(f"<td style='{cell_css(metric, v, prev)}'>{fmt_v(metric, v)}</td>")
+                            if pd.notnull(v):
+                                prev = v
+                        rows_html.append(f"<tr>{''.join(tds)}</tr>")
+
+            th = "".join(f"<th>{c}</th>" for c in ["Бренд", "ASIN", "Стр.", "Название"] + labels)
+            html_c = f"""
+<style>
+.cmp-wrap {{ max-height:800px; overflow:auto; border:1px solid #e5e5ea; border-radius:12px; background:#fff; }}
+.cmp {{ border-collapse:separate; border-spacing:0; font-size:12.5px; min-width:100%; }}
+.cmp th {{ position:sticky; top:0; background:#f5f5f7; color:#6e6e73; font-weight:600;
+           padding:8px 10px; border-bottom:1px solid #e5e5ea; white-space:nowrap; z-index:2; text-align:right; }}
+.cmp th:nth-child(-n+4) {{ text-align:left; }}
+.cmp td {{ padding:6px 10px; border-bottom:1px solid #f0f0f2; text-align:right; white-space:nowrap; }}
+.cmp td:nth-child(-n+4) {{ text-align:left; }}
+.cmp td.c-brand {{ position:sticky; left:0; background:#fff; z-index:1; font-weight:600; min-width:120px; }}
+.cmp td.c-asin {{ position:sticky; left:120px; background:#fff; z-index:1; min-width:110px;
+                  font-family:ui-monospace,Menlo,monospace; }}
+.cmp td.c-asin a {{ color:#0071e3; text-decoration:none; }}
+.cmp td.c-title {{ max-width:240px; overflow:hidden; text-overflow:ellipsis; color:#6e6e73; }}
+.cmp th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
+.cmp th:nth-child(2) {{ position:sticky; left:120px; z-index:3; }}
+.cmp tr.ghead td {{ background:#1d1d1f; color:#fff; font-size:13.5px; font-weight:650;
+                    padding:9px 12px; position:sticky; left:0; }}
+.cmp tr.mhead td {{ background:#e8e8ed; font-weight:650; padding:6px 12px;
+                    border-top:1px solid #c7c7cc; position:sticky; left:0; }}
+</style>
+<div class='cmp-wrap'><table class='cmp'><thead><tr>{th}</tr></thead>
+<tbody>{''.join(rows_html)}</tbody></table></div>
+"""
+            st.caption(f"{sel_mkt} · {len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней")
+            st.markdown(html_c, unsafe_allow_html=True)
+            st.markdown("<div class='muted' style='margin-top:6px'>"
+                        "BSR: 🟩 позиция улучшилась (номер меньше) · 🟥 ухудшилась &nbsp;·&nbsp; "
+                        "Reviews: 🟩 прибавились &nbsp;·&nbsp; "
+                        "Rating: заливка по логике Amazon &nbsp;·&nbsp; "
+                        "Price: 🟥 конкурент снизил цену · 🟩 поднял</div>", unsafe_allow_html=True)
+
+            csv_rows = []
+            for metric in metrics:
+                t = piv[metric].copy()
+                t.columns = labels
+                t.insert(0, "Метрика", metric)
+                t.insert(1, "Группа", [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in t.index])
+                t.insert(2, "Бренд", [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in t.index])
+                csv_rows.append(t.reset_index())
+            out_csv = pd.concat(csv_rows, ignore_index=True)
+            st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
+                               f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
 
 
 # ---------- AI-АНАЛИЗ ----------
@@ -1252,15 +1695,6 @@ def render_dynamics(filtered_df, hist_df, kind):
         carried = pd.DataFrame(carried_rows, columns=day_labels)
 
         # --- стилизация ---
-        def rating_color(v):
-            if pd.isna(v):
-                return ""
-            if v >= 4.45:
-                return "background-color:#7ee36b;color:#1d1d1f;font-weight:600"
-            if v >= 4.25:
-                return "background-color:#ffee58;color:#1d1d1f;font-weight:600"
-            return "background-color:#e53935;color:#fff;font-weight:600"
-
         def style_row(row):
             p = row["Parameter"]
             out = [""] * len(row)
@@ -2164,6 +2598,9 @@ with tab_ops:
         if st.button(f"▶ Все ({len(tracked)} ASIN)", type="primary", key="run_all",
                      use_container_width=True, disabled=not tracked):
             run_collection(tracked, "Прогон")
+        actions_button("gh_run_ops", "🚀 Запустить весь сбор в GitHub Actions")
+        st.caption("Рекомендуется для списков больше "
+                   f"{BROWSER_RUN_LIMIT} позиций — браузерный прогон на них обрывается.")
         rk1, rk2 = st.columns(2)
         n_child = len(tracked_by_kind.get("child", []))
         n_parent = len(tracked_by_kind.get("parent", []))
