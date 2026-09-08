@@ -3212,13 +3212,29 @@ with tab_ops:
                 cc1, cc2 = st.columns([1, 3])
                 cc1.metric("Подписчиков", int(csubs["active"].sum()) if not csubs.empty else 0,
                            delta=f"всего {len(csubs)}", delta_color="off")
-                if cc2.button("🔄 Проверить команды второго бота", key="tg_poll_comp"):
+                cb1, cb2, cb3 = cc2.columns(3)
+                if cb1.button("🔄 Проверить команды", key="tg_poll_comp", use_container_width=True):
                     try:
                         n = notifier.process_updates(channel="comp")
                         st.success(f"Обработано команд: {n}")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
+                if cb2.button("🩺 Диагностика", key="tg_diag_comp", use_container_width=True):
+                    d = notifier.diagnose("comp")
+                    if d.get("webhook_url"):
+                        st.error(f"У бота установлен вебхук: {d['webhook_url']} — из-за него команды "
+                                 "не читаются. Нажми «Снять вебхук».")
+                    if d.get("getUpdates_error"):
+                        st.error(f"getUpdates: {d['getUpdates_error']}")
+                    st.write({"бот": d.get("bot_username"), "токен": d.get("token_tail"),
+                              "вебхук": d.get("webhook_url") or "нет",
+                              "необработанных": d.get("pending"), "они": d.get("pending_texts"),
+                              "подписчиков": d.get("subscribers")})
+                if cb3.button("🧹 Снять вебхук", key="tg_wh_comp", use_container_width=True,
+                              help="Старый бот мог работать через webhook — тогда getUpdates не отдаёт команды"):
+                    st.write(notifier.drop_webhook("comp"))
+                    st.info("Теперь нажми «Проверить команды» и отправь боту /start ещё раз")
                 if not csubs.empty:
                     st.dataframe(csubs[["username", "first_name", "active", "created_at"]]
                                  .rename(columns={"username": "Юзернейм", "first_name": "Имя",
