@@ -1222,12 +1222,14 @@ if nav == "🥊 Конкуренты":
                 "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
                 "как в гугл-таблице.</div>", unsafe_allow_html=True)
 
-    comp_user, comp_err = None, None
-    if NOTIFIER_OK:
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _comp_bot_name():
         try:
-            comp_user, comp_err = notifier.bot_username("comp", with_error=True)
+            return notifier.bot_username("comp", with_error=True)
         except Exception as e:
-            comp_err = str(e)
+            return None, str(e)
+
+    comp_user, comp_err = _comp_bot_name() if NOTIFIER_OK else (None, None)
     has_own_bot = bool(os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
     comp_user = comp_user or ("ваш новый бот" if has_own_bot else "RatingRadar_bot")
     comp_link = f"https://t.me/{comp_user}" if not comp_user.startswith("ваш") else None
@@ -1497,6 +1499,7 @@ if nav == "🥊 Конкуренты":
                 # наши бренды — наверх группы, дальше конкуренты по бренду
                 def sort_key(a):
                     b = str(meta.loc[a, "brand"]) if a in meta.index else ""
+                    # наши → бренд → ASIN: позиции одного бренда всегда рядом
                     return (0 if is_own_brand(b) else 1, b.lower(), a)
 
                 grp_asins = sorted(grp_asins, key=sort_key)
@@ -1618,9 +1621,11 @@ if nav == "🥊 Конкуренты":
                         "Δ цены": round(float(d_pr), 2) if d_pr is not None else None,
                         "Название": str(m.get("title", "") or ""),
                     })
-                flat = pd.DataFrame(rows).sort_values(["Группа", "Наш", "BSR"],
-                                                      ascending=[True, False, True],
-                                                      na_position="last")
+                flat = pd.DataFrame(rows)
+                flat["_b"] = flat["Бренд"].str.lower()
+                flat = (flat.sort_values(["Группа", "Наш", "_b", "BSR"],
+                                         ascending=[True, False, True, True], na_position="last")
+                        .drop(columns=["_b"]))
                 st.dataframe(
                     flat, use_container_width=True, hide_index=True,
                     height=min(760, 40 + 35 * len(flat)),
