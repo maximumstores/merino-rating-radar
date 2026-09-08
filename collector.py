@@ -818,7 +818,7 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     if not out["bsr"]:
         out["bsr"] = extract_bsr_json(obj, SD_MARKET.get(market, ("com", "us"))[1])
 
-    # распределение звёзд, если API его отдаёт
+    # распределение звёзд: dict или список ratings_distribution
     hist = obj.get("rating_breakdown") or obj.get("histogram") or obj.get("ratings_breakdown")
     if isinstance(hist, dict):
         for k, v in hist.items():
@@ -828,6 +828,19 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
             pct = _num(v.get("percentage") if isinstance(v, dict) else v)
             if pct is not None:
                 out["hist"][int(m.group(0))] = pct
+
+    rd = obj.get("ratings_distribution")
+    if not out["hist"] and isinstance(rd, list):
+        vals = {}
+        for item in rd:
+            if not isinstance(item, dict):
+                continue
+            star = _num(item.get("rating"))
+            val = _num(item.get("distribution") or item.get("percentage") or item.get("count"))
+            if star and 1 <= star <= 5 and val is not None:
+                vals[star] = val
+        if vals and sum(vals.values()) > 0:      # все нули = отзывов нет, не пишем
+            out["hist"] = vals
 
     extra = []
     if obj.get("parent_asin"):
@@ -842,7 +855,11 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     out["price"] = str(obj.get("price") or obj.get("exact_price") or "").strip()[:40]
     out["brand"] = extract_brand(obj)
     out["coupon"] = bool(obj.get("is_coupon_exists"))
+    out["prime_exclusive"] = bool(obj.get("is_prime_exclusive"))
+    out["often_returned"] = bool(obj.get("is_frequently_returned"))
+    out["amazon_choice"] = bool(obj.get("is_amazon_choice"))
     out["availability"] = str(obj.get("availability_status") or "")[:60]
+    out["has_content"] = bool(obj.get("title") or obj.get("product_information"))
     out["title"] = str(obj.get("title") or "")[:200]
     return out
 
@@ -983,6 +1000,22 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
         if not obj:
             continue
         parsed = parse_product_json(obj, clean, mkt)
+
+        # Карточка есть, но отзывов нет: Amazon просто не отдаёт average_rating.
+        # Это валидный результат, а не повод искать товар в других странах.
+        if parsed["rating"] is None and parsed.get("has_content"):
+            if parsed["count"] is None:
+                parsed["count"] = 0
+            parsed["note"] = ("нет отзывов · " + parsed.get("note", ""))[:200]
+            log(f"  [{mkt}] API OK: отзывов нет (карточка найдена, бренд "
+                f"{parsed.get('brand') or '—'}), bsr={parsed.get('bsr') or '—'}")
+            if not parsed.get("bsr"):
+                extra = enrich_bsr_hist(clean, mkt, need_bsr=True, need_hist=False,
+                                        tries=max(1, BSR_RETRIES - 2), log=log)
+                parsed["bsr"] = extra["bsr"]
+            parsed["_raw"] = obj
+            return parsed
+
         if parsed["rating"] is not None:
             log(f"  [{mkt}] API OK: rating={parsed['rating']} count={parsed['count']} "
                 f"bsr={parsed.get('bsr') or '—'} hist={'есть' if parsed.get('hist') else 'нет'}")
