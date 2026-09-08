@@ -27,6 +27,7 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRA
         except Exception:
             pass
 
+from collector import ensure_schema as _collector_ensure_schema
 from collector import (
     bsr_to_int,
     extract_brand,
@@ -36,7 +37,6 @@ from collector import (
     clean_db_trash,
     delete_asin_completely,
     ensure_reviews_schema,
-    ensure_schema,
     extract_asin,
     extract_children,
     fetch_product_json,
@@ -175,6 +175,7 @@ def _conn():
     return psycopg2.connect(DATABASE_URL)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_last_run():
     try:
         conn = _conn()
@@ -200,6 +201,7 @@ def get_runs_history(limit=60):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_asin_markets_map(all_tracked):
     if not DATABASE_URL:
         return {a: "—" for a in all_tracked}
@@ -266,8 +268,9 @@ DICT_COLS_ALL = DICT_COLS + ["archive"]
 
 
 def ensure_dict_table():
-    if not DATABASE_URL:
+    if not DATABASE_URL or st.session_state.get('_ensure_dict_table_ok'):
         return
+    st.session_state['_ensure_dict_table_ok'] = True
     try:
         conn = _conn()
         with conn.cursor() as cur:
@@ -401,9 +404,18 @@ def save_markets(markets):
     conn.close()
 
 
-def ensure_settings_table():
-    if not DATABASE_URL:
+def ensure_schema():
+    """Схема и индексы — один раз за сессию, а не при каждом чтении."""
+    if st.session_state.get("_schema_ok"):
         return
+    _collector_ensure_schema()
+    st.session_state["_schema_ok"] = True
+
+
+def ensure_settings_table():
+    if not DATABASE_URL or st.session_state.get("_settings_table_ok"):
+        return
+    st.session_state["_settings_table_ok"] = True
     try:
         conn = _conn()
         with conn.cursor() as cur:
@@ -415,21 +427,28 @@ def ensure_settings_table():
         pass
 
 
-def get_setting(key, default=None):
-    ensure_settings_table()
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_setting(key):
     try:
         conn = _conn()
         with conn.cursor() as cur:
             cur.execute("SELECT value FROM radar_settings WHERE key = %s", (key,))
             row = cur.fetchone()
         conn.close()
-        return row[0] if row else default
+        return row[0] if row else None
     except Exception:
-        return default
+        return None
+
+
+def get_setting(key, default=None):
+    ensure_settings_table()
+    val = _read_setting(key)
+    return default if val is None else val
 
 
 def set_setting(key, value):
     ensure_settings_table()
+    _read_setting.clear()      # сбросить кэш чтения
     try:
         conn = _conn()
         with conn.cursor() as cur:
@@ -445,6 +464,7 @@ def set_setting(key, value):
 OWN_BRANDS_DEFAULT = "Merino.tech"
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def own_brands():
     raw = get_setting("own_brands", OWN_BRANDS_DEFAULT)
     return [b.strip().lower() for b in str(raw).split(",") if b.strip()]
@@ -662,8 +682,9 @@ with hdr_r:
         unsafe_allow_html=True)
 
 def ensure_kind_column():
-    if not DATABASE_URL:
+    if not DATABASE_URL or st.session_state.get('_ensure_kind_column_ok'):
         return
+    st.session_state['_ensure_kind_column_ok'] = True
     try:
         conn = _conn()
         with conn.cursor() as cur:
@@ -674,6 +695,7 @@ def ensure_kind_column():
         pass
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_tracked_with_kind():
     """{asin: 'child'|'parent'}"""
     ensure_schema()
@@ -698,7 +720,7 @@ if NOTIFIER_OK and notifier.BOT_TOKEN:
 tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
 tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
-asin_market_map = get_asin_markets_map(tracked)
+asin_market_map = dict(get_asin_markets_map(tuple(tracked)))
 _t_hist = time.time()
 full_df = get_full_history()
 st.session_state["full_df_sec"] = time.time() - _t_hist
@@ -1129,24 +1151,30 @@ def get_competitors():
 
 
 def save_competitors(asins, group, market):
+    from psycopg2 import extras as _ex
     ensure_schema()
     ensure_competitor_schema()
     conn = _conn()
     with conn.cursor() as cur:
-        for a in asins:
-            cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, 'competitor') "
-                        "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';", (a,))
-            cur.execute(
-                """
-                INSERT INTO asin_dictionary (asin, comp_group, market, updated_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (asin) DO UPDATE SET
-                    comp_group = EXCLUDED.comp_group,
-                    market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
-                    updated_at = NOW();
-                """, (a, group, market or ""))
+        _ex.execute_values(
+            cur,
+            "INSERT INTO tracked_asins (asin, kind) VALUES %s "
+            "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';",
+            [(a, "competitor") for a in asins], page_size=200)
+        _ex.execute_values(
+            cur,
+            """
+            INSERT INTO asin_dictionary (asin, comp_group, market, updated_at) VALUES %s
+            ON CONFLICT (asin) DO UPDATE SET
+                comp_group = EXCLUDED.comp_group,
+                market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                updated_at = NOW();
+            """,
+            [(a, group, market or "", datetime.datetime.now(datetime.timezone.utc)) for a in asins],
+            page_size=200)
     conn.commit()
     conn.close()
+    st.cache_data.clear()
 
 
 def save_asin_meta(asin, brand="", title="", market="", category=""):
@@ -1861,6 +1889,7 @@ if nav == "🥊 Конкуренты":
                                      help="По ним ASIN считается нашим, остальные — конкуренты")
             if new_own != cur_own:
                 set_setting("own_brands", new_own)
+                own_brands.clear()
                 st.rerun()
             ob2.markdown("<div class='muted' style='margin-top:28px'>Бренд подтягивается из API "
                          "при каждом прогоне.</div>", unsafe_allow_html=True)
