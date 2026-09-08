@@ -3507,4 +3507,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    )
+    ) 
