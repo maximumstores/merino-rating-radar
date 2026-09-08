@@ -1535,7 +1535,8 @@ with tab_comp:
                         brand = str(m.get("brand", "") or "")[:22]
                         title = str(m.get("title", "") or "")[:70]
                         dom = MARKET_DOMAINS.get(sel_mkt, "amazon.com.be")
-                        tds = [f"<td class='c-brand'>{brand}</td>",
+                        no_data = all(pd.isna(table.loc[a, d]) for d in days_c)
+                        tds = [f"<td class='c-brand{' nodata' if no_data else ''}'>{brand or '—'}</td>",
                                f"<td class='c-asin'><a href='https://www.{dom}/dp/{a}' target='_blank'>{a}</a></td>",
                                f"<td class='c-cty'>{sel_mkt}</td>",
                                f"<td class='c-title' title='{title}'>{title}</td>"]
@@ -1562,6 +1563,7 @@ with tab_comp:
                   font-family:ui-monospace,Menlo,monospace; }}
 .cmp td.c-asin a {{ color:#0071e3; text-decoration:none; }}
 .cmp td.c-title {{ max-width:240px; overflow:hidden; text-overflow:ellipsis; color:#6e6e73; }}
+.cmp td.nodata {{ color:#c5221f; }}
 .cmp th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
 .cmp th:nth-child(2) {{ position:sticky; left:120px; z-index:3; }}
 .cmp tr.ghead td {{ background:#1d1d1f; color:#fff; font-size:13.5px; font-weight:650;
@@ -1572,7 +1574,30 @@ with tab_comp:
 <div class='cmp-wrap'><table class='cmp'><thead><tr>{th}</tr></thead>
 <tbody>{''.join(rows_html)}</tbody></table></div>
 """
-            st.caption(f"{sel_mkt} · {len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней")
+            # какие позиции пустые на последнем замере
+            last_day = days_c[-1]
+            empty_asins = [a for a in asins
+                           if all(pd.isna(piv[m].loc[a, last_day])
+                                  for m in ("BSR", "Reviews", "Rating", "Price")
+                                  if a in piv[m].index)
+                           or a not in piv["Rating"].index]
+
+            st.caption(f"{sel_mkt} · {len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
+                       + (f" · без данных: {len(empty_asins)}" if empty_asins else ""))
+
+            uc1, uc2, uc3 = st.columns([3, 1, 1])
+            pick_comp = uc1.multiselect(
+                "Обновить ASIN", options=asins, default=empty_asins[:20],
+                key=f"comp_upd_{sel_mkt}", label_visibility="collapsed",
+                placeholder="выбери ASIN для пересбора (по умолчанию — те, где нет данных)")
+            if uc2.button(f"↻ Обновить ({len(pick_comp)})", disabled=not pick_comp, type="primary",
+                          key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
+                run_collection(pick_comp, "Конкуренты (точечно)")
+            if empty_asins and uc3.button(f"↻ Пустые ({len(empty_asins)})", key=f"comp_upd_empty_{sel_mkt}",
+                                          use_container_width=True,
+                                          help="Пересобрать все позиции без данных на последнем замере"):
+                run_collection(empty_asins, "Конкуренты (пустые)")
+
             st.markdown(html_c, unsafe_allow_html=True)
             st.markdown("<div class='muted' style='margin-top:6px'>"
                         "BSR: 🟩 позиция улучшилась (номер меньше) · 🟥 ухудшилась &nbsp;·&nbsp; "
