@@ -187,6 +187,7 @@ def get_last_run():
         return None
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_runs_history(limit=60):
     try:
         conn = _conn()
@@ -214,6 +215,7 @@ def get_asin_markets_map(all_tracked):
         return {a: "—" for a in all_tracked}
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_full_history():
     if not DATABASE_URL:
         return pd.DataFrame()
@@ -278,6 +280,7 @@ def ensure_dict_table():
         pass
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_dictionary():
     if not DATABASE_URL:
         return pd.DataFrame(columns=DICT_COLS)
@@ -608,6 +611,7 @@ def run_collection(items, label="Прогон"):
         progress.progress(i / len(items), text=f"{i}/{len(items)}")
     stop_slot.empty()
     cur_slot.empty()
+    st.cache_data.clear()      # свежие данные вместо кэша
     finish_run(run_id, ok, "stopped" if stopped else "done")
     st.session_state["last_auto_run"] = time.time()
     st.session_state["stop_run"] = False
@@ -938,11 +942,20 @@ else:
     hist_df = pd.DataFrame()
 
 # ==================== ВКЛАДКИ ====================
-(tab_port, tab_port_p, tab_comp, tab_ai, tab_dyn, tab_dyn_p, tab_an, tab_bot, tab_fc, tab_ops,
- tab_help) = st.tabs(
-    ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
-     "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)",
-     "📊 Аналитика", "🤖 Бот возвратов", "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"])
+# Навигация вместо st.tabs: Streamlit рисует ВСЕ вкладки при каждом клике,
+# поэтому тяжёлые таблицы и графики тормозили даже при переключении фильтра.
+# Здесь рендерится только выбранный раздел.
+SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
+            "📅 Динамика (Чайлд)", "📅 Динамика (Парент)", "📊 Аналитика", "🤖 Бот возвратов",
+            "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"]
+
+st.markdown("""
+<style>
+div[role="radiogroup"].nav-hack { gap: 2px; }
+</style>
+""", unsafe_allow_html=True)
+
+nav = st.radio("Раздел", SECTIONS, horizontal=True, label_visibility="collapsed", key="nav_section")
 
 # ---------- ПОРТФЕЛЬ ----------
 def render_portfolio(filtered_df, kind):
@@ -1069,15 +1082,16 @@ def render_portfolio(filtered_df, kind):
 
 
 
-with tab_port:
+if nav == "📋 Портфель (Чайлд)":
     render_portfolio(filtered_df, "child")
 
-with tab_port_p:
+if nav == "📋 Портфель (Парент)":
     render_portfolio(filtered_df, "parent")
 
 
 
 # ---------- КОНКУРЕНТЫ ----------
+@st.cache_data(ttl=180, show_spinner=False)
 def get_competitors():
     """Список конкурентов: ASIN, группа, страна, бренд, название."""
     try:
@@ -1164,6 +1178,7 @@ def pull_meta(asins, market, log=None):
     return done, failed
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_competitor_history(asins, days):
     if not asins:
         return pd.DataFrame()
@@ -1189,7 +1204,7 @@ def get_competitor_history(asins, days):
         return pd.DataFrame()
 
 
-with tab_comp:
+if nav == "🥊 Конкуренты":
     st.markdown("### Мониторинг конкурентов")
     st.markdown("<div class='muted'>ASIN конкурентов разложены по товарным группам и странам. "
                 "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
@@ -1417,7 +1432,7 @@ with tab_comp:
 
         # ---- сводка «мы против лучшего конкурента» ----
         def build_group_report(country, groups, comp_view):
-            last = get_competitor_history(comp_view["asin"].tolist(), 3)
+            last = get_competitor_history(tuple(comp_view["asin"].tolist()), 3)
             if last.empty:
                 return None, pd.DataFrame()
             latest = last.sort_values("created_at").groupby("asin").last().reset_index()
@@ -1478,7 +1493,7 @@ with tab_comp:
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
-        hist = get_competitor_history(asins, comp_days)
+        hist = get_competitor_history(tuple(asins), comp_days)
         if hist.empty:
             st.warning("По этой стране ещё нет замеров — запусти прогон")
         else:
@@ -1845,7 +1860,7 @@ with tab_comp:
                                     f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
 
 # ---------- AI-АНАЛИЗ ----------
-with tab_ai:
+if nav == "🧠 AI-анализ":
     if not AI_OK:
         st.error("Модуль ai_insights.py не найден")
     elif not ai_insights.API_KEY:
@@ -2288,14 +2303,14 @@ def render_dynamics(filtered_df, hist_df, kind):
             pass
 
 
-with tab_dyn:
+if nav == "📅 Динамика (Чайлд)":
     render_dynamics(filtered_df, hist_df, "child")
 
-with tab_dyn_p:
+if nav == "📅 Динамика (Парент)":
     render_dynamics(filtered_df, hist_df, "parent")
 
 # ---------- АНАЛИТИКА ----------
-with tab_an:
+if nav == "📊 Аналитика":
     if filtered_df.empty:
         st.info("Нет данных")
     else:
@@ -2470,7 +2485,7 @@ with tab_an:
 
 
 # ---------- ДЕТЕКТОР БОТА ВОЗВРАТОВ ----------
-with tab_bot:
+if nav == "🤖 Бот возвратов":
     st.markdown("### Детектор ИИ-бота возвратов Amazon")
     st.markdown(
         "<div class='muted'>Маркер: рейтинг падает, а число оценок почти не растёт — значит новые оценки "
@@ -2660,7 +2675,7 @@ with tab_bot:
                    "Чем чаще замеры, тем точнее.")
 
 # ---------- ПРОГНОЗ ----------
-with tab_fc:
+if nav == "📈 Прогноз":
     if not all_asins:
         st.info("Нет данных")
     else:
@@ -2984,8 +2999,13 @@ def render_asin_manager(kind):
 
 
 # ---------- СБОР И УПРАВЛЕНИЕ ----------
-with tab_ops:
+if nav == "⚙️ Сбор и управление":
     o1, o2 = st.columns(2)
+    if st.button("🔄 Обновить данные из базы", key="clear_cache",
+                 help="Дашборд кэширует запросы к базе на 3 минуты, чтобы не тормозить при кликах"):
+        st.cache_data.clear()
+        st.rerun()
+
     st.session_state.setdefault("use_api_mode", True)
     mode_c1, mode_c2 = st.columns([1.2, 3])
     st.session_state["use_api_mode"] = mode_c1.toggle(
@@ -3351,7 +3371,7 @@ with tab_ops:
 
 
 # ---------- КАК ЭТО РАБОТАЕТ ----------
-with tab_help:
+if nav == "ℹ️ Как это работает":
     st.markdown(
         """
 <style>
@@ -3472,4 +3492,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
