@@ -699,7 +699,9 @@ tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
 tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
 asin_market_map = get_asin_markets_map(tracked)
+_t_hist = time.time()
 full_df = get_full_history()
+st.session_state["full_df_sec"] = time.time() - _t_hist
 ensure_dict_table()
 try:
     ensure_schema()              # схема + индексы (без них выборки медленные)
@@ -1404,6 +1406,8 @@ if nav == "🥊 Конкуренты":
             return "\n".join(lines), pd.DataFrame(rows)
 
         st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN")
+        _t0 = time.time()
+        _timing = {}
         # берём из уже загруженной истории — отдельный запрос к базе не нужен
         if full_df.empty or not asins:
             hist = pd.DataFrame()
@@ -1580,8 +1584,11 @@ if nav == "🥊 Конкуренты":
                                   if a in piv[m].index)
                            or a not in piv["Rating"].index]
 
+            _timing["подготовка"] = time.time() - _t0
             st.caption(f"Замеров в базе: {len(hist)} · дней: {len(days_c)} · "
-                       f"позиций с данными: {piv['Rating'].shape[0]}")
+                       f"позиций с данными: {piv['Rating'].shape[0]} · "
+                       f"подготовка {_timing['подготовка']:.2f}с · "
+                       f"история загружена за {st.session_state.get('full_df_sec', 0):.2f}с")
             vmode = st.radio("Вид", ["Список позиций", "По датам (как в шите)"], horizontal=True,
                              key=f"comp_view_{sel_mkt}", label_visibility="collapsed")
 
@@ -1647,7 +1654,8 @@ if nav == "🥊 Конкуренты":
                     })
                 st.caption(f"Последний замер {pd.Timestamp(last_day2).strftime('%d.%m')} · "
                            f"🔵 — наши позиции · Δ считается к предыдущему замеру · "
-                           "колонки сортируются кликом по заголовку")
+                           "колонки сортируются кликом по заголовку · "
+                           f"таблица построена за {time.time() - _t0:.2f}с")
 
             if vmode != "Список позиций":
                 st.caption(f"{len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
