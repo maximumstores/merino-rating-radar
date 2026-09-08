@@ -224,7 +224,8 @@ def get_full_history(days=120):
         conn = _conn()
         df = pd.read_sql(
             """
-            SELECT asin, source, rating, review_count, histogram_json, image_url, bsr, note, created_at
+            SELECT asin, source, rating, review_count, histogram_json, image_url,
+                   bsr, bsr_num, price, note, created_at
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
@@ -234,6 +235,12 @@ def get_full_history(days=120):
         df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
         df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
         df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
+        df["bsr_num"] = pd.to_numeric(df.get("bsr_num"), errors="coerce")
+        df["price_num"] = pd.to_numeric(
+            df.get("price", pd.Series(dtype=str)).astype(str)
+            .str.replace(r"[^\d,.]", "", regex=True)
+            .str.replace(r"\.(?=\d{3}\b)", "", regex=True).str.replace(",", "."),
+            errors="coerce")
         return df
     except Exception as e:
         st.error(f"Не читается история метрик: {e}")
@@ -1330,7 +1337,10 @@ if nav == "🥊 Конкуренты":
 
         # ---- сводка «мы против лучшего конкурента» ----
         def build_group_report(country, groups, comp_view):
-            last = get_competitor_history(tuple(comp_view["asin"].tolist()), 3)
+            ids = comp_view["asin"].tolist()
+            cut3 = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=3)
+            last = (full_df[(full_df["asin"].isin(ids)) & (full_df["created_at"] >= cut3)].copy()
+                    if not full_df.empty else pd.DataFrame())
             if last.empty:
                 return None, pd.DataFrame()
             latest = last.sort_values("created_at").groupby("asin").last().reset_index()
@@ -1392,12 +1402,12 @@ if nav == "🥊 Конкуренты":
             return "\n".join(lines), pd.DataFrame(rows)
 
         st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN")
-        try:
-            with st.spinner("Загружаю данные…"):
-                hist = get_competitor_history(tuple(asins), comp_days)
-        except Exception as e:
-            st.error(f"Не удалось прочитать историю: {e}")
+        # берём из уже загруженной истории — отдельный запрос к базе не нужен
+        if full_df.empty or not asins:
             hist = pd.DataFrame()
+        else:
+            cut = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(comp_days))
+            hist = full_df[(full_df["asin"].isin(asins)) & (full_df["created_at"] >= cut)].copy()
         if not asins:
             st.warning("В этой стране и группах нет ASIN — проверь фильтры выше")
         if hist.empty:
