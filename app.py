@@ -1436,7 +1436,8 @@ with tab_comp:
                 ours, comp = part[part["own"]], part[~part["own"]]
                 lines.append(f"📌 <b>{g}</b>")
                 lines.append(f"  • Товары: {len(part)} (наших: {len(ours)}, конкурентов: {len(comp)})")
-                row = {"Группа": g, "Всего": len(part), "Наших": len(ours)}
+                row = {"Группа": g, "ASIN всего": len(part),
+                       "Наших": len(ours), "Конкурентов": len(comp)}
 
                 def cmp_line(label, col, better="max", fmt="{:.1f}"):
                     o = ours[col].dropna()
@@ -1477,7 +1478,7 @@ with tab_comp:
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
-        with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=True):
+        with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=False):
             ob1, ob2 = st.columns([3, 1])
             cur_own = get_setting("own_brands", OWN_BRANDS_DEFAULT)
             new_own = ob1.text_input("Наши бренды (через запятую)", value=cur_own, key="own_brands_inp",
@@ -1687,7 +1688,8 @@ with tab_comp:
                                   if a in piv[m].index)
                            or a not in piv["Rating"].index]
 
-            st.caption(f"{sel_mkt} · {len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
+            st.markdown(f"#### Таблица по датам — {sel_mkt}")
+            st.caption(f"{len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
                        + (f" · без данных: {len(empty_asins)}" if empty_asins else ""))
 
             with st.expander("↻ Выбрать ASIN для пересбора"
