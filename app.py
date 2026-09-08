@@ -1688,95 +1688,160 @@ with tab_comp:
                                   if a in piv[m].index)
                            or a not in piv["Rating"].index]
 
-            st.markdown(f"#### Таблица по датам — {sel_mkt}")
-            st.caption(f"{len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
-                       + (f" · без данных: {len(empty_asins)}" if empty_asins else ""))
+            vmode = st.radio("Вид", ["Список позиций", "По датам (как в шите)"], horizontal=True,
+                             key=f"comp_view_{sel_mkt}", label_visibility="collapsed")
 
-            with st.expander("↻ Выбрать ASIN для пересбора"
-                             + (f" · без данных: {len(empty_asins)}" if empty_asins else ""),
-                             expanded=bool(empty_asins)):
-                # что реально собралось по каждой позиции на последнем замере
-                last_by_asin = (hist.sort_values("created_at").groupby("asin").last()
-                                if not hist.empty else pd.DataFrame())
+            if vmode == "Список позиций":
+                last_day2 = days_c[-1]
+                prev_day2 = days_c[-2] if len(days_c) > 1 else None
 
-                def what_we_have(a):
-                    if a not in last_by_asin.index:
-                        return "—", "ни разу не собрано"
-                    r = last_by_asin.loc[a]
-                    got = []
-                    got.append("★" if pd.notnull(r["rating"]) else "·")
-                    got.append("💬" if pd.notnull(r["review_count"]) else "·")
-                    got.append("#" if pd.notnull(r["bsr_num"]) else "·")
-                    got.append("€" if pd.notnull(r["price_num"]) else "·")
-                    when = pd.to_datetime(r["created_at"]).tz_convert(ZoneInfo(selected_tz))
-                    return " ".join(got), when.strftime("%d.%m %H:%M")
+                def val(metric, a, d):
+                    t = piv[metric]
+                    return t.loc[a, d] if (a in t.index and d is not None) else None
 
-                have, when_col = zip(*[what_we_have(a) for a in asins]) if asins else ((), ())
-
-                pick_tbl = pd.DataFrame({
-                    "✓": [a in empty_asins for a in asins],
-                    "ASIN": asins,
-                    "Бренд": [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in asins],
-                    "Группа": [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in asins],
-                    "Собрано": list(have),
-                    "Когда": list(when_col),
-                })
-                edited_pick = st.data_editor(
-                    pick_tbl, use_container_width=True, hide_index=True,
-                    height=min(360, 40 + 35 * len(pick_tbl)),
-                    key=f"comp_pick_{sel_mkt}_{len(empty_asins)}",
-                    column_config={
-                        "✓": st.column_config.CheckboxColumn("✓", width="small"),
-                        "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
-                        "Бренд": st.column_config.TextColumn("Бренд", width="medium", disabled=True),
-                        "Группа": st.column_config.TextColumn("Группа", width="small", disabled=True),
-                        "Собрано": st.column_config.TextColumn(
-                            "Собрано", width="small", disabled=True,
-                            help="★ рейтинг · 💬 отзывы · # BSR · € цена. Точка — метрики нет"),
-                        "Когда": st.column_config.TextColumn("Последний сбор", width="small", disabled=True),
+                rows = []
+                for a in asins:
+                    m = meta.loc[a] if a in meta.index else {}
+                    brand = str(m.get("brand", "") or "")
+                    r = val("Rating", a, last_day2)
+                    rc = val("Reviews", a, last_day2)
+                    bs = val("BSR", a, last_day2)
+                    pr = val("Price", a, last_day2)
+                    d_bs = (val("BSR", a, prev_day2) - bs) if (prev_day2 is not None
+                            and pd.notnull(bs) and pd.notnull(val("BSR", a, prev_day2))) else None
+                    d_rc = (rc - val("Reviews", a, prev_day2)) if (prev_day2 is not None
+                            and pd.notnull(rc) and pd.notnull(val("Reviews", a, prev_day2))) else None
+                    d_pr = (pr - val("Price", a, prev_day2)) if (prev_day2 is not None
+                            and pd.notnull(pr) and pd.notnull(val("Price", a, prev_day2))) else None
+                    rows.append({
+                        "Наш": "🔵" if is_own_brand(brand) else "",
+                        "ASIN": f"https://www.{MARKET_DOMAINS.get(sel_mkt, 'amazon.com.be')}/dp/{a}",
+                        "Бренд": brand or "—",
+                        "Группа": str(m.get("grp", "") or ""),
+                        "Рейтинг": f"{rating_emoji(r)} {r:.1f}" if pd.notnull(r) else "⚪ —",
+                        "Отзывы": int(rc) if pd.notnull(rc) else None,
+                        "Δ отз.": int(d_rc) if d_rc is not None else None,
+                        "BSR": int(bs) if pd.notnull(bs) else None,
+                        "Δ BSR": int(d_bs) if d_bs is not None else None,
+                        "Цена": round(float(pr), 2) if pd.notnull(pr) else None,
+                        "Δ цены": round(float(d_pr), 2) if d_pr is not None else None,
+                        "Название": str(m.get("title", "") or ""),
                     })
-                pick_comp = edited_pick.loc[edited_pick["✓"], "ASIN"].tolist()
+                flat = pd.DataFrame(rows).sort_values(["Группа", "Наш", "BSR"],
+                                                      ascending=[True, False, True],
+                                                      na_position="last")
+                st.dataframe(
+                    flat, use_container_width=True, hide_index=True,
+                    height=min(760, 40 + 35 * len(flat)),
+                    column_config={
+                        "Наш": st.column_config.TextColumn("", width="small"),
+                        "ASIN": st.column_config.LinkColumn("ASIN", width="medium",
+                                                            display_text=r"/dp/([A-Z0-9]{10})"),
+                        "Бренд": st.column_config.TextColumn("Бренд", width="medium"),
+                        "Группа": st.column_config.TextColumn("Группа", width="small"),
+                        "Рейтинг": st.column_config.TextColumn("Рейтинг", width="small"),
+                        "Отзывы": st.column_config.NumberColumn("Отзывы", width="small"),
+                        "Δ отз.": st.column_config.NumberColumn("Δ отз.", format="%+d", width="small"),
+                        "BSR": st.column_config.NumberColumn("BSR", format="%d", width="small"),
+                        "Δ BSR": st.column_config.NumberColumn("Δ BSR", format="%+d", width="small",
+                                                               help="Минус — позиция улучшилась"),
+                        "Цена": st.column_config.NumberColumn("Цена", format="%.2f", width="small"),
+                        "Δ цены": st.column_config.NumberColumn("Δ цены", format="%+.2f", width="small"),
+                        "Название": st.column_config.TextColumn("Название", width="large"),
+                    })
+                st.caption(f"Последний замер {pd.Timestamp(last_day2).strftime('%d.%m')} · "
+                           f"🔵 — наши позиции · Δ считается к предыдущему замеру · "
+                           "колонки сортируются кликом по заголовку")
 
-                b1, b2, b3 = st.columns([1.2, 1.2, 3])
-                if b1.button(f"↻ Обновить отмеченные ({len(pick_comp)})", disabled=not pick_comp,
-                             type="primary", key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
-                    run_collection(pick_comp, "Конкуренты (точечно)")
-                if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
-                             use_container_width=True):
-                    run_collection(asins, f"Конкуренты ({sel_mkt})")
+            if vmode != "Список позиций":
+                st.caption(f"{len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
+                           + (f" · без данных: {len(empty_asins)}" if empty_asins else ""))
 
-                st.markdown("<div class='muted' style='margin-top:8px'>Колонка «Собрано»: "
-                            "<b>★</b> рейтинг · <b>💬</b> отзывы · <b>#</b> BSR · <b>€</b> цена; "
-                            "точка — метрика не пришла. Галочки стоят там, где не пришло ничего.</div>",
-                            unsafe_allow_html=True)
+                with st.expander("↻ Выбрать ASIN для пересбора"
+                                 + (f" · без данных: {len(empty_asins)}" if empty_asins else ""),
+                                 expanded=bool(empty_asins)):
+                    # что реально собралось по каждой позиции на последнем замере
+                    last_by_asin = (hist.sort_values("created_at").groupby("asin").last()
+                                    if not hist.empty else pd.DataFrame())
 
-            st.markdown(html_c, unsafe_allow_html=True)
-            if color_mode.startswith("Изменение"):
-                legend = ("<b>BSR</b>: 🟩 позиция выросла (номер меньше) · 🟥 просела; яркий цвет — "
-                          "сдвиг больше 15% &nbsp;·&nbsp; <b>Reviews</b>: 🟩 прибавились &nbsp;·&nbsp; "
-                          "<b>Rating</b>: по логике Amazon &nbsp;·&nbsp; "
-                          "<b>Price</b>: 🟥 конкурент снизил цену (яркий — больше 10%) · 🟩 поднял")
-            else:
-                legend = ("Шкала от зелёного к красному — место в своей группе за этот день. "
-                          "<b>BSR</b> и <b>Price</b>: меньше значит выше в шкале (дешевле = агрессивнее). "
-                          "<b>Rating</b> и <b>Reviews</b>: больше значит выше. "
-                          "Так видно, кто в группе лидер, а кто отстаёт, независимо от вчерашних колебаний.")
-            st.markdown(f"<div class='muted' style='margin-top:6px'>{legend} &nbsp;·&nbsp; "
-                        "<b style='background:#eaf4ff;padding:1px 8px;border-radius:4px;"
-                        "box-shadow:inset 3px 0 0 #0071e3'>голубым</b> — наши позиции, они наверху группы</div>", unsafe_allow_html=True)
+                    def what_we_have(a):
+                        if a not in last_by_asin.index:
+                            return "—", "ни разу не собрано"
+                        r = last_by_asin.loc[a]
+                        got = []
+                        got.append("★" if pd.notnull(r["rating"]) else "·")
+                        got.append("💬" if pd.notnull(r["review_count"]) else "·")
+                        got.append("#" if pd.notnull(r["bsr_num"]) else "·")
+                        got.append("€" if pd.notnull(r["price_num"]) else "·")
+                        when = pd.to_datetime(r["created_at"]).tz_convert(ZoneInfo(selected_tz))
+                        return " ".join(got), when.strftime("%d.%m %H:%M")
 
-            csv_rows = []
-            for metric in metrics:
-                t = piv[metric].copy()
-                t.columns = labels
-                t.insert(0, "Метрика", metric)
-                t.insert(1, "Группа", [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in t.index])
-                t.insert(2, "Бренд", [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in t.index])
-                t.index.name = "ASIN"
-                csv_rows.append(t.reset_index())
-            out_csv = pd.concat(csv_rows, ignore_index=True)
-            st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
-                               f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
+                    have, when_col = zip(*[what_we_have(a) for a in asins]) if asins else ((), ())
+
+                    pick_tbl = pd.DataFrame({
+                        "✓": [a in empty_asins for a in asins],
+                        "ASIN": asins,
+                        "Бренд": [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in asins],
+                        "Группа": [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in asins],
+                        "Собрано": list(have),
+                        "Когда": list(when_col),
+                    })
+                    edited_pick = st.data_editor(
+                        pick_tbl, use_container_width=True, hide_index=True,
+                        height=min(360, 40 + 35 * len(pick_tbl)),
+                        key=f"comp_pick_{sel_mkt}_{len(empty_asins)}",
+                        column_config={
+                            "✓": st.column_config.CheckboxColumn("✓", width="small"),
+                            "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
+                            "Бренд": st.column_config.TextColumn("Бренд", width="medium", disabled=True),
+                            "Группа": st.column_config.TextColumn("Группа", width="small", disabled=True),
+                            "Собрано": st.column_config.TextColumn(
+                                "Собрано", width="small", disabled=True,
+                                help="★ рейтинг · 💬 отзывы · # BSR · € цена. Точка — метрики нет"),
+                            "Когда": st.column_config.TextColumn("Последний сбор", width="small", disabled=True),
+                        })
+                    pick_comp = edited_pick.loc[edited_pick["✓"], "ASIN"].tolist()
+
+                    b1, b2, b3 = st.columns([1.2, 1.2, 3])
+                    if b1.button(f"↻ Обновить отмеченные ({len(pick_comp)})", disabled=not pick_comp,
+                                 type="primary", key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
+                        run_collection(pick_comp, "Конкуренты (точечно)")
+                    if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
+                                 use_container_width=True):
+                        run_collection(asins, f"Конкуренты ({sel_mkt})")
+
+                    st.markdown("<div class='muted' style='margin-top:8px'>Колонка «Собрано»: "
+                                "<b>★</b> рейтинг · <b>💬</b> отзывы · <b>#</b> BSR · <b>€</b> цена; "
+                                "точка — метрика не пришла. Галочки стоят там, где не пришло ничего.</div>",
+                                unsafe_allow_html=True)
+
+                st.markdown(html_c, unsafe_allow_html=True)
+                if color_mode.startswith("Изменение"):
+                    legend = ("<b>BSR</b>: 🟩 позиция выросла (номер меньше) · 🟥 просела; яркий цвет — "
+                              "сдвиг больше 15% &nbsp;·&nbsp; <b>Reviews</b>: 🟩 прибавились &nbsp;·&nbsp; "
+                              "<b>Rating</b>: по логике Amazon &nbsp;·&nbsp; "
+                              "<b>Price</b>: 🟥 конкурент снизил цену (яркий — больше 10%) · 🟩 поднял")
+                else:
+                    legend = ("Шкала от зелёного к красному — место в своей группе за этот день. "
+                              "<b>BSR</b> и <b>Price</b>: меньше значит выше в шкале (дешевле = агрессивнее). "
+                              "<b>Rating</b> и <b>Reviews</b>: больше значит выше. "
+                              "Так видно, кто в группе лидер, а кто отстаёт, независимо от вчерашних колебаний.")
+                st.markdown(f"<div class='muted' style='margin-top:6px'>{legend} &nbsp;·&nbsp; "
+                            "<b style='background:#eaf4ff;padding:1px 8px;border-radius:4px;"
+                            "box-shadow:inset 3px 0 0 #0071e3'>голубым</b> — наши позиции, они наверху группы</div>", unsafe_allow_html=True)
+
+                csv_rows = []
+                for metric in metrics:
+                    t = piv[metric].copy()
+                    t.columns = labels
+                    t.insert(0, "Метрика", metric)
+                    t.insert(1, "Группа", [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in t.index])
+                    t.insert(2, "Бренд", [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in t.index])
+                    t.index.name = "ASIN"
+                    csv_rows.append(t.reset_index())
+                out_csv = pd.concat(csv_rows, ignore_index=True)
+                st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
+                                   f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
 
 
 # ---------- AI-АНАЛИЗ ----------
