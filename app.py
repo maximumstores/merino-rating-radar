@@ -1150,12 +1150,12 @@ with tab_comp:
                 "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
                 "как в гугл-таблице.</div>", unsafe_allow_html=True)
 
-    comp_user = None
+    comp_user, comp_err = None, None
     if NOTIFIER_OK:
         try:
-            comp_user = notifier.bot_username("comp")
-        except Exception:
-            comp_user = None
+            comp_user, comp_err = notifier.bot_username("comp", with_error=True)
+        except Exception as e:
+            comp_err = str(e)
     has_own_bot = bool(os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
     comp_user = comp_user or ("ваш новый бот" if has_own_bot else "RatingRadar_bot")
     comp_link = f"https://t.me/{comp_user}" if not comp_user.startswith("ваш") else None
@@ -1170,8 +1170,9 @@ with tab_comp:
             + ("" if has_own_bot else " · отдельный бот не задан, отчёты идут в основной") +
             "</span></div>", unsafe_allow_html=True)
     else:
-        st.info("Токен второго бота задан, но Telegram не ответил на getMe — проверь "
-                "TELEGRAM_BOT_TOKEN_COMP в Secrets.", icon="⚠️")
+        st.warning(f"Telegram не принял токен второго бота: **{comp_err}**. "
+                   "Обычно это опечатка или лишние символы в TELEGRAM_BOT_TOKEN_COMP. "
+                   "Формат: `цифры:буквы`, без кавычек внутри значения и без пробелов.", icon="⚠️")
 
     comp_df = get_competitors()
 
