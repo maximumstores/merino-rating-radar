@@ -610,31 +610,34 @@ def process_all_channels():
     return out
 
 
-def diagnose():
+def diagnose(channel="radar"):
     """Проверка связки: токен, вебхук, очередь обновлений, база подписчиков."""
-    out = {}
-    out["token_present"] = bool(BOT_TOKEN)
-    out["token_tail"] = f"…{BOT_TOKEN[-6:]}" if BOT_TOKEN else "—"
+    tok = channel_token(channel)
+    out = {"channel": channel}
+    out["token_present"] = bool(tok)
+    out["token_tail"] = f"…{tok[-6:]}" if tok else "—"
     out["db_present"] = bool(DATABASE_URL)
 
-    if not BOT_TOKEN:
-        out["error"] = "TELEGRAM_BOT_TOKEN пуст: не виден ни в env, ни в st.secrets"
+    if not tok:
+        out["error"] = f"токен канала «{channel}» пуст: не виден ни в env, ни в st.secrets"
         return out
 
-    me = tg_call("getMe")
+    me = tg_call("getMe", channel=channel)
     out["getMe"] = me
     out["bot_username"] = (me.get("result") or {}).get("username") if me.get("ok") else None
 
-    wh = tg_call("getWebhookInfo")
+    wh = tg_call("getWebhookInfo", channel=channel)
     out["webhook"] = wh.get("result") if wh.get("ok") else wh
     out["webhook_url"] = (wh.get("result") or {}).get("url") or ""
 
+    key = f"update_offset_{channel}" if channel != "radar" else "update_offset"
     try:
-        out["offset"] = int(get_state("update_offset", 0) or 0)
+        out["offset"] = int(get_state(key, 0) or 0)
     except Exception as e:
         out["offset"] = f"ошибка чтения состояния: {e}"
 
-    upd = tg_call("getUpdates", offset=(out["offset"] + 1) if isinstance(out["offset"], int) else 1,
+    upd = tg_call("getUpdates", channel=channel,
+                  offset=(out["offset"] + 1) if isinstance(out["offset"], int) else 1,
                   timeout=0, limit=10, allowed_updates=["message"])
     out["getUpdates_ok"] = upd.get("ok")
     out["getUpdates_error"] = upd.get("description") if not upd.get("ok") else None
@@ -645,20 +648,21 @@ def diagnose():
     ]
 
     try:
-        subs = get_subscribers(active_only=False)
+        subs = get_subscribers(active_only=False, channel=channel)
         out["subscribers"] = len(subs)
     except Exception as e:
         out["subscribers"] = f"ошибка БД: {e}"
     return out
 
 
-def drop_webhook():
+def drop_webhook(channel="radar"):
     """Снимает вебхук — иначе getUpdates отдаёт 409 Conflict."""
-    return tg_call("deleteWebhook", drop_pending_updates=False)
+    return tg_call("deleteWebhook", channel=channel, drop_pending_updates=False)
 
 
-def reset_offset(value=0):
-    set_state("update_offset", int(value))
+def reset_offset(value=0, channel="radar"):
+    key = f"update_offset_{channel}" if channel != "radar" else "update_offset"
+    set_state(key, int(value))
     return int(value)
 
 
