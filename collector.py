@@ -318,20 +318,81 @@ def in_variation(soup: BeautifulSoup) -> bool:
         return False
 
 
-def parse_bsr(soup: BeautifulSoup, html: str):
-    for sel in ("#SalesRank", "#detailBullets_feature_div", "#productDetails_detailBullets_sections1",
-                "#prodDetails", "#detailBulletsWrapper_feature_div"):
-        node = soup.select_one(sel)
-        if not node:
+# Локализованные подписи блока с BSR. Ключевые слова можно дополнять через
+# переменную окружения BSR_EXTRA_LABELS="слово1|слово2".
+BSR_LABELS = {
+    "US": ["best sellers rank", "amazon best sellers rank"],
+    "UK": ["best sellers rank", "amazon best sellers rank"],
+    "BE": ["best sellers rank", "plaats in bestsellerlijst", "classement des meilleures ventes"],
+    "NL": ["plaats in bestsellerlijst", "bestsellers-rang", "best sellers rank"],
+    "DE": ["amazon bestseller-rang", "bestseller-rang", "amazon bestseller rang"],
+    "FR": ["classement des meilleures ventes", "classement des meilleures ventes d'amazon"],
+    "IT": ["posizione nella classifica bestseller", "posizione nella classifica"],
+    "ES": ["clasificación en los más vendidos", "clasificacion en los mas vendidos"],
+}
+# «#123 in Category» на разных языках: перед номером и между номером и категорией
+BSR_NUM_RE = re.compile(
+    r"(?:#|nr\.?\s*|n°\s*|n\.\s*|nº\s*)\s*([0-9][0-9.,\s]{0,12})\s*"
+    r"(?:in|en|dans|im|nella|nei|su)\s+([^#(\n\r]{2,45})", re.I)
+
+
+def _labels_for(market):
+    extra = os.environ.get("BSR_EXTRA_LABELS", "")
+    base = BSR_LABELS.get(market, []) + [l for ls in BSR_LABELS.values() for l in ls]
+    if extra:
+        base = [x.strip().lower() for x in extra.split("|") if x.strip()] + base
+    seen, out = set(), []
+    for l in base:
+        if l not in seen:
+            seen.add(l)
+            out.append(l)
+    return out
+
+
+def parse_bsr_market(soup: BeautifulSoup, html: str, market: str = "BE"):
+    """BSR с учётом языка страницы. Ищем локализованную подпись, потом номер рядом с ней."""
+    labels = _labels_for(market)
+
+    # 1) блоки, где Amazon обычно держит BSR
+    for sel in ("#SalesRank", "#detailBullets_feature_div", "#detailBulletsWrapper_feature_div",
+                "#productDetails_detailBullets_sections1", "#productDetails_db_sections",
+                "#prodDetails", "#detail_bullets_id", "table.prodDetTable"):
+        for node in soup.select(sel):
+            text = node.get_text(" ", strip=True)
+            low = text.lower()
+            if not any(l in low for l in labels):
+                continue
+            m = BSR_NUM_RE.search(text)
+            if m:
+                return f"#{m.group(1).strip()} {m.group(2).strip()[:35]}"
+
+    # 2) любой элемент списка, где встречается подпись
+    for li in soup.select("li, tr, span.a-list-item"):
+        text = li.get_text(" ", strip=True)
+        if len(text) > 400:
             continue
-        text = node.get_text(" ", strip=True)
-        m = re.search(r"(?:#|nr\.?\s*)([0-9][0-9,.\s]*)\s*(?:in|en|dans|im|nella)\s+([^#(\n]{2,40})", text, re.I)
+        low = text.lower()
+        if not any(l in low for l in labels):
+            continue
+        m = BSR_NUM_RE.search(text)
         if m:
-            return f"#{m.group(1).strip()} {m.group(2).strip()[:30]}"
-    m = re.search(r"(?:#|nr\.?\s*)([0-9][0-9,.]{2,})\s*(?:in|en|dans|im|nella)\s+([^<#(\n]{2,40})", html, re.I)
-    if m:
-        return f"#{m.group(1).strip()} {m.group(2).strip()[:30]}"
+            return f"#{m.group(1).strip()} {m.group(2).strip()[:35]}"
+
+    # 3) последний шанс — по всему html рядом с подписью
+    low_html = html.lower()
+    for l in labels:
+        idx = low_html.find(l)
+        if idx == -1:
+            continue
+        window = html[idx: idx + 400]
+        m = BSR_NUM_RE.search(window)
+        if m:
+            return f"#{m.group(1).strip()} {m.group(2).strip()[:35]}"
     return None
+
+
+def parse_bsr(soup: BeautifulSoup, html: str, market: str = "BE"):
+    return parse_bsr_market(soup, html, market)
 
 
 def parse_review_count(soup: BeautifulSoup, html: str):
@@ -351,14 +412,14 @@ def parse_review_count(soup: BeautifulSoup, html: str):
     return None
 
 
-def parse_rating(soup: BeautifulSoup, html: str) -> dict:
+def parse_rating(soup: BeautifulSoup, html: str, market: str = "BE") -> dict:
     out = {"rating": None, "count": None, "hist": {}, "image_url": None, "bsr": None}
 
     img = soup.select_one("#landingImage, #imgBlkFront, #main-image") or soup.select_one("img[data-old-hires]")
     if img:
         out["image_url"] = img.get("data-old-hires") or img.get("src")
 
-    out["bsr"] = parse_bsr(soup, html)
+    out["bsr"] = parse_bsr(soup, html, market)
 
     m = re.search(r"([0-9][.,][0-9])\s*(?:out of|van|sur|von|di|de)\s*5", html, re.I)
     if m:
@@ -445,7 +506,7 @@ def check_asin(raw_input: str, log=print) -> dict:
             if in_variation(soup):
                 log(f"  [{market}] рейтинг только у паренты — пропуск")
                 continue
-            data = parse_rating(soup, html)
+            data = parse_rating(soup, html, market)
             if data["rating"] is None:
                 log(f"  [{market}] рейтинг не найден")
                 continue
@@ -847,14 +908,14 @@ def enrich_bsr_hist(asin: str, market: str, need_bsr=True, need_hist=True,
 
         soup = BeautifulSoup(html, "html.parser")
         if need_bsr and not out["bsr"]:
-            out["bsr"] = parse_bsr(soup, html)
+            out["bsr"] = parse_bsr(soup, html, market)
         if need_hist and not out["hist"]:
             data = parse_rating(soup, html)
             if data.get("hist"):
                 out["hist"] = data["hist"]
 
-        got_bsr = out["bsr"] or not need_bsr
-        got_hist = out["hist"] or not need_hist
+        got_bsr = bool(out["bsr"]) or not need_bsr
+        got_hist = bool(out["hist"]) or not need_hist
         if got_bsr and got_hist:
             log(f"  [{market}] добор ок с попытки {attempt}"
                 f"{': BSR ' + str(out['bsr']) if out['bsr'] else ''}")
