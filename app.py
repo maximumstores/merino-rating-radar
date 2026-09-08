@@ -216,7 +216,8 @@ def get_asin_markets_map(all_tracked):
 
 
 @st.cache_data(ttl=180, show_spinner=False)
-def get_full_history():
+def get_full_history(days=120):
+    """История метрик за период. Без ограничения запрос перебирает всю таблицу."""
     if not DATABASE_URL:
         return pd.DataFrame()
     try:
@@ -226,8 +227,9 @@ def get_full_history():
             SELECT asin, source, rating, review_count, histogram_json, image_url, bsr, note, created_at
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%' AND LENGTH(asin) <= 10
+              AND created_at >= NOW() - (%s || ' days')::interval
             ORDER BY created_at ASC;
-            """, conn)
+            """, conn, params=(str(int(days)),))
         conn.close()
         df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
         df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
@@ -692,6 +694,7 @@ asin_market_map = get_asin_markets_map(tracked)
 full_df = get_full_history()
 ensure_dict_table()
 try:
+    ensure_schema()              # схема + индексы (без них выборки медленные)
     ensure_reviews_schema()      # таблицы отзывов — до первого сбора
     ensure_competitor_schema()   # comp_group / title в справочнике
 except Exception:
@@ -3507,4 +3510,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
