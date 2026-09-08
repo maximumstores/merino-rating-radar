@@ -26,6 +26,34 @@ def _cfg(name, default=""):
     val = os.environ.get(name)
     if val:
         return val
+    try:#!/usr/bin/env python3
+"""Rating Radar — Telegram-уведомления.
+
+Две части:
+  * подписчики (таблица telegram_subscribers) — кто получает алерты и с какими фильтрами;
+  * расчёт алертов по последнему прогону + отправка.
+
+Токен берётся из переменной окружения TELEGRAM_BOT_TOKEN (Streamlit Secrets / .env).
+Никогда не хардкодить токен в файле — репозиторий приватный, но токен утекает в историю git.
+"""
+
+import json
+import os
+from datetime import datetime, timezone
+
+import pandas as pd
+import psycopg2
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _cfg(name, default=""):
+    """env → .env → st.secrets (Streamlit Cloud кладёт секреты только туда)."""
+    val = os.environ.get(name)
+    if val:
+        return val
     try:
         import streamlit as st  # noqa: WPS433 — опционально, вне Streamlit не нужен
         val = st.secrets.get(name)
@@ -387,6 +415,26 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
                                 (int(sub["chat_id"]),))
                 c.commit()
     return sent, len(subs)
+
+
+_USERNAME_CACHE = {}
+
+
+def bot_username(channel="radar"):
+    """Юзернейм бота через getMe, с кэшем — чтобы не дёргать API на каждый рендер."""
+    if channel in _USERNAME_CACHE:
+        return _USERNAME_CACHE[channel]
+    if not channel_token(channel):
+        return None
+    me = tg_call("getMe", channel=channel)
+    name = (me.get("result") or {}).get("username") if me.get("ok") else None
+    _USERNAME_CACHE[channel] = name
+    return name
+
+
+def bot_link(channel="radar"):
+    u = bot_username(channel)
+    return f"https://t.me/{u}" if u else None
 
 
 def broadcast(text, channel="radar"):
