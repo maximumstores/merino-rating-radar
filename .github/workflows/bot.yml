@@ -24,4 +24,5 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python -c "import notifier; print('обработано:', notifier.process_updates())"
+          TELEGRAM_BOT_TOKEN_COMP: ${{ secrets.TELEGRAM_BOT_TOKEN_COMP }}
+        run: python -c "import notifier; print('обработано:', notifier.process_all_channels())"
