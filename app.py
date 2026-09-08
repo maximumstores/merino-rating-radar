@@ -480,11 +480,26 @@ def run_collection(items, label="Прогон"):
     use_api = st.session_state.get("use_api_mode", True)
     ensure_schema()
     run_id = start_run(len(items))
+
+    st.session_state["stop_run"] = False
+    head_l, head_r = st.columns([3, 1])
+    head_l.markdown(f"**{label}** — {len(items)} позиций")
+    stop_slot = head_r.empty()
+    stop_slot.button("⏹ Стоп", key=f"stop_btn_{run_id}", use_container_width=True,
+                     on_click=lambda: st.session_state.update(stop_run=True),
+                     help="Остановить прогон — уже собранные позиции сохранятся")
+
     progress = st.progress(0.0, text=f"0/{len(items)}")
     log_box = st.empty()
     log_lines = []
     ok = 0
+    stopped = False
     for i, item in enumerate(items, 1):
+        if st.session_state.get("stop_run"):
+            stopped = True
+            log_lines.append(f"⏹ Остановлено на {i - 1}/{len(items)}")
+            log_box.code("\n".join(log_lines[-15:]))
+            break
         def _log(msg, _lines=log_lines):
             _lines.append(msg)
             log_box.code("\n".join(_lines[-15:]))
@@ -506,10 +521,13 @@ def run_collection(items, label="Прогон"):
         if res.get("source") in VALID_SOURCES:
             ok += 1
         progress.progress(i / len(items), text=f"{i}/{len(items)}")
-    finish_run(run_id, ok, "done")
+    stop_slot.empty()
+    finish_run(run_id, ok, "stopped" if stopped else "done")
     st.session_state["last_auto_run"] = time.time()
-    msg = f"{label} завершён: {ok}/{len(items)} успешно."
-    if NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
+    st.session_state["stop_run"] = False
+    msg = (f"{label} остановлен: собрано {ok} из {len(items)}."
+           if stopped else f"{label} завершён: {ok}/{len(items)} успешно.")
+    if not stopped and NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
         try:
             notifier.process_updates()
             sent, total = notifier.notify_all(header=f"Rating Radar — {label.lower()} завершён")
@@ -529,7 +547,7 @@ with hdr_r:
     last_run = get_last_run()
     if last_run is not None:
         started_kyiv = pd.to_datetime(last_run["started_at"]).tz_convert(ZoneInfo("Europe/Kyiv"))
-        status_label = "завершён" if last_run["status"] == "done" else "в процессе"
+        status_label = {"done": "завершён", "stopped": "остановлен"}.get(last_run["status"], "в процессе")
         st.info(
             f"Последний сбор: **{started_kyiv:%d.%m.%Y %H:%M}** (Киев) · {status_label} · "
             f"валидных **{int(last_run['ok_count'] or 0)} / {int(last_run['asin_count'] or 0)}**")
@@ -837,10 +855,19 @@ def render_portfolio(filtered_df, kind):
                 f"«Загрузка ASIN — Портфель ({KIND_LABEL[kind]})»")
     elif filtered_df.empty:
         st.warning("В базе нет сохранённых метрик под текущие фильтры")
+        if kind_asins and st.button(f"▶ Прогнать {KIND_LABEL[kind].lower()}ов ({len(kind_asins)})",
+                                    key=f"run_kind_empty_{kind}", type="primary"):
+            run_collection(kind_asins, f"Прогон ({KIND_LABEL[kind]})")
     else:
-        hc, vc = st.columns([3, 1])
+        hc, rc, vc = st.columns([2.4, 1.4, 1])
         hc.markdown(f"### Сводный отчёт — {KIND_LABEL[kind]} <span class='muted'>· {len(filtered_df)} из {len(kind_asins)} позиций</span>",
                     unsafe_allow_html=True)
+        rc.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
+        if rc.button(f"▶ Прогнать {KIND_LABEL[kind].lower()}ов ({len(kind_asins)})",
+                     key=f"run_kind_{kind}", type="primary", use_container_width=True,
+                     disabled=not kind_asins,
+                     help=f"Собрать только список «{KIND_LABEL[kind]}», не трогая второй портфель"):
+            run_collection(kind_asins, f"Прогон ({KIND_LABEL[kind]})")
         view_mode = vc.radio("Вид", options=["Таблица", "Карточки"], horizontal=True, label_visibility="collapsed",
                              key=f"view_mode_{kind}")
 
@@ -2117,11 +2144,18 @@ with tab_ops:
     with o1:
         st.markdown("### Ручной прогон")
         st.caption("Сбор по всему списку прямо сейчас")
-        if st.button(f"▶ Запустить прогон ({len(tracked)} ASIN)", type="primary"):
-            if not tracked:
-                st.warning("Список отслеживания пуст")
-            else:
-                run_collection(tracked, "Прогон")
+        if st.button(f"▶ Все ({len(tracked)} ASIN)", type="primary", key="run_all",
+                     use_container_width=True, disabled=not tracked):
+            run_collection(tracked, "Прогон")
+        rk1, rk2 = st.columns(2)
+        n_child = len(tracked_by_kind.get("child", []))
+        n_parent = len(tracked_by_kind.get("parent", []))
+        if rk1.button(f"▶ Чайлды ({n_child})", key="run_child", use_container_width=True,
+                      disabled=not n_child):
+            run_collection(tracked_by_kind["child"], "Прогон (Чайлд)")
+        if rk2.button(f"▶ Паренты ({n_parent})", key="run_parent", use_container_width=True,
+                      disabled=not n_parent):
+            run_collection(tracked_by_kind["parent"], "Прогон (Парент)")
 
         st.markdown("### Автосбор")
         saved_time = get_setting("auto_time", "13:00")
