@@ -1311,7 +1311,7 @@ if nav == "🥊 Конкуренты":
         sel_groups = f2.multiselect("Группы", options=groups_all, default=groups_all,
                                     key=f"comp_f_grp_{sel_mkt}",
                                     placeholder="все группы этой страны")
-        comp_days = f3.selectbox("Период", [7, 14, 30, 60, 90], index=2,
+        comp_days = f3.selectbox("Период", [7, 14, 30, 60, 90], index=0,
                                  format_func=lambda d: f"{d} дн.", key="comp_f_days")
         metrics = f4.multiselect("Метрики", ["BSR", "Reviews", "Rating", "Price"],
                                  default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics")
@@ -1403,7 +1403,8 @@ if nav == "🥊 Конкуренты":
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
-        hist = get_competitor_history(tuple(asins), comp_days)
+        with st.spinner("Загружаю таблицу конкурентов…"):
+            hist = get_competitor_history(tuple(asins), comp_days)
         if hist.empty:
             st.warning("По этой стране ещё нет замеров — запусти прогон")
         else:
