@@ -1478,48 +1478,6 @@ with tab_comp:
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
-        with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=False):
-            ob1, ob2 = st.columns([3, 1])
-            cur_own = get_setting("own_brands", OWN_BRANDS_DEFAULT)
-            new_own = ob1.text_input("Наши бренды (через запятую)", value=cur_own, key="own_brands_inp",
-                                     help="По ним ASIN считается нашим, остальные — конкуренты")
-            if new_own != cur_own:
-                set_setting("own_brands", new_own)
-                st.rerun()
-            ob2.markdown("<div class='muted' style='margin-top:28px'>Бренд подтягивается из API "
-                         "при каждом прогоне.</div>", unsafe_allow_html=True)
-
-            rep_text, rep_df = build_group_report(sel_mkt, use_groups, view)
-            if rep_text is None:
-                st.info("Нет свежих замеров — запусти прогон")
-            else:
-                if not rep_df.empty:
-                    st.dataframe(rep_df, use_container_width=True, hide_index=True,
-                                 height=min(420, 40 + 35 * len(rep_df)))
-                with st.expander("Текст отчёта", expanded=False):
-                    st.code(rep_text.replace("<b>", "").replace("</b>", "")
-                            .replace("<i>", "").replace("</i>", ""), language=None)
-                sc1, sc2 = st.columns([1, 3])
-                comp_token = notifier.channel_token("comp") if NOTIFIER_OK else None
-                if comp_token and sc1.button("📤 Отправить в Telegram", key="comp_send_tg", type="primary"):
-                    try:
-                        ok_n, total = notifier.broadcast(
-                            rep_text + f"\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>",
-                            channel="comp")
-                        if total == 0:
-                            st.warning("В канале конкурентов пока нет подписчиков — открой бота и отправь /start")
-                        else:
-                            st.success(f"Отправлено {ok_n} из {total}")
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}")
-                if comp_link:
-                    sc2.markdown(
-                        f"<div style='margin-top:6px'><a href='{comp_link}' target='_blank' "
-                        f"style='color:#229ED9;font-weight:600;text-decoration:none'>"
-                        f"@{comp_user} — подписаться на отчёты →</a></div>", unsafe_allow_html=True)
-                sc2.download_button("⬇ Скачать отчёт", rep_text.encode("utf-8"),
-                                    f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
-
         hist = get_competitor_history(asins, comp_days)
         if hist.empty:
             st.warning("По этой стране ещё нет замеров — запусти прогон")
@@ -1843,6 +1801,48 @@ with tab_comp:
                 st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
                                    f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
 
+
+        with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=False):
+            ob1, ob2 = st.columns([3, 1])
+            cur_own = get_setting("own_brands", OWN_BRANDS_DEFAULT)
+            new_own = ob1.text_input("Наши бренды (через запятую)", value=cur_own, key="own_brands_inp",
+                                     help="По ним ASIN считается нашим, остальные — конкуренты")
+            if new_own != cur_own:
+                set_setting("own_brands", new_own)
+                st.rerun()
+            ob2.markdown("<div class='muted' style='margin-top:28px'>Бренд подтягивается из API "
+                         "при каждом прогоне.</div>", unsafe_allow_html=True)
+
+            rep_text, rep_df = build_group_report(sel_mkt, use_groups, view)
+            if rep_text is None:
+                st.info("Нет свежих замеров — запусти прогон")
+            else:
+                if not rep_df.empty:
+                    st.dataframe(rep_df, use_container_width=True, hide_index=True,
+                                 height=min(420, 40 + 35 * len(rep_df)))
+                with st.expander("Текст отчёта", expanded=False):
+                    st.code(rep_text.replace("<b>", "").replace("</b>", "")
+                            .replace("<i>", "").replace("</i>", ""), language=None)
+                sc1, sc2 = st.columns([1, 3])
+                comp_token = notifier.channel_token("comp") if NOTIFIER_OK else None
+                if comp_token and sc1.button("📤 Отправить в Telegram", key="comp_send_tg", type="primary"):
+                    try:
+                        ok_n, total = notifier.broadcast(
+                            rep_text + f"\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>",
+                            channel="comp")
+                        if total == 0:
+                            st.warning("В канале конкурентов пока нет подписчиков — открой бота и отправь /start")
+                        else:
+                            st.success(f"Отправлено {ok_n} из {total}")
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                if comp_link:
+                    sc2.markdown(
+                        f"<div style='margin-top:6px'><a href='{comp_link}' target='_blank' "
+                        f"style='color:#229ED9;font-weight:600;text-decoration:none'>"
+                        f"@{comp_user} — подписаться на отчёты →</a></div>", unsafe_allow_html=True)
+                sc2.download_button("⬇ Скачать отчёт", rep_text.encode("utf-8"),
+                                    f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
 
 # ---------- AI-АНАЛИЗ ----------
 with tab_ai:
