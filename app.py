@@ -946,28 +946,17 @@ else:
 # поэтому тяжёлые таблицы и графики тормозили даже при переключении фильтра.
 # Здесь рендерится только выбранный раздел.
 SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
-            "📅 Динамика (Чайлд)", "📅 Динамика (Парент)", "📊 Аналитика", "🤖 Бот возвратов",
+            "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)", "📊 Аналитика", "🤖 Бот возвратов",
             "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"]
 
-st.markdown("""
-<style>
-/* радио-навигация выглядит как вкладки */
-.radar-nav div[role="radiogroup"] { gap:6px !important; flex-wrap:wrap; }
-.radar-nav label {
-    background:#fff; border:1px solid #e5e5ea; border-radius:999px;
-    padding:5px 14px; margin:0 2px 6px 0; cursor:pointer; transition:all .12s ease;
-}
-.radar-nav label:hover { border-color:#c7c7cc; background:#fafafa; }
-.radar-nav label > div:first-child { display:none !important; }
-.radar-nav label:has(input:checked) { background:#1d1d1f !important; border-color:#1d1d1f !important; }
-.radar-nav label:has(input:checked) p { color:#fff !important; font-weight:600; }
-</style>
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="radar-nav">', unsafe_allow_html=True)
-nav = st.radio("Раздел", SECTIONS, horizontal=True, label_visibility="collapsed", key="nav_section")
-st.markdown('</div>', unsafe_allow_html=True)
+# Нативный переключатель: выглядит как вкладки, но выполняется только выбранный раздел.
+if hasattr(st, "segmented_control"):
+    nav = st.segmented_control("Раздел", SECTIONS, default=SECTIONS[0],
+                               label_visibility="collapsed", key="nav_section") or SECTIONS[0]
+else:
+    nav = st.radio("Раздел", SECTIONS, horizontal=True,
+                   label_visibility="collapsed", key="nav_section")
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 # ---------- ПОРТФЕЛЬ ----------
 def render_portfolio(filtered_df, kind):
@@ -1305,97 +1294,6 @@ if nav == "🥊 Конкуренты":
         conn.commit()
         conn.close()
 
-
-    with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
-        load_mode = st.radio("Способ загрузки",
-                             ["Одна группа (пачкой)", "Таблицей: ASIN + группа + страна"],
-                             horizontal=True, key="comp_load_mode")
-
-        if load_mode == "Таблицей: ASIN + группа + страна":
-            st.markdown("<div class='muted'>Вставь из гугл-шита или загрузи файл. Колонки распознаются "
-                        "по названию: <code>ASIN</code>, <code>группа</code>/<code>group</code>, "
-                        "<code>страна</code>/<code>market</code>, <code>бренд</code>. "
-                        "Можно вставлять прямо со вкладками — как копируется из таблицы.</div>",
-                        unsafe_allow_html=True)
-            t1, t2 = st.columns([3, 1])
-            pasted = t1.text_area(
-                "Вставь таблицу (первая строка — заголовки)", height=160, key="comp_paste_tbl",
-                placeholder=("ASIN\tГруппа\tСтрана\n"
-                             "B08DG72NWJ\tMen LS\tDE\n"
-                             "B09X77F1X1\tMen LS\tDE\n"
-                             "B0B28QM7RQ\tMen Pants\tUS"))
-            up = t2.file_uploader("…или файл", type=["csv", "xlsx"], key="comp_file")
-            def_mkt = t2.selectbox("Страна по умолчанию", options=list(MARKET_DOMAINS.keys()), index=3,
-                                   key="comp_def_mkt", help="Для строк, где страна не указана")
-
-            raw = None
-            try:
-                if up is not None:
-                    raw = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
-                elif pasted.strip():
-                    import io as _io
-                    txt = pasted.strip()
-                    sep = "\t" if "\t" in txt else (";" if ";" in txt.splitlines()[0] else ",")
-                    raw = pd.read_csv(_io.StringIO(txt), sep=sep, engine="python")
-            except Exception as e:
-                st.error(f"Не разобрал таблицу: {e}")
-
-            if raw is not None and not raw.empty:
-                parsed = parse_comp_table(raw)
-                if parsed.empty:
-                    st.error("Не нашёл колонку с ASIN")
-                else:
-                    known = set(comp_df["asin"].tolist())
-                    fresh = parsed[~parsed["asin"].isin(known)]
-                    st.markdown(f"Распознано **{len(parsed)}** строк · новых **{len(fresh)}** · "
-                                f"уже есть **{len(parsed) - len(fresh)}**")
-                    by_g = (parsed.groupby(["group", "market"]).size()
-                            .reset_index(name="ASIN").rename(columns={"group": "Группа", "market": "Страна"}))
-                    by_g["Страна"] = by_g["Страна"].replace("", def_mkt + " (по умолч.)")
-                    st.dataframe(by_g, use_container_width=True, hide_index=True,
-                                 height=min(260, 40 + 35 * len(by_g)))
-                    if st.button(f"➕ Загрузить {len(parsed)} позиций", type="primary", key="comp_tbl_add"):
-                        try:
-                            save_competitors_table(parsed, def_mkt)
-                            st.success(f"Загружено {len(parsed)} · новых {len(fresh)}")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Ошибка: {e}")
-
-        known_groups = sorted({g for g in comp_df["grp"].tolist() if g})
-        g1, g2, g3 = st.columns([2, 1, 1])
-        if load_mode != "Одна группа (пачкой)":
-            g1, g2, g3 = st.empty(), st.empty(), st.empty()
-        grp_mode = g1.radio("Группа", ["Выбрать", "Новая"], horizontal=True, key="comp_grp_mode",
-                            label_visibility="collapsed") if load_mode == "Одна группа (пачкой)" else None
-        if grp_mode == "Выбрать" and known_groups:
-            comp_group = g1.selectbox("Товарная группа", options=known_groups, key="comp_grp_sel")
-        else:
-            comp_group = g1.text_input("Товарная группа", key="comp_grp_new",
-                                       placeholder="Men LS, Men Pants, Men Sets, Women LS…")
-        comp_market = g2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=3,
-                                   key="comp_market", help="DE, US, CA… — к какому маркету относится пачка")
-        g3.markdown("<div class='muted' style='margin-top:28px'>Одна пачка = одна группа + одна страна. "
-                    "Страна из ссылки перебивает выбор.</div>", unsafe_allow_html=True)
-
-        comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
-                                 placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\nB07NGJLLH4")
-        if comp_text.strip():
-            existing = comp_df["asin"].tolist()
-            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(comp_text, existing, comp_market)
-            c1, c2, c3 = st.columns(3)
-            c1.markdown(f"🟢 **Новых: {len(new_c)}**")
-            c2.markdown(f"🟡 **Уже есть: {len(dup_c)}**")
-            c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
-                        + (f" · повторов: {len(bd)}" if bd else ""))
-            if st.button(f"➕ Добавить {len(new_c)} в «{comp_group or '—'}» → {comp_market}",
-                         type="primary", disabled=not (new_c and comp_group), key="comp_add"):
-                try:
-                    save_competitors(new_c, comp_group.strip(), comp_market)
-                    st.success(f"Добавлено {len(new_c)} конкурентов в группу «{comp_group}»")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка: {e}")
 
     if comp_df.empty:
         st.info("Конкуренты пока не добавлены — открой блок выше и загрузи первую группу")
@@ -1828,6 +1726,97 @@ if nav == "🥊 Конкуренты":
                 st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
                                    f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
 
+
+    with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
+        load_mode = st.radio("Способ загрузки",
+                             ["Одна группа (пачкой)", "Таблицей: ASIN + группа + страна"],
+                             horizontal=True, key="comp_load_mode")
+
+        if load_mode == "Таблицей: ASIN + группа + страна":
+            st.markdown("<div class='muted'>Вставь из гугл-шита или загрузи файл. Колонки распознаются "
+                        "по названию: <code>ASIN</code>, <code>группа</code>/<code>group</code>, "
+                        "<code>страна</code>/<code>market</code>, <code>бренд</code>. "
+                        "Можно вставлять прямо со вкладками — как копируется из таблицы.</div>",
+                        unsafe_allow_html=True)
+            t1, t2 = st.columns([3, 1])
+            pasted = t1.text_area(
+                "Вставь таблицу (первая строка — заголовки)", height=160, key="comp_paste_tbl",
+                placeholder=("ASIN\tГруппа\tСтрана\n"
+                             "B08DG72NWJ\tMen LS\tDE\n"
+                             "B09X77F1X1\tMen LS\tDE\n"
+                             "B0B28QM7RQ\tMen Pants\tUS"))
+            up = t2.file_uploader("…или файл", type=["csv", "xlsx"], key="comp_file")
+            def_mkt = t2.selectbox("Страна по умолчанию", options=list(MARKET_DOMAINS.keys()), index=3,
+                                   key="comp_def_mkt", help="Для строк, где страна не указана")
+
+            raw = None
+            try:
+                if up is not None:
+                    raw = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
+                elif pasted.strip():
+                    import io as _io
+                    txt = pasted.strip()
+                    sep = "\t" if "\t" in txt else (";" if ";" in txt.splitlines()[0] else ",")
+                    raw = pd.read_csv(_io.StringIO(txt), sep=sep, engine="python")
+            except Exception as e:
+                st.error(f"Не разобрал таблицу: {e}")
+
+            if raw is not None and not raw.empty:
+                parsed = parse_comp_table(raw)
+                if parsed.empty:
+                    st.error("Не нашёл колонку с ASIN")
+                else:
+                    known = set(comp_df["asin"].tolist())
+                    fresh = parsed[~parsed["asin"].isin(known)]
+                    st.markdown(f"Распознано **{len(parsed)}** строк · новых **{len(fresh)}** · "
+                                f"уже есть **{len(parsed) - len(fresh)}**")
+                    by_g = (parsed.groupby(["group", "market"]).size()
+                            .reset_index(name="ASIN").rename(columns={"group": "Группа", "market": "Страна"}))
+                    by_g["Страна"] = by_g["Страна"].replace("", def_mkt + " (по умолч.)")
+                    st.dataframe(by_g, use_container_width=True, hide_index=True,
+                                 height=min(260, 40 + 35 * len(by_g)))
+                    if st.button(f"➕ Загрузить {len(parsed)} позиций", type="primary", key="comp_tbl_add"):
+                        try:
+                            save_competitors_table(parsed, def_mkt)
+                            st.success(f"Загружено {len(parsed)} · новых {len(fresh)}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+
+        known_groups = sorted({g for g in comp_df["grp"].tolist() if g})
+        g1, g2, g3 = st.columns([2, 1, 1])
+        if load_mode != "Одна группа (пачкой)":
+            g1, g2, g3 = st.empty(), st.empty(), st.empty()
+        grp_mode = g1.radio("Группа", ["Выбрать", "Новая"], horizontal=True, key="comp_grp_mode",
+                            label_visibility="collapsed") if load_mode == "Одна группа (пачкой)" else None
+        if grp_mode == "Выбрать" and known_groups:
+            comp_group = g1.selectbox("Товарная группа", options=known_groups, key="comp_grp_sel")
+        else:
+            comp_group = g1.text_input("Товарная группа", key="comp_grp_new",
+                                       placeholder="Men LS, Men Pants, Men Sets, Women LS…")
+        comp_market = g2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=3,
+                                   key="comp_market", help="DE, US, CA… — к какому маркету относится пачка")
+        g3.markdown("<div class='muted' style='margin-top:28px'>Одна пачка = одна группа + одна страна. "
+                    "Страна из ссылки перебивает выбор.</div>", unsafe_allow_html=True)
+
+        comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
+                                 placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\nB07NGJLLH4")
+        if comp_text.strip():
+            existing = comp_df["asin"].tolist()
+            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(comp_text, existing, comp_market)
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"🟢 **Новых: {len(new_c)}**")
+            c2.markdown(f"🟡 **Уже есть: {len(dup_c)}**")
+            c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
+                        + (f" · повторов: {len(bd)}" if bd else ""))
+            if st.button(f"➕ Добавить {len(new_c)} в «{comp_group or '—'}» → {comp_market}",
+                         type="primary", disabled=not (new_c and comp_group), key="comp_add"):
+                try:
+                    save_competitors(new_c, comp_group.strip(), comp_market)
+                    st.success(f"Добавлено {len(new_c)} конкурентов в группу «{comp_group}»")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
 
         with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=False):
             ob1, ob2 = st.columns([3, 1])
@@ -2320,10 +2309,10 @@ def render_dynamics(filtered_df, hist_df, kind):
             pass
 
 
-if nav == "📅 Динамика (Чайлд)":
+if nav == "📅 Динамика по дням (Чайлд)":
     render_dynamics(filtered_df, hist_df, "child")
 
-if nav == "📅 Динамика (Парент)":
+if nav == "📅 Динамика по дням (Парент)":
     render_dynamics(filtered_df, hist_df, "parent")
 
 # ---------- АНАЛИТИКА ----------
