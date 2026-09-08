@@ -951,11 +951,23 @@ SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Пар
 
 st.markdown("""
 <style>
-div[role="radiogroup"].nav-hack { gap: 2px; }
+/* радио-навигация выглядит как вкладки */
+.radar-nav div[role="radiogroup"] { gap:6px !important; flex-wrap:wrap; }
+.radar-nav label {
+    background:#fff; border:1px solid #e5e5ea; border-radius:999px;
+    padding:5px 14px; margin:0 2px 6px 0; cursor:pointer; transition:all .12s ease;
+}
+.radar-nav label:hover { border-color:#c7c7cc; background:#fafafa; }
+.radar-nav label > div:first-child { display:none !important; }
+.radar-nav label:has(input:checked) { background:#1d1d1f !important; border-color:#1d1d1f !important; }
+.radar-nav label:has(input:checked) p { color:#fff !important; font-weight:600; }
+</style>
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown('<div class="radar-nav">', unsafe_allow_html=True)
 nav = st.radio("Раздел", SECTIONS, horizontal=True, label_visibility="collapsed", key="nav_section")
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- ПОРТФЕЛЬ ----------
 def render_portfolio(filtered_df, kind):
@@ -1828,9 +1840,14 @@ if nav == "🥊 Конкуренты":
             ob2.markdown("<div class='muted' style='margin-top:28px'>Бренд подтягивается из API "
                          "при каждом прогоне.</div>", unsafe_allow_html=True)
 
-            rep_text, rep_df = build_group_report(sel_mkt, use_groups, view)
+            rk = f"comp_rep_{sel_mkt}_{'|'.join(use_groups)}"
+            if st.button("📊 Посчитать сводку", key=f"btn_{rk}", type="primary"):
+                st.session_state[rk] = build_group_report(sel_mkt, use_groups, view)
+            rep_text, rep_df = st.session_state.get(rk, (None, pd.DataFrame()))
             if rep_text is None:
-                st.info("Нет свежих замеров — запусти прогон")
+                st.caption("Нажми «Посчитать сводку» — она сравнит наши позиции с лучшими "
+                           "конкурентами по каждой группе. Считается по запросу, чтобы не "
+                           "замедлять страницу.")
             else:
                 if not rep_df.empty:
                     st.dataframe(rep_df, use_container_width=True, hide_index=True,
