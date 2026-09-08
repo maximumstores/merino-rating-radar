@@ -889,6 +889,10 @@ def enrich_bsr_hist(asin: str, market: str, need_bsr=True, need_hist=True,
     clean = extract_asin(asin)
     if not clean:
         return out
+    need = [x for x, flag in (("BSR", need_bsr), ("гистограмма", need_hist)) if flag]
+    if not need:
+        return out
+    log(f"  [{market}] добираю: {', '.join(need)}")
 
     domain = MARKET_DOMAIN_BY_CODE.get(market, "amazon.com.be")
     variants = [
@@ -917,8 +921,13 @@ def enrich_bsr_hist(asin: str, market: str, need_bsr=True, need_hist=True,
         got_bsr = bool(out["bsr"]) or not need_bsr
         got_hist = bool(out["hist"]) or not need_hist
         if got_bsr and got_hist:
+            what = []
+            if need_bsr:
+                what.append(f"BSR {out['bsr']}")
+            if need_hist:
+                what.append("гистограмма")
             log(f"  [{market}] добор ок с попытки {attempt}"
-                f"{': BSR ' + str(out['bsr']) if out['bsr'] else ''}")
+                f"{' — ' + ', '.join(what) if what else ''}")
             return out
         log(f"  [{market}] добор попытка {attempt}/{tries}: "
             f"BSR {'есть' if out['bsr'] else 'нет'}, гистограмма {'есть' if out['hist'] else 'нет'}")
@@ -940,7 +949,8 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
             continue
         parsed = parse_product_json(obj, clean, mkt)
         if parsed["rating"] is not None:
-            log(f"  [{mkt}] API OK: rating={parsed['rating']} count={parsed['count']}")
+            log(f"  [{mkt}] API OK: rating={parsed['rating']} count={parsed['count']} "
+                f"bsr={parsed.get('bsr') or '—'} hist={'есть' if parsed.get('hist') else 'нет'}")
             # structured API не отдаёт BSR и распределение звёзд — добираем со страницы
             if not parsed.get("bsr") or not parsed.get("hist"):
                 extra = enrich_bsr_hist(clean, mkt,
