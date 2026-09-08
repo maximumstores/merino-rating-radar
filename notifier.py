@@ -26,34 +26,6 @@ def _cfg(name, default=""):
     val = os.environ.get(name)
     if val:
         return val
-    try:#!/usr/bin/env python3
-"""Rating Radar — Telegram-уведомления.
-
-Две части:
-  * подписчики (таблица telegram_subscribers) — кто получает алерты и с какими фильтрами;
-  * расчёт алертов по последнему прогону + отправка.
-
-Токен берётся из переменной окружения TELEGRAM_BOT_TOKEN (Streamlit Secrets / .env).
-Никогда не хардкодить токен в файле — репозиторий приватный, но токен утекает в историю git.
-"""
-
-import json
-import os
-from datetime import datetime, timezone
-
-import pandas as pd
-import psycopg2
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
-
-
-def _cfg(name, default=""):
-    """env → .env → st.secrets (Streamlit Cloud кладёт секреты только туда)."""
-    val = os.environ.get(name)
-    if val:
-        return val
     try:
         import streamlit as st  # noqa: WPS433 — опционально, вне Streamlit не нужен
         val = st.secrets.get(name)
@@ -65,8 +37,8 @@ def _cfg(name, default=""):
     return default
 
 
-BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN")            # основной: рейтинги, алерты
-COMP_BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN_COMP")  # второй: отчёты по конкурентам
+BOT_TOKEN = (_cfg("TELEGRAM_BOT_TOKEN") or "").strip()            # основной: рейтинги, алерты
+COMP_BOT_TOKEN = (_cfg("TELEGRAM_BOT_TOKEN_COMP") or "").strip()  # второй: отчёты по конкурентам
 DATABASE_URL = _cfg("DATABASE_URL")
 
 CHANNELS = {
@@ -76,7 +48,8 @@ CHANNELS = {
 
 
 def channel_token(channel="radar"):
-    return CHANNELS.get(channel, CHANNELS["radar"])["token"]
+    tok = CHANNELS.get(channel, CHANNELS["radar"])["token"] or ""
+    return tok.strip().strip('"').strip("'")
 API = "https://api.telegram.org/bot{token}/{method}"
 
 # пороги алертов (можно переопределить через env)
@@ -420,16 +393,21 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
 _USERNAME_CACHE = {}
 
 
-def bot_username(channel="radar"):
-    """Юзернейм бота через getMe, с кэшем — чтобы не дёргать API на каждый рендер."""
-    if channel in _USERNAME_CACHE:
-        return _USERNAME_CACHE[channel]
-    if not channel_token(channel):
-        return None
+def bot_username(channel="radar", with_error=False):
+    """Юзернейм бота через getMe. Кэшируем только успех — иначе разовый сбой залипал бы."""
+    if _USERNAME_CACHE.get(channel):
+        return (_USERNAME_CACHE[channel], None) if with_error else _USERNAME_CACHE[channel]
+    token = channel_token(channel)
+    if not token:
+        err = f"токен канала «{channel}» не задан"
+        return (None, err) if with_error else None
     me = tg_call("getMe", channel=channel)
     name = (me.get("result") or {}).get("username") if me.get("ok") else None
-    _USERNAME_CACHE[channel] = name
-    return name
+    if name:
+        _USERNAME_CACHE[channel] = name
+        return (name, None) if with_error else name
+    err = me.get("description") or str(me)[:200]
+    return (None, err) if with_error else None
 
 
 def bot_link(channel="radar"):
