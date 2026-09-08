@@ -1303,7 +1303,7 @@ if nav == "🥊 Конкуренты":
         mkts = sorted({m for m in comp_df["market"].tolist() if m})
         cnt_by_mkt = comp_df.groupby("market")["asin"].count().to_dict()
 
-        f1, f2, f3, f4 = st.columns([1.3, 2, 1.1, 1.3])
+        f1, f2, f3, f4, f5 = st.columns([1.2, 1.8, 0.9, 1.2, 1.4])
         sel_mkt = f1.selectbox("Страна", options=mkts, key="comp_f_mkt",
                                format_func=lambda m: f"{m} · {cnt_by_mkt.get(m, 0)} ASIN")
         in_mkt = comp_df[comp_df["market"] == sel_mkt]
@@ -1315,30 +1315,14 @@ if nav == "🥊 Конкуренты":
                                  format_func=lambda d: f"{d} дн.", key="comp_f_days")
         metrics = f4.multiselect("Метрики", ["BSR", "Reviews", "Rating", "Price"],
                                  default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics")
-        color_mode = st.radio(
-            "Раскраска", ["Изменение к прошлому замеру", "Место в группе"],
-            horizontal=True, key="comp_color_mode",
+        color_mode = f5.selectbox(
+            "Раскраска", ["Изменение к прошлому замеру", "Место в группе"], key="comp_color_mode",
             help="«Изменение» — стало лучше или хуже со вчера. "
-                 "«Место в группе» — как позиция выглядит на фоне остальных в этой же группе в тот же день.")
+                 "«Место в группе» — как позиция выглядит на фоне остальных в этой же группе.")
 
         use_groups = sel_groups or groups_all
         view = in_mkt[in_mkt["grp"].isin(use_groups)]
         asins = view["asin"].tolist()
-
-        # плашки по группам этой страны
-        chips = " ".join(
-            f"<span style='display:inline-block;background:#fff;border:1px solid #e5e5ea;border-radius:999px;"
-            f"padding:3px 12px;margin:2px 4px 2px 0;font-size:12.5px'>{g} · "
-            f"<b>{len(in_mkt[in_mkt['grp'] == g])}</b></span>" for g in groups_all)
-        st.markdown(f"<div style='margin:6px 0 10px'>{chips}</div>", unsafe_allow_html=True)
-
-        r1, r2, r3 = st.columns([3, 1, 1])
-        r1.markdown(f"**{sel_mkt}** · групп: {len(use_groups)} · ASIN: {len(asins)}")
-        if r2.button(f"▶ Прогнать {sel_mkt} ({len(asins)})", key="comp_run_mkt", type="primary",
-                     use_container_width=True, disabled=not asins):
-            run_collection(asins, f"Конкуренты ({sel_mkt})")
-        if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
-            run_collection(comp_df["asin"].tolist(), "Конкуренты")
 
         # ---- сводка «мы против лучшего конкурента» ----
         def build_group_report(country, groups, comp_view):
@@ -1727,6 +1711,21 @@ if nav == "🥊 Конкуренты":
                 st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
                                    f"competitors_{sel_mkt}.csv", "text/csv", key="comp_csv")
 
+
+        st.markdown("---")
+        chips = " ".join(
+            f"<span style='display:inline-block;background:#fff;border:1px solid #e5e5ea;border-radius:999px;"
+            f"padding:3px 12px;margin:2px 4px 2px 0;font-size:12.5px'>{g} · "
+            f"<b>{len(in_mkt[in_mkt['grp'] == g])}</b></span>" for g in groups_all)
+        st.markdown(f"<div style='margin:2px 0 10px'>{chips}</div>", unsafe_allow_html=True)
+
+        r1, r2, r3 = st.columns([3, 1, 1])
+        r1.markdown(f"**{sel_mkt}** · групп: {len(use_groups)} · ASIN: {len(asins)}")
+        if r2.button(f"▶ Прогнать {sel_mkt} ({len(asins)})", key="comp_run_mkt", type="primary",
+                     use_container_width=True, disabled=not asins):
+            run_collection(asins, f"Конкуренты ({sel_mkt})")
+        if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
+            run_collection(comp_df["asin"].tolist(), "Конкуренты")
 
     with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
         load_mode = st.radio("Способ загрузки",
