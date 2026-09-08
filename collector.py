@@ -774,7 +774,7 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     out["count"] = _num(obj.get("total_reviews") or obj.get("ratings_total") or obj.get("reviews_count"))
     out["image_url"] = obj.get("main_image") or (obj.get("images") or [None])[0]
 
-    # BSR: в structured-ответе может лежать по-разному
+    # BSR: сначала явные поля, потом глубокий поиск по product_information
     bsr = obj.get("bestsellers_rank") or obj.get("best_sellers_rank") or obj.get("bsr")
     if isinstance(bsr, list) and bsr:
         first = bsr[0]
@@ -782,10 +782,10 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
             out["bsr"] = f"#{_num(first.get('rank'))} {str(first.get('category', ''))[:30]}"
         else:
             out["bsr"] = str(first)[:40]
-    elif bsr:
-        out["bsr"] = str(bsr)[:40]
-    elif obj.get("product_category"):
-        out["bsr"] = None
+    elif isinstance(bsr, str) and bsr.strip():
+        out["bsr"] = bsr[:40]
+    if not out["bsr"]:
+        out["bsr"] = extract_bsr_json(obj, SD_MARKET.get(market, ("com", "us"))[1])
 
     # распределение звёзд, если API его отдаёт
     hist = obj.get("rating_breakdown") or obj.get("histogram") or obj.get("ratings_breakdown")
@@ -958,3 +958,120 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
         return check_asin(raw_input, log=log)
     return {"asin": clean, "source": "none", "rating": None, "count": None,
             "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
+
+
+# ================================================================= BSR из JSON структурированного API
+# BSR лежит в product_information под локализованным ключом. Ключи и логика
+# выбора ранга проверены на боевом сборе по всем маркетам.
+BSR_JSON_KEYS = [
+    "Best Sellers Rank", "Best-sellers rank", "Bestsellers Rank", "Sales Rank",
+    "Amazon Bestseller-Rang", "Bestseller-Rang", "Rang",
+    "Classement des meilleures ventes",
+    "Clasificación en los más vendidos", "Clasificacin en los ms vendidos de Amazon",
+    "Posizione nella classifica Bestseller",
+    "Plaats in bestsellerlijst", "Bestsellerlijst",
+]
+
+# «#123 in», «Nr. 123 in», «n° 123 en», «nº 123 en», «n. 123 in»
+BSR_VALUE_RE = re.compile(
+    r"(?:#|Nr\.?\s*|n[°º]\s*|N[°º]\s*|n\.\s*)\s*([\d.,\s]{1,15})\s*(?:in|en|dans|im|nella|su)\s+",
+    re.I)
+
+MAIN_CATEGORIES = {
+    "us": ["clothing", "shoes", "jewelry", "electronics", "books", "sports"],
+    "gb": ["clothing", "fashion", "electronics", "books", "sports"],
+    "uk": ["clothing", "fashion", "electronics", "books", "sports"],
+    "de": ["mode", "kleidung", "bekleidung", "elektronik", "bücher", "fashion", "sport"],
+    "fr": ["mode", "vêtements", "vetements", "électronique", "livres", "fashion", "sport"],
+    "it": ["moda", "abbigliamento", "elettronica", "libri", "fashion", "sport"],
+    "es": ["moda", "ropa", "electrónicos", "libros", "fashion", "deporte"],
+    "nl": ["kleding", "mode", "elektronica", "boeken", "sport"],
+    "be": ["kleding", "mode", "clothing", "vêtements", "fashion"],
+}
+
+
+def _deep_search(obj, keys):
+    """Ищет значение по названию ключа на любой глубине."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if any(key.lower() in str(k).lower() for key in keys):
+                if isinstance(v, str) and v.strip():
+                    return v
+                if isinstance(v, list) and v:
+                    joined = " ".join(str(x) for x in v if x)
+                    if joined.strip():
+                        return joined
+            found = _deep_search(v, keys)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _deep_search(item, keys)
+            if found:
+                return found
+    return None
+
+
+def _value_search(obj):
+    """Ищет строку с BSR-паттерном в любом значении — на случай сдвига ключей."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str) and BSR_VALUE_RE.search(v):
+                return v
+            found = _value_search(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _value_search(item)
+            if found:
+                return found
+    return None
+
+
+def _clean_rank(num: str):
+    digits = re.sub(r"[^\d]", "", num)
+    return int(digits) if digits else None
+
+
+def extract_bsr_json(product_json: dict, country_code: str = "be"):
+    """BSR из ответа structured API. Возвращает '#1234 Category' или None."""
+    if not isinstance(product_json, dict):
+        return None
+
+    raw = _deep_search(product_json, BSR_JSON_KEYS)
+    if not raw:
+        raw = _value_search(product_json.get("product_information", {}))
+    if not raw:
+        raw = _value_search(product_json)
+    if not raw:
+        for field in ("product_category", "category_id", "product_details"):
+            val = product_json.get(field)
+            if isinstance(val, str) and BSR_VALUE_RE.search(val):
+                raw = val
+                break
+    if not raw or not isinstance(raw, str):
+        return None
+
+    mains = MAIN_CATEGORIES.get(str(country_code).lower(), ["clothing", "fashion", "electronics"])
+    candidates = []      # (ранг, приоритет, категория)
+
+    for m in BSR_VALUE_RE.finditer(raw):
+        rank = _clean_rank(m.group(1))
+        if rank is None:
+            continue
+        # «Top 100» — это не ранг
+        if "top" in raw[max(0, m.start() - 15):m.start()].lower():
+            continue
+        tail = raw[m.end(): m.end() + 120]
+        category = re.split(r"[(\n\r#]|\s{2,}", tail)[0].strip(" ,.;:")[:35]
+        is_main = any(c in tail.lower() for c in mains)
+        candidates.append((rank, 1 if is_main else 2, category))
+
+    if not candidates:
+        return None
+
+    # сначала основная категория; внутри неё берём больший ранг — это ранг
+    # в общей категории, а не в узкой подкатегории
+    rank, _prio, category = sorted(candidates, key=lambda x: (x[1], -x[0]))[0]
+    return f"#{rank:,}".replace(",", " ") + (f" {category}" if category else "")
