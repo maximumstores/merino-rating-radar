@@ -1150,6 +1150,19 @@ with tab_comp:
                 "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
                 "как в гугл-таблице.</div>", unsafe_allow_html=True)
 
+    comp_link = notifier.bot_link("comp") if NOTIFIER_OK else None
+    comp_user = notifier.bot_username("comp") if NOTIFIER_OK else None
+    if comp_link:
+        same = (not os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
+        st.markdown(
+            f"<div style='margin:8px 0 4px'>"
+            f"<a href='{comp_link}' target='_blank' style='display:inline-block;background:#229ED9;"
+            f"color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;"
+            f"text-decoration:none'>✈️ Отчёты по конкурентам — @{comp_user}</a>"
+            f"<span class='muted' style='margin-left:10px'>подписка: /start"
+            + (" · отдельный бот не задан, используется основной" if same else "") +
+            "</span></div>", unsafe_allow_html=True)
+
     comp_df = get_competitors()
 
     def parse_comp_table(raw_df):
@@ -1437,6 +1450,11 @@ with tab_comp:
                             st.success(f"Отправлено {ok_n} из {total}")
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
+                if comp_link:
+                    sc2.markdown(
+                        f"<div style='margin-top:6px'><a href='{comp_link}' target='_blank' "
+                        f"style='color:#229ED9;font-weight:600;text-decoration:none'>"
+                        f"@{comp_user} — подписаться на отчёты →</a></div>", unsafe_allow_html=True)
                 sc2.download_button("⬇ Скачать отчёт", rep_text.encode("utf-8"),
                                     f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
 
