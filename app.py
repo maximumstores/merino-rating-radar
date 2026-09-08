@@ -1588,18 +1588,39 @@ with tab_comp:
             st.caption(f"{sel_mkt} · {len(use_groups)} групп · {len(asins)} ASIN × {len(days_c)} дней"
                        + (f" · без данных: {len(empty_asins)}" if empty_asins else ""))
 
-            uc1, uc2, uc3 = st.columns([3, 1, 1])
-            pick_comp = uc1.multiselect(
-                "Обновить ASIN", options=asins, default=empty_asins[:20],
-                key=f"comp_upd_{sel_mkt}", label_visibility="collapsed",
-                placeholder="выбери ASIN для пересбора (по умолчанию — те, где нет данных)")
-            if uc2.button(f"↻ Обновить ({len(pick_comp)})", disabled=not pick_comp, type="primary",
-                          key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
-                run_collection(pick_comp, "Конкуренты (точечно)")
-            if empty_asins and uc3.button(f"↻ Пустые ({len(empty_asins)})", key=f"comp_upd_empty_{sel_mkt}",
-                                          use_container_width=True,
-                                          help="Пересобрать все позиции без данных на последнем замере"):
-                run_collection(empty_asins, "Конкуренты (пустые)")
+            with st.expander("↻ Выбрать ASIN для пересбора"
+                             + (f" · без данных: {len(empty_asins)}" if empty_asins else ""),
+                             expanded=bool(empty_asins)):
+                pick_tbl = pd.DataFrame({
+                    "✓": [a in empty_asins for a in asins],
+                    "ASIN": asins,
+                    "Бренд": [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in asins],
+                    "Группа": [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in asins],
+                    "Данные": ["нет" if a in empty_asins else "есть" for a in asins],
+                })
+                edited_pick = st.data_editor(
+                    pick_tbl, use_container_width=True, hide_index=True,
+                    height=min(360, 40 + 35 * len(pick_tbl)),
+                    key=f"comp_pick_{sel_mkt}_{len(empty_asins)}",
+                    column_config={
+                        "✓": st.column_config.CheckboxColumn("✓", width="small"),
+                        "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
+                        "Бренд": st.column_config.TextColumn("Бренд", width="medium", disabled=True),
+                        "Группа": st.column_config.TextColumn("Группа", width="small", disabled=True),
+                        "Данные": st.column_config.TextColumn("Данные", width="small", disabled=True),
+                    })
+                pick_comp = edited_pick.loc[edited_pick["✓"], "ASIN"].tolist()
+
+                b1, b2, b3 = st.columns([1.2, 1.2, 3])
+                if b1.button(f"↻ Обновить отмеченные ({len(pick_comp)})", disabled=not pick_comp,
+                             type="primary", key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
+                    run_collection(pick_comp, "Конкуренты (точечно)")
+                if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
+                             use_container_width=True):
+                    run_collection(asins, f"Конкуренты ({sel_mkt})")
+                b3.markdown("<div class='muted' style='margin-top:8px'>Галочки уже стоят там, где нет "
+                            "данных на последнем замере. Можно отметить любые другие.</div>",
+                            unsafe_allow_html=True)
 
             st.markdown(html_c, unsafe_allow_html=True)
             st.markdown("<div class='muted' style='margin-top:6px'>"
