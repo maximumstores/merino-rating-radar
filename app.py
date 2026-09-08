@@ -17,8 +17,8 @@ from sklearn.linear_model import LinearRegression
 # Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
 # ДО импорта collector/notifier — они читают переменные на уровне модуля.
 load_dotenv()
-for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY",
-           "GITHUB_TOKEN", "GITHUB_REPO"):
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN_COMP",
+           "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GITHUB_REPO"):
     if not os.environ.get(_k):
         try:
             _v = st.secrets.get(_k)
@@ -428,6 +428,19 @@ def set_setting(key, value):
         pass
 
 
+OWN_BRANDS_DEFAULT = "Merino.tech, Merino.tech Store, Woolcano, Merino Protect"
+
+
+def own_brands():
+    raw = get_setting("own_brands", OWN_BRANDS_DEFAULT)
+    return [b.strip().lower() for b in str(raw).split(",") if b.strip()]
+
+
+def is_own_brand(brand):
+    b = str(brand or "").lower()
+    return any(ob and ob in b for ob in own_brands())
+
+
 def enrich_dictionary_from_api(res: dict):
     """Пишет parent / категорию / страну из structured API в справочник.
     Значения из загруженного spr не затираются — они приоритетнее."""
@@ -452,6 +465,16 @@ def enrich_dictionary_from_api(res: dict):
                 updated_at  = NOW();
             """,
             (asin, res.get("parent_asin") or "", category, subcat, res.get("source") or ""))
+        # бренд и название — если API их отдал
+        if res.get("brand") or res.get("title"):
+            cur.execute(
+                """
+                UPDATE asin_dictionary
+                SET brand = COALESCE(NULLIF(%s, ''), brand),
+                    title = COALESCE(NULLIF(%s, ''), title),
+                    updated_at = NOW()
+                WHERE asin = %s;
+                """, (res.get("brand", ""), res.get("title", ""), asin))
     conn.commit()
     conn.close()
 
@@ -573,7 +596,7 @@ def run_collection(items, label="Прогон"):
             save_to_db(res)   # пишем даже неудачный замер — иначе дыра в истории
         except Exception as e:
             _log(f"Не сохранился {item}: {e}")
-        if res.get("parent_asin") or res.get("category_path"):
+        if res.get("parent_asin") or res.get("category_path") or res.get("brand"):
             try:
                 enrich_dictionary_from_api(res)   # API отдал parent/категорию — в справочник
             except Exception:
@@ -652,7 +675,7 @@ KIND_LABEL = {"child": "Чайлд", "parent": "Парент", "competitor": "К
 # разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера
 if NOTIFIER_OK and notifier.BOT_TOKEN:
     try:
-        notifier.process_updates()
+        notifier.process_all_channels()
     except Exception:
         pass
 
@@ -1318,6 +1341,105 @@ with tab_comp:
         if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
             run_collection(comp_df["asin"].tolist(), "Конкуренты")
 
+        # ---- сводка «мы против лучшего конкурента» ----
+        def build_group_report(country, groups, comp_view):
+            last = get_competitor_history(comp_view["asin"].tolist(), 3)
+            if last.empty:
+                return None, pd.DataFrame()
+            latest = last.sort_values("created_at").groupby("asin").last().reset_index()
+            m = comp_view.set_index("asin")
+            latest["brand"] = [str(m.loc[a, "brand"]) if a in m.index else "" for a in latest["asin"]]
+            latest["grp"] = [str(m.loc[a, "grp"]) if a in m.index else "" for a in latest["asin"]]
+            latest["own"] = latest["brand"].apply(is_own_brand)
+
+            lines = [f"📊 <b>Мониторинг конкурентов — {country}</b>",
+                     f"<i>{datetime.datetime.now(ZoneInfo(selected_tz)):%d.%m.%Y %H:%M}</i>", ""]
+            rows = []
+            for g in groups:
+                part = latest[latest["grp"] == g]
+                if part.empty:
+                    continue
+                ours, comp = part[part["own"]], part[~part["own"]]
+                lines.append(f"📌 <b>{g}</b>")
+                lines.append(f"  • Товары: {len(part)} (наших: {len(ours)}, конкурентов: {len(comp)})")
+                row = {"Группа": g, "Всего": len(part), "Наших": len(ours)}
+
+                def cmp_line(label, col, better="max", fmt="{:.1f}"):
+                    o = ours[col].dropna()
+                    c = comp[col].dropna()
+                    if o.empty and c.empty:
+                        return
+                    ov = (o.max() if better == "max" else o.min()) if not o.empty else None
+                    if c.empty:
+                        cv, cb = None, ""
+                    else:
+                        idx = c.idxmax() if better == "max" else c.idxmin()
+                        cv, cb = c.loc[idx], comp.loc[idx, "brand"]
+                    if ov is None:
+                        lines.append(f"  • {label}: у нас нет данных / лучший {fmt.format(cv)} ({cb}) 🔴")
+                        row[label] = f"— / {fmt.format(cv)}"
+                        return
+                    if cv is None:
+                        lines.append(f"  • {label}: наш {fmt.format(ov)} · конкурентов нет 🟢")
+                        row[label] = f"{fmt.format(ov)} / —"
+                        return
+                    win = ov >= cv if better == "max" else ov <= cv
+                    mark = "🟢" if win else "🔴"
+                    tail = "" if win else f" ({cb})"
+                    lines.append(f"  • {label}: наш {fmt.format(ov)} / лучший {fmt.format(cv)}{tail} {mark}")
+                    row[label] = f"{fmt.format(ov)} / {fmt.format(cv)} {mark}"
+
+                cmp_line("Рейтинг", "rating", "max", "{:.1f}")
+                cmp_line("BSR", "bsr_num", "min", "{:,.0f}")
+                cmp_line("Отзывы", "review_count", "max", "{:,.0f}")
+                # цена: сравниваем со средней у конкурентов
+                po, pc = ours["price_num"].dropna(), comp["price_num"].dropna()
+                if not po.empty and not pc.empty:
+                    avg = pc.mean()
+                    mark = "🟢" if po.mean() <= avg else "🔴"
+                    lines.append(f"  • Цена: наша {po.mean():.2f} / средняя у конкурентов {avg:.2f} {mark}")
+                    row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {mark}"
+                lines.append("")
+                rows.append(row)
+            return "\n".join(lines), pd.DataFrame(rows)
+
+        with st.expander("📊 Сводка «мы против лучшего конкурента»", expanded=True):
+            ob1, ob2 = st.columns([3, 1])
+            cur_own = get_setting("own_brands", OWN_BRANDS_DEFAULT)
+            new_own = ob1.text_input("Наши бренды (через запятую)", value=cur_own, key="own_brands_inp",
+                                     help="По ним ASIN считается нашим, остальные — конкуренты")
+            if new_own != cur_own:
+                set_setting("own_brands", new_own)
+                st.rerun()
+            ob2.markdown("<div class='muted' style='margin-top:28px'>Бренд подтягивается из API "
+                         "при каждом прогоне.</div>", unsafe_allow_html=True)
+
+            rep_text, rep_df = build_group_report(sel_mkt, use_groups, view)
+            if rep_text is None:
+                st.info("Нет свежих замеров — запусти прогон")
+            else:
+                if not rep_df.empty:
+                    st.dataframe(rep_df, use_container_width=True, hide_index=True,
+                                 height=min(420, 40 + 35 * len(rep_df)))
+                with st.expander("Текст отчёта", expanded=False):
+                    st.code(rep_text.replace("<b>", "").replace("</b>", "")
+                            .replace("<i>", "").replace("</i>", ""), language=None)
+                sc1, sc2 = st.columns([1, 3])
+                comp_token = notifier.channel_token("comp") if NOTIFIER_OK else None
+                if comp_token and sc1.button("📤 Отправить в Telegram", key="comp_send_tg", type="primary"):
+                    try:
+                        ok_n, total = notifier.broadcast(
+                            rep_text + f"\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>",
+                            channel="comp")
+                        if total == 0:
+                            st.warning("В канале конкурентов пока нет подписчиков — открой бота и отправь /start")
+                        else:
+                            st.success(f"Отправлено {ok_n} из {total}")
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                sc2.download_button("⬇ Скачать отчёт", rep_text.encode("utf-8"),
+                                    f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
+
         hist = get_competitor_history(asins, comp_days)
         if hist.empty:
             st.warning("По этой стране ещё нет замеров — запусти прогон")
@@ -1351,8 +1473,12 @@ with tab_comp:
                     return rating_color(v)
                 if prev is None or pd.isna(prev) or v == prev:
                     return ""
-                if metric == "BSR":        # меньше — лучше
-                    return "background:#c8f7c5" if v < prev else "background:#ffcdd2"
+                if metric == "BSR":        # меньше — лучше; насыщенность по силе изменения
+                    delta = (prev - v) / prev if prev else 0
+                    strong = abs(delta) > 0.15
+                    if v < prev:
+                        return "background:#57d957" if strong else "background:#c8f7c5"
+                    return "background:#e8534f;color:#fff" if strong else "background:#ffcdd2"
                 if metric == "Reviews":
                     return "background:#c8f7c5" if v > prev else "background:#ffe0b2"
                 if metric == "Price":      # конкурент снизил цену — тревога
@@ -2858,6 +2984,37 @@ with tab_ops:
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
 
+            st.markdown("---")
+            st.markdown("**Второй бот — отчёты по конкурентам**")
+            comp_tok = notifier.channel_token("comp")
+            if not os.environ.get("TELEGRAM_BOT_TOKEN_COMP"):
+                st.caption("Отдельный бот не настроен — отчёты по конкурентам уйдут в этот же канал. "
+                           "Чтобы развести: создай бота у @BotFather и добавь его токен в Secrets "
+                           "как TELEGRAM_BOT_TOKEN_COMP.")
+            else:
+                try:
+                    csubs = notifier.get_subscribers(active_only=False, channel="comp")
+                except Exception:
+                    csubs = pd.DataFrame()
+                cc1, cc2 = st.columns([1, 3])
+                cc1.metric("Подписчиков", int(csubs["active"].sum()) if not csubs.empty else 0,
+                           delta=f"всего {len(csubs)}", delta_color="off")
+                if cc2.button("🔄 Проверить команды второго бота", key="tg_poll_comp"):
+                    try:
+                        n = notifier.process_updates(channel="comp")
+                        st.success(f"Обработано команд: {n}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                if not csubs.empty:
+                    st.dataframe(csubs[["username", "first_name", "active", "created_at"]]
+                                 .rename(columns={"username": "Юзернейм", "first_name": "Имя",
+                                                  "active": "Активен", "created_at": "Подписан"}),
+                                 use_container_width=True, hide_index=True, height=180)
+                else:
+                    st.caption("Подписчиков нет — открой бота и отправь /start")
+
+            st.markdown("---")
             if not subs.empty:
                 show = subs.copy()
                 for col, fmt_ in (("created_at", "%d.%m.%Y"), ("last_sent_at", "%d.%m %H:%M")):
