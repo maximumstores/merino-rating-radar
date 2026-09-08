@@ -1536,8 +1536,10 @@ with tab_comp:
                         title = str(m.get("title", "") or "")[:70]
                         dom = MARKET_DOMAINS.get(sel_mkt, "amazon.com.be")
                         no_data = all(pd.isna(table.loc[a, d]) for d in days_c)
-                        tds = [f"<td class='c-brand{' nodata' if no_data else ''}'>{brand or '—'}</td>",
-                               f"<td class='c-asin'><a href='https://www.{dom}/dp/{a}' target='_blank'>{a}</a></td>",
+                        flag = " ⚠️" if no_data else ""
+                        tds = [f"<td class='c-asin{' nodata' if no_data else ''}'>"
+                               f"<a href='https://www.{dom}/dp/{a}' target='_blank'>{a}</a>{flag}</td>",
+                               f"<td class='c-brand'>{brand or '—'}</td>",
                                f"<td class='c-cty'>{sel_mkt}</td>",
                                f"<td class='c-title' title='{title}'>{title}</td>"]
                         prev = None
@@ -1548,7 +1550,7 @@ with tab_comp:
                                 prev = v
                         rows_html.append(f"<tr>{''.join(tds)}</tr>")
 
-            th = "".join(f"<th>{c}</th>" for c in ["Бренд", "ASIN", "Стр.", "Название"] + labels)
+            th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Бренд", "Стр.", "Название"] + labels)
             html_c = f"""
 <style>
 .cmp-wrap {{ max-height:800px; overflow:auto; border:1px solid #e5e5ea; border-radius:12px; background:#fff; }}
@@ -1558,14 +1560,15 @@ with tab_comp:
 .cmp th:nth-child(-n+4) {{ text-align:left; }}
 .cmp td {{ padding:6px 10px; border-bottom:1px solid #f0f0f2; text-align:right; white-space:nowrap; }}
 .cmp td:nth-child(-n+4) {{ text-align:left; }}
-.cmp td.c-brand {{ position:sticky; left:0; background:#fff; z-index:1; font-weight:600; min-width:120px; }}
-.cmp td.c-asin {{ position:sticky; left:120px; background:#fff; z-index:1; min-width:110px;
-                  font-family:ui-monospace,Menlo,monospace; }}
+.cmp td.c-asin {{ position:sticky; left:0; background:#fff; z-index:1; min-width:130px;
+                  font-family:ui-monospace,Menlo,monospace; font-weight:600; }}
+.cmp td.c-brand {{ position:sticky; left:130px; background:#fff; z-index:1; min-width:150px; }}
 .cmp td.c-asin a {{ color:#0071e3; text-decoration:none; }}
 .cmp td.c-title {{ max-width:240px; overflow:hidden; text-overflow:ellipsis; color:#6e6e73; }}
-.cmp td.nodata {{ color:#c5221f; }}
+.cmp td.nodata {{ background:#fff4f4; }}
+.cmp td.nodata a {{ color:#c5221f; }}
 .cmp th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
-.cmp th:nth-child(2) {{ position:sticky; left:120px; z-index:3; }}
+.cmp th:nth-child(2) {{ position:sticky; left:130px; z-index:3; }}
 .cmp tr.ghead td {{ background:#1d1d1f; color:#fff; font-size:13.5px; font-weight:650;
                     padding:9px 12px; position:sticky; left:0; }}
 .cmp tr.mhead td {{ background:#e8e8ed; font-weight:650; padding:6px 12px;
@@ -1612,6 +1615,7 @@ with tab_comp:
                 t.insert(0, "Метрика", metric)
                 t.insert(1, "Группа", [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in t.index])
                 t.insert(2, "Бренд", [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in t.index])
+                t.index.name = "ASIN"
                 csv_rows.append(t.reset_index())
             out_csv = pd.concat(csv_rows, ignore_index=True)
             st.download_button("⬇ CSV", out_csv.to_csv(index=False).encode("utf-8-sig"),
