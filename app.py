@@ -1150,18 +1150,28 @@ with tab_comp:
                 "Метрики идут блоками: BSR, отзывы, рейтинг, цена — колонки по датам замеров, "
                 "как в гугл-таблице.</div>", unsafe_allow_html=True)
 
-    comp_link = notifier.bot_link("comp") if NOTIFIER_OK else None
-    comp_user = notifier.bot_username("comp") if NOTIFIER_OK else None
+    comp_user = None
+    if NOTIFIER_OK:
+        try:
+            comp_user = notifier.bot_username("comp")
+        except Exception:
+            comp_user = None
+    has_own_bot = bool(os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
+    comp_user = comp_user or ("ваш новый бот" if has_own_bot else "RatingRadar_bot")
+    comp_link = f"https://t.me/{comp_user}" if not comp_user.startswith("ваш") else None
+
     if comp_link:
-        same = (not os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
         st.markdown(
             f"<div style='margin:8px 0 4px'>"
             f"<a href='{comp_link}' target='_blank' style='display:inline-block;background:#229ED9;"
             f"color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;"
             f"text-decoration:none'>✈️ Отчёты по конкурентам — @{comp_user}</a>"
-            f"<span class='muted' style='margin-left:10px'>подписка: /start"
-            + (" · отдельный бот не задан, используется основной" if same else "") +
+            f"<span class='muted' style='margin-left:10px'>подписка в один клик: /start"
+            + ("" if has_own_bot else " · отдельный бот не задан, отчёты идут в основной") +
             "</span></div>", unsafe_allow_html=True)
+    else:
+        st.info("Токен второго бота задан, но Telegram не ответил на getMe — проверь "
+                "TELEGRAM_BOT_TOKEN_COMP в Secrets.", icon="⚠️")
 
     comp_df = get_competitors()
 
