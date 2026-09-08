@@ -156,6 +156,8 @@ def ensure_schema():
             cur.execute(SCHEMA_SQL)
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS image_url TEXT;")
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr TEXT;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS price TEXT;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr_num INTEGER;")
             cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
         conn.commit()
 
@@ -214,8 +216,9 @@ def save_to_db(data: dict):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO asin_metrics (asin, source, rating, review_count, histogram_json, image_url, bsr, note)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO asin_metrics
+                    (asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, price, note)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     clean_asin,
@@ -225,6 +228,8 @@ def save_to_db(data: dict):
                     json.dumps(data.get("hist", {})),
                     data.get("image_url"),
                     data.get("bsr"),
+                    bsr_to_int(data.get("bsr")),
+                    data.get("price"),
                     data.get("note", ""),
                 ),
             )
@@ -240,7 +245,7 @@ def save_batch(rows: list) -> int:
             continue
         clean.append((a, d.get("source"), d.get("rating"), d.get("count"),
                       json.dumps(d.get("hist", {})), d.get("image_url"),
-                      d.get("bsr"), d.get("note", "")))
+                      d.get("bsr"), bsr_to_int(d.get("bsr")), d.get("price"), d.get("note", "")))
     if not clean:
         return 0
     with db() as conn:
@@ -248,7 +253,8 @@ def save_batch(rows: list) -> int:
             extras.execute_values(
                 cur,
                 "INSERT INTO asin_metrics "
-                "(asin, source, rating, review_count, histogram_json, image_url, bsr, note) VALUES %s",
+                "(asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, price, note) "
+                "VALUES %s",
                 clean, page_size=200)
         conn.commit()
     return len(clean)
@@ -580,6 +586,20 @@ REVIEW_DOMAINS = {
 }
 
 
+def ensure_competitor_schema():
+    """Группа конкурента (Men LS, Men Pants…) и бренд — в справочнике ASIN."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS asin_dictionary (
+                    asin TEXT PRIMARY KEY, parent_asin TEXT, category TEXT, subcategory TEXT,
+                    product_type TEXT, brand TEXT, market TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
+            """)
+            cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS comp_group TEXT;")
+            cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS title TEXT;")
+        conn.commit()
+
+
 def ensure_reviews_schema():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -730,6 +750,17 @@ def _as_obj(payload):
     return payload if isinstance(payload, dict) else None
 
 
+def bsr_to_int(bsr):
+    """'#12 345 Bekleidung' -> 12345"""
+    if not bsr:
+        return None
+    m = re.search(r"#\s*([\d.,\s]+)", str(bsr))
+    if not m:
+        return None
+    digits = re.sub(r"[^\d]", "", m.group(1))
+    return int(digits) if digits else None
+
+
 def _num(val):
     if val is None:
         return None
@@ -808,7 +839,9 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     out["note"] = " · ".join(extra)[:200]
     out["parent_asin"] = obj.get("parent_asin") or ""
     out["category_path"] = obj.get("product_category") or ""
-    out["price"] = obj.get("price") or ""
+    out["price"] = str(obj.get("price") or obj.get("exact_price") or "").strip()[:40]
+    out["brand"] = str(obj.get("brand") or obj.get("merchant_info") or obj.get("sold_by") or "").strip()[:60]
+    out["title"] = str(obj.get("title") or "")[:200]
     return out
 
 
