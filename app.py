@@ -429,7 +429,7 @@ def set_setting(key, value):
         pass
 
 
-OWN_BRANDS_DEFAULT = "Merino.tech, Merino.tech Store, Woolcano, Merino Protect"
+OWN_BRANDS_DEFAULT = "Merino.tech"
 
 
 def own_brands():
@@ -1390,6 +1390,11 @@ with tab_comp:
                                  format_func=lambda d: f"{d} дн.", key="comp_f_days")
         metrics = f4.multiselect("Метрики", ["BSR", "Reviews", "Rating", "Price"],
                                  default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics")
+        color_mode = st.radio(
+            "Раскраска", ["Изменение к прошлому замеру", "Место в группе"],
+            horizontal=True, key="comp_color_mode",
+            help="«Изменение» — стало лучше или хуже со вчера. "
+                 "«Место в группе» — как позиция выглядит на фоне остальных в этой же группе в тот же день.")
 
         use_groups = sel_groups or groups_all
         view = in_mkt[in_mkt["grp"].isin(use_groups)]
@@ -1540,7 +1545,19 @@ with tab_comp:
                     return f"{v:,.2f}".replace(",", " ")
                 return f"{int(v):,}".replace(",", " ")
 
-            def cell_css(metric, v, prev):
+            # шкала «лучше → хуже» для режима «Место в группе»
+            RANK_SCALE = ["#1f8a4c", "#7ec97e", "#d9f0d3", "#ffe9b3", "#ffc09b", "#e8534f"]
+
+            def rank_css(pos, total):
+                """pos — место (0 = лучший). Возвращает заливку из шкалы."""
+                if total <= 1:
+                    return ""
+                idx = int(pos / max(1, total - 1) * (len(RANK_SCALE) - 1))
+                bg = RANK_SCALE[idx]
+                fg = ";color:#fff" if idx in (0, len(RANK_SCALE) - 1) else ""
+                return f"background:{bg}{fg}"
+
+            def cell_css_change(metric, v, prev):
                 if pd.isna(v):
                     return ""
                 if metric == "Rating":
@@ -1548,16 +1565,34 @@ with tab_comp:
                 if prev is None or pd.isna(prev) or v == prev:
                     return ""
                 if metric == "BSR":        # меньше — лучше; насыщенность по силе изменения
-                    delta = (prev - v) / prev if prev else 0
-                    strong = abs(delta) > 0.15
+                    delta = abs(prev - v) / prev if prev else 0
+                    strong = delta > 0.15
                     if v < prev:
                         return "background:#57d957" if strong else "background:#c8f7c5"
                     return "background:#e8534f;color:#fff" if strong else "background:#ffcdd2"
                 if metric == "Reviews":
                     return "background:#c8f7c5" if v > prev else "background:#ffe0b2"
                 if metric == "Price":      # конкурент снизил цену — тревога
-                    return "background:#ffcdd2" if v < prev else "background:#c8f7c5"
+                    drop = abs(prev - v) / prev if prev else 0
+                    strong = drop > 0.1
+                    if v < prev:
+                        return "background:#e8534f;color:#fff" if strong else "background:#ffcdd2"
+                    return "background:#c8f7c5"
                 return ""
+
+            def cell_css_rank(metric, a, d, grp_asins, table):
+                """Место позиции среди своей группы в этот же день."""
+                v = table.loc[a, d] if a in table.index else None
+                if v is None or pd.isna(v):
+                    return ""
+                vals = [(x, table.loc[x, d]) for x in grp_asins
+                        if x in table.index and pd.notnull(table.loc[x, d])]
+                if len(vals) < 2:
+                    return ""
+                better_first = metric in ("BSR", "Price")   # меньше — «сильнее»
+                vals.sort(key=lambda kv: kv[1], reverse=not better_first)
+                pos = [k for k, _ in vals].index(a)
+                return rank_css(pos, len(vals))
 
             ncols = 4 + len(labels)
             rows_html = []
@@ -1569,20 +1604,34 @@ with tab_comp:
                     f"<tr class='ghead'><td colspan='{ncols}'>▸ {grp} "
                     f"<span style='font-weight:400;color:#6e6e73'>· {sel_mkt} · "
                     f"{len(grp_asins)} ASIN</span></td></tr>")
+                # наши бренды — наверх группы, дальше конкуренты по бренду
+                def sort_key(a):
+                    b = str(meta.loc[a, "brand"]) if a in meta.index else ""
+                    return (0 if is_own_brand(b) else 1, b.lower(), a)
+
+                grp_asins = sorted(grp_asins, key=sort_key)
+
                 for metric in metrics:
                     table = piv[metric]
                     present = [a for a in grp_asins if a in table.index]
                     if not present:
                         continue
                     rows_html.append(f"<tr class='mhead'><td colspan='{ncols}'>{metric}</td></tr>")
-                    for a in present:
+                    own_count = sum(1 for a in present
+                                    if is_own_brand(str(meta.loc[a, "brand"]) if a in meta.index else ""))
+                    for i_row, a in enumerate(present):
+                        if own_count and i_row == own_count:
+                            rows_html.append(
+                                f"<tr class='sep'><td colspan='{ncols}'>— конкуренты —</td></tr>")
                         m = meta.loc[a] if a in meta.index else {}
                         brand = str(m.get("brand", "") or "")[:22]
                         title = str(m.get("title", "") or "")[:70]
                         dom = MARKET_DOMAINS.get(sel_mkt, "amazon.com.be")
                         no_data = all(pd.isna(table.loc[a, d]) for d in days_c)
                         flag = " ⚠️" if no_data else ""
-                        tds = [f"<td class='c-asin{' nodata' if no_data else ''}'>"
+                        mine = is_own_brand(brand)
+                        cls = "c-asin" + (" nodata" if no_data else "")
+                        tds = [f"<td class='{cls}'>"
                                f"<a href='https://www.{dom}/dp/{a}' target='_blank'>{a}</a>{flag}</td>",
                                f"<td class='c-brand'>{brand or '—'}</td>",
                                f"<td class='c-cty'>{sel_mkt}</td>",
@@ -1590,10 +1639,13 @@ with tab_comp:
                         prev = None
                         for d in days_c:
                             v = table.loc[a, d]
-                            tds.append(f"<td style='{cell_css(metric, v, prev)}'>{fmt_v(metric, v)}</td>")
+                            css = (cell_css_change(metric, v, prev)
+                                   if color_mode.startswith("Изменение")
+                                   else cell_css_rank(metric, a, d, present, table))
+                            tds.append(f"<td style='{css}'>{fmt_v(metric, v)}</td>")
                             if pd.notnull(v):
                                 prev = v
-                        rows_html.append(f"<tr>{''.join(tds)}</tr>")
+                        rows_html.append(f"<tr class='{'mine' if mine else ''}'>{''.join(tds)}</tr>")
 
             th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Бренд", "Стр.", "Название"] + labels)
             html_c = f"""
@@ -1611,6 +1663,9 @@ with tab_comp:
 .cmp td.c-asin a {{ color:#0071e3; text-decoration:none; }}
 .cmp td.c-title {{ max-width:240px; overflow:hidden; text-overflow:ellipsis; color:#6e6e73; }}
 .cmp td.nodata {{ background:#fff4f4; }}
+.cmp tr.mine td {{ background:#eaf4ff; font-weight:600; }}
+.cmp tr.mine td.c-asin {{ background:#eaf4ff; box-shadow: inset 3px 0 0 #0071e3; }}
+.cmp tr.mine td.c-brand {{ background:#eaf4ff; color:#0056b3; }}
 .cmp td.nodata a {{ color:#c5221f; }}
 .cmp th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
 .cmp th:nth-child(2) {{ position:sticky; left:130px; z-index:3; }}
@@ -1618,6 +1673,8 @@ with tab_comp:
                     padding:9px 12px; position:sticky; left:0; }}
 .cmp tr.mhead td {{ background:#e8e8ed; font-weight:650; padding:6px 12px;
                     border-top:1px solid #c7c7cc; position:sticky; left:0; }}
+.cmp tr.sep td {{ background:#fafafa; color:#8e8e93; font-size:11.5px; padding:3px 12px;
+                  border-top:1px dashed #c7c7cc; position:sticky; left:0; }}
 </style>
 <div class='cmp-wrap'><table class='cmp'><thead><tr>{th}</tr></thead>
 <tbody>{''.join(rows_html)}</tbody></table></div>
@@ -1692,11 +1749,19 @@ with tab_comp:
                             unsafe_allow_html=True)
 
             st.markdown(html_c, unsafe_allow_html=True)
-            st.markdown("<div class='muted' style='margin-top:6px'>"
-                        "BSR: 🟩 позиция улучшилась (номер меньше) · 🟥 ухудшилась &nbsp;·&nbsp; "
-                        "Reviews: 🟩 прибавились &nbsp;·&nbsp; "
-                        "Rating: заливка по логике Amazon &nbsp;·&nbsp; "
-                        "Price: 🟥 конкурент снизил цену · 🟩 поднял</div>", unsafe_allow_html=True)
+            if color_mode.startswith("Изменение"):
+                legend = ("<b>BSR</b>: 🟩 позиция выросла (номер меньше) · 🟥 просела; яркий цвет — "
+                          "сдвиг больше 15% &nbsp;·&nbsp; <b>Reviews</b>: 🟩 прибавились &nbsp;·&nbsp; "
+                          "<b>Rating</b>: по логике Amazon &nbsp;·&nbsp; "
+                          "<b>Price</b>: 🟥 конкурент снизил цену (яркий — больше 10%) · 🟩 поднял")
+            else:
+                legend = ("Шкала от зелёного к красному — место в своей группе за этот день. "
+                          "<b>BSR</b> и <b>Price</b>: меньше значит выше в шкале (дешевле = агрессивнее). "
+                          "<b>Rating</b> и <b>Reviews</b>: больше значит выше. "
+                          "Так видно, кто в группе лидер, а кто отстаёт, независимо от вчерашних колебаний.")
+            st.markdown(f"<div class='muted' style='margin-top:6px'>{legend} &nbsp;·&nbsp; "
+                        "<b style='background:#eaf4ff;padding:1px 8px;border-radius:4px;"
+                        "box-shadow:inset 3px 0 0 #0071e3'>голубым</b> — наши позиции, они наверху группы</div>", unsafe_allow_html=True)
 
             csv_rows = []
             for metric in metrics:
