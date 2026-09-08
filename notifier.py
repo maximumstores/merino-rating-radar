@@ -37,8 +37,18 @@ def _cfg(name, default=""):
     return default
 
 
-BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN")            # основной: рейтинги, алерты
+COMP_BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN_COMP")  # второй: отчёты по конкурентам
 DATABASE_URL = _cfg("DATABASE_URL")
+
+CHANNELS = {
+    "radar": {"token": BOT_TOKEN, "title": "Rating Radar"},
+    "comp": {"token": COMP_BOT_TOKEN or BOT_TOKEN, "title": "Мониторинг конкурентов"},
+}
+
+
+def channel_token(channel="radar"):
+    return CHANNELS.get(channel, CHANNELS["radar"])["token"]
 API = "https://api.telegram.org/bot{token}/{method}"
 
 # пороги алертов (можно переопределить через env)
@@ -50,7 +60,7 @@ DASHBOARD_URL = _cfg("DASHBOARD_URL", "https://rating-radar.streamlit.app")
 
 SUBS_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_subscribers (
-    chat_id      BIGINT PRIMARY KEY,
+    chat_id      BIGINT,
     username     TEXT,
     first_name   TEXT,
     kinds        TEXT NOT NULL DEFAULT 'child,parent',
@@ -59,7 +69,9 @@ CREATE TABLE IF NOT EXISTS telegram_subscribers (
     only_status_change BOOLEAN NOT NULL DEFAULT FALSE,
     active       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_sent_at TIMESTAMPTZ
+    last_sent_at TIMESTAMPTZ,
+    channel      TEXT NOT NULL DEFAULT 'radar',
+    PRIMARY KEY (chat_id, channel)
 );
 
 CREATE TABLE IF NOT EXISTS telegram_bot_state (
@@ -80,6 +92,26 @@ def ensure_subs_schema():
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(SUBS_SQL)
+            # миграция старой таблицы: добавляем канал и составной ключ
+            cur.execute("ALTER TABLE telegram_subscribers ADD COLUMN IF NOT EXISTS channel "
+                        "TEXT NOT NULL DEFAULT 'radar';")
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints
+                        WHERE table_name = 'telegram_subscribers'
+                          AND constraint_type = 'PRIMARY KEY'
+                          AND constraint_name = 'telegram_subscribers_pkey_ch') THEN
+                        BEGIN
+                            ALTER TABLE telegram_subscribers DROP CONSTRAINT IF EXISTS telegram_subscribers_pkey;
+                            ALTER TABLE telegram_subscribers
+                                ADD CONSTRAINT telegram_subscribers_pkey_ch PRIMARY KEY (chat_id, channel);
+                        EXCEPTION WHEN others THEN NULL;
+                        END;
+                    END IF;
+                END $$;
+            """)
         c.commit()
 
 
@@ -105,31 +137,31 @@ def set_state(key, value):
         c.commit()
 
 
-def get_subscribers(active_only=True):
+def get_subscribers(active_only=True, channel="radar"):
     ensure_subs_schema()
     q = ("SELECT chat_id, username, first_name, kinds, countries, min_drop, only_status_change, "
-         "active, created_at, last_sent_at FROM telegram_subscribers")
+         "active, created_at, last_sent_at, channel FROM telegram_subscribers WHERE channel = %s")
     if active_only:
-        q += " WHERE active = TRUE"
+        q += " AND active = TRUE"
     q += " ORDER BY created_at"
     with conn() as c:
-        return pd.read_sql(q, c)
+        return pd.read_sql(q, c, params=(channel,))
 
 
-def upsert_subscriber(chat_id, username=None, first_name=None, active=True):
+def upsert_subscriber(chat_id, username=None, first_name=None, active=True, channel="radar"):
     ensure_subs_schema()
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO telegram_subscribers (chat_id, username, first_name, active)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (chat_id) DO UPDATE SET
+                INSERT INTO telegram_subscribers (chat_id, username, first_name, active, channel)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, channel) DO UPDATE SET
                     username = COALESCE(EXCLUDED.username, telegram_subscribers.username),
                     first_name = COALESCE(EXCLUDED.first_name, telegram_subscribers.first_name),
                     active = EXCLUDED.active;
                 """,
-                (chat_id, username, first_name, active),
+                (chat_id, username, first_name, active, channel),
             )
         c.commit()
 
@@ -145,19 +177,20 @@ def set_subscriber_field(chat_id, field, value):
 
 
 # ---------------------------------------------------------------- отправка
-def tg_call(method, **payload):
-    if not BOT_TOKEN:
-        return {"ok": False, "description": "TELEGRAM_BOT_TOKEN не задан"}
+def tg_call(method, channel="radar", **payload):
+    token = channel_token(channel)
+    if not token:
+        return {"ok": False, "description": f"Токен для канала «{channel}» не задан"}
     try:
-        r = requests.post(API.format(token=BOT_TOKEN, method=method), json=payload, timeout=30)
+        r = requests.post(API.format(token=token, method=method), json=payload, timeout=30)
         return r.json()
     except Exception as e:
         return {"ok": False, "description": str(e)}
 
 
-def send_message(chat_id, text, disable_preview=True):
-    return tg_call("sendMessage", chat_id=chat_id, text=text, parse_mode="HTML",
-                   disable_web_page_preview=disable_preview)
+def send_message(chat_id, text, disable_preview=True, channel="radar"):
+    return tg_call("sendMessage", channel=channel, chat_id=chat_id, text=text,
+                   parse_mode="HTML", disable_web_page_preview=disable_preview)
 
 
 # ---------------------------------------------------------------- расчёт алертов
@@ -356,12 +389,12 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
     return sent, len(subs)
 
 
-def broadcast(text):
-    """Ручная рассылка произвольного текста всем активным подписчикам."""
-    subs = get_subscribers(active_only=True)
+def broadcast(text, channel="radar"):
+    """Ручная рассылка произвольного текста всем активным подписчикам канала."""
+    subs = get_subscribers(active_only=True, channel=channel)
     ok = 0
     for _, sub in subs.iterrows():
-        if send_message(int(sub["chat_id"]), text).get("ok"):
+        if send_message(int(sub["chat_id"]), text, channel=channel).get("ok"):
             ok += 1
     return ok, len(subs)
 
@@ -385,10 +418,11 @@ HELP = """<b>Rating Radar</b> — алерты по рейтингам Amazon.
 <a href="{url}">Дашборд Rating Radar →</a>""".replace("{url}", DASHBOARD_URL)
 
 
-def get_subscriber(chat_id):
+def get_subscriber(chat_id, channel="radar"):
     try:
         with conn() as c:
-            df = pd.read_sql("SELECT * FROM telegram_subscribers WHERE chat_id = %s", c, params=(chat_id,))
+            df = pd.read_sql("SELECT * FROM telegram_subscribers WHERE chat_id = %s AND channel = %s",
+                             c, params=(chat_id, channel))
         return df.iloc[0] if not df.empty else None
     except Exception:
         return None
@@ -419,15 +453,25 @@ def portfolio_summary():
     return line
 
 
-def handle_command(msg):
+COMP_HELP = """<b>Мониторинг конкурентов</b>
+
+Присылаю сводку по товарным группам: наш рейтинг, BSR, отзывы и цена против лучшего конкурента.
+
+/start — подписаться
+/stop — отписаться
+/help — справка"""
+
+
+def handle_command(msg, channel="radar"):
     """Обрабатывает одно входящее сообщение Telegram."""
     chat_id = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
     user = msg.get("from", {}) or {}
     if not chat_id:
         return
+    help_text = COMP_HELP if channel == "comp" else HELP
     if not text.startswith("/"):
-        send_message(chat_id, HELP)
+        send_message(chat_id, help_text, channel=channel)
         return
 
     cmd, _, arg = text.partition(" ")
@@ -435,12 +479,17 @@ def handle_command(msg):
     arg = arg.strip()
 
     if cmd == "/start":
-        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"), active=True)
-        send_message(chat_id, "\u2705 Подписка оформлена. Буду присылать отчёт после каждого сбора.\n\n" + HELP)
+        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"),
+                          active=True, channel=channel)
+        send_message(chat_id, "\u2705 Подписка оформлена.\n\n" + help_text, channel=channel)
 
     elif cmd == "/stop":
-        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"), active=False)
-        send_message(chat_id, "Отписал. /start — включить снова.")
+        upsert_subscriber(chat_id, user.get("username"), user.get("first_name"),
+                          active=False, channel=channel)
+        send_message(chat_id, "Отписал. /start — включить снова.", channel=channel)
+
+    elif channel == "comp":
+        send_message(chat_id, COMP_HELP, channel=channel)
 
     elif cmd == "/status":
         sub = get_subscriber(chat_id)
@@ -493,18 +542,19 @@ def handle_command(msg):
         send_message(chat_id, HELP)
 
 
-def process_updates(timeout=0, max_updates=50):
+def process_updates(timeout=0, max_updates=50, channel="radar"):
     """Разбирает накопившиеся команды одним запросом (без отдельного воркера).
 
     Вызывается из дашборда при загрузке страницы и после прогона. Возвращает
     число обработанных сообщений. Безопасно вызывать часто — при пустой очереди
     это один быстрый HTTP-запрос.
     """
-    if not BOT_TOKEN:
+    if not channel_token(channel):
         return 0
     ensure_subs_schema()
-    offset = int(get_state("update_offset", 0) or 0)
-    res = tg_call("getUpdates", offset=offset + 1, timeout=timeout,
+    key = f"update_offset_{channel}" if channel != "radar" else "update_offset"
+    offset = int(get_state(key, 0) or 0)
+    res = tg_call("getUpdates", channel=channel, offset=offset + 1, timeout=timeout,
                   limit=max_updates, allowed_updates=["message"])
     if not res.get("ok"):
         return 0
@@ -513,13 +563,25 @@ def process_updates(timeout=0, max_updates=50):
         offset = max(offset, upd["update_id"])
         if "message" in upd:
             try:
-                handle_command(upd["message"])
+                handle_command(upd["message"], channel=channel)
                 handled += 1
             except Exception:
                 pass
     if res.get("result"):
-        set_state("update_offset", offset)
+        set_state(key, offset)
     return handled
+
+
+def process_all_channels():
+    """Разбирает команды обоих ботов. Возвращает {канал: сколько}."""
+    out = {}
+    for ch, cfg in CHANNELS.items():
+        if not cfg["token"]:
+            continue
+        if ch == "comp" and cfg["token"] == BOT_TOKEN:
+            continue      # второй бот не настроен — не дублируем
+        out[ch] = process_updates(channel=ch)
+    return out
 
 
 def diagnose():
