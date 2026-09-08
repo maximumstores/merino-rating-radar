@@ -54,6 +54,62 @@ except Exception:
 
 try:
     import ai_insights
+    AI_OK = Trueimport datetime
+import json
+import os
+import re
+import time
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import psycopg2
+import streamlit as st
+from dotenv import load_dotenv
+from sklearn.linear_model import LinearRegression
+
+# Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
+# ДО импорта collector/notifier — они читают переменные на уровне модуля.
+load_dotenv()
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"):
+    if not os.environ.get(_k):
+        try:
+            _v = st.secrets.get(_k)
+            if _v:
+                os.environ[_k] = str(_v)
+        except Exception:
+            pass
+
+from collector import (
+    check_asin,
+    check_asin_api,
+    clean_db_trash,
+    delete_asin_completely,
+    ensure_reviews_schema,
+    ensure_schema,
+    extract_asin,
+    extract_children,
+    fetch_product_json,
+    fetch_reviews,
+    fetch_reviews_api,
+    finish_run,
+    get_tracked_asins,
+    save_reviews,
+    save_to_db,
+    start_run,
+)
+
+try:
+    import notifier
+    NOTIFIER_OK = True
+except Exception:
+    notifier = None
+    NOTIFIER_OK = False
+
+try:
+    import ai_insights
     AI_OK = True
 except Exception:
     ai_insights = None
@@ -490,18 +546,34 @@ def run_collection(items, label="Прогон"):
                      help="Остановить прогон — уже собранные позиции сохранятся")
 
     progress = st.progress(0.0, text=f"0/{len(items)}")
+    cur_slot = st.empty()      # какой ASIN сейчас обрабатывается
     log_box = st.empty()
     log_lines = []
     ok = 0
     stopped = False
+
+    def _dom_for(txt):
+        low = str(txt).lower()
+        for code, dom in MARKET_DOMAINS.items():
+            if dom in low or low.endswith(":" + code.lower()):
+                return dom
+        return "amazon.com.be"
+
     for i, item in enumerate(items, 1):
         if st.session_state.get("stop_run"):
             stopped = True
             log_lines.append(f"⏹ Остановлено на {i - 1}/{len(items)}")
             log_box.code("\n".join(log_lines[-15:]))
             break
-        def _log(msg, _lines=log_lines):
-            _lines.append(msg)
+
+        code = extract_asin(item) or str(item)
+        cur_slot.markdown(
+            f"<div class='muted'>Сейчас: <a href='https://www.{_dom_for(item)}/dp/{code}' target='_blank' "
+            f"style='font-family:ui-monospace,Menlo,monospace;font-weight:600;color:#0071e3;"
+            f"text-decoration:none'>{code}</a> &nbsp;·&nbsp; {i} из {len(items)}</div>",
+            unsafe_allow_html=True)
+        def _log(msg, _lines=log_lines, _code=code):
+            _lines.append(f"{_code} {msg.strip()}" if not msg.strip().startswith("===") else msg)
             log_box.code("\n".join(_lines[-15:]))
         try:
             res = check_asin_api(item, log=_log) if use_api else check_asin(item, log=_log)
@@ -522,6 +594,7 @@ def run_collection(items, label="Прогон"):
             ok += 1
         progress.progress(i / len(items), text=f"{i}/{len(items)}")
     stop_slot.empty()
+    cur_slot.empty()
     finish_run(run_id, ok, "stopped" if stopped else "done")
     st.session_state["last_auto_run"] = time.time()
     st.session_state["stop_run"] = False
