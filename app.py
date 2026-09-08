@@ -226,7 +226,7 @@ def get_full_history(days=120):
             """
             SELECT asin, source, rating, review_count, histogram_json, image_url, bsr, note, created_at
             FROM asin_metrics
-            WHERE asin NOT LIKE 'HTTP%' AND LENGTH(asin) <= 10
+            WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
             ORDER BY created_at ASC;
             """, conn, params=(str(int(days)),))
@@ -235,7 +235,8 @@ def get_full_history(days=120):
         df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
         df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"Не читается история метрик: {e}")
         return pd.DataFrame()
 
 
