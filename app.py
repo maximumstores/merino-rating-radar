@@ -29,6 +29,7 @@ for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRA
 
 from collector import (
     bsr_to_int,
+    extract_brand,
     check_asin,
     check_asin_api,
     ensure_competitor_schema,
@@ -474,7 +475,7 @@ def enrich_dictionary_from_api(res: dict):
                     title = COALESCE(NULLIF(%s, ''), title),
                     updated_at = NOW()
                 WHERE asin = %s;
-                """, (res.get("brand", ""), res.get("title", ""), asin))
+                """, (str(res.get("brand") or "")[:60], str(res.get("title") or "")[:200], asin))
     conn.commit()
     conn.close()
 
@@ -596,9 +597,10 @@ def run_collection(items, label="Прогон"):
             save_to_db(res)   # пишем даже неудачный замер — иначе дыра в истории
         except Exception as e:
             _log(f"Не сохранился {item}: {e}")
-        if res.get("parent_asin") or res.get("category_path") or res.get("brand"):
+        # всё, что API вернул о товаре — сразу в справочник: бренд, название, parent, категория
+        if any(res.get(k) for k in ("parent_asin", "category_path", "brand", "title")):
             try:
-                enrich_dictionary_from_api(res)   # API отдал parent/категорию — в справочник
+                enrich_dictionary_from_api(res)
             except Exception:
                 pass
         if res.get("source") in VALID_SOURCES:
@@ -1119,6 +1121,49 @@ def save_competitors(asins, group, market):
     conn.close()
 
 
+def save_asin_meta(asin, brand="", title="", market="", category=""):
+    """Пишет бренд/название/категорию в справочник, не затирая уже заполненное."""
+    ensure_competitor_schema()
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO asin_dictionary (asin, brand, title, market, category, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (asin) DO UPDATE SET
+                brand    = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
+                title    = COALESCE(NULLIF(EXCLUDED.title, ''), asin_dictionary.title),
+                market   = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
+                category = COALESCE(NULLIF(EXCLUDED.category, ''), asin_dictionary.category),
+                updated_at = NOW();
+            """, (asin, brand, title, market, category))
+    conn.commit()
+    conn.close()
+
+
+def pull_meta(asins, market, log=None):
+    """Один запрос на ASIN: бренд, название, категория из structured API."""
+    done, failed = 0, []
+    for a in asins:
+        try:
+            obj = fetch_product_json(a, market, log=(log or (lambda m: None)))
+            if not obj:
+                failed.append(a)
+                continue
+            brand = extract_brand(obj)
+            title = str(obj.get("title") or "")[:200]
+            path = [x.strip() for x in str(obj.get("product_category") or "").split("›") if x.strip()]
+            save_asin_meta(a, brand=brand, title=title, market=market,
+                           category=path[-1] if path else "")
+            if brand or title:
+                done += 1
+            else:
+                failed.append(a)
+        except Exception:
+            failed.append(a)
+    return done, failed
+
+
 def get_competitor_history(asins, days):
     if not asins:
         return pd.DataFrame()
@@ -1591,12 +1636,31 @@ with tab_comp:
             with st.expander("↻ Выбрать ASIN для пересбора"
                              + (f" · без данных: {len(empty_asins)}" if empty_asins else ""),
                              expanded=bool(empty_asins)):
+                # что реально собралось по каждой позиции на последнем замере
+                last_by_asin = (hist.sort_values("created_at").groupby("asin").last()
+                                if not hist.empty else pd.DataFrame())
+
+                def what_we_have(a):
+                    if a not in last_by_asin.index:
+                        return "—", "ни разу не собрано"
+                    r = last_by_asin.loc[a]
+                    got = []
+                    got.append("★" if pd.notnull(r["rating"]) else "·")
+                    got.append("💬" if pd.notnull(r["review_count"]) else "·")
+                    got.append("#" if pd.notnull(r["bsr_num"]) else "·")
+                    got.append("€" if pd.notnull(r["price_num"]) else "·")
+                    when = pd.to_datetime(r["created_at"]).tz_convert(ZoneInfo(selected_tz))
+                    return " ".join(got), when.strftime("%d.%m %H:%M")
+
+                have, when_col = zip(*[what_we_have(a) for a in asins]) if asins else ((), ())
+
                 pick_tbl = pd.DataFrame({
                     "✓": [a in empty_asins for a in asins],
                     "ASIN": asins,
                     "Бренд": [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in asins],
                     "Группа": [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in asins],
-                    "Данные": ["нет" if a in empty_asins else "есть" for a in asins],
+                    "Собрано": list(have),
+                    "Когда": list(when_col),
                 })
                 edited_pick = st.data_editor(
                     pick_tbl, use_container_width=True, hide_index=True,
@@ -1607,7 +1671,10 @@ with tab_comp:
                         "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
                         "Бренд": st.column_config.TextColumn("Бренд", width="medium", disabled=True),
                         "Группа": st.column_config.TextColumn("Группа", width="small", disabled=True),
-                        "Данные": st.column_config.TextColumn("Данные", width="small", disabled=True),
+                        "Собрано": st.column_config.TextColumn(
+                            "Собрано", width="small", disabled=True,
+                            help="★ рейтинг · 💬 отзывы · # BSR · € цена. Точка — метрики нет"),
+                        "Когда": st.column_config.TextColumn("Последний сбор", width="small", disabled=True),
                     })
                 pick_comp = edited_pick.loc[edited_pick["✓"], "ASIN"].tolist()
 
@@ -1618,8 +1685,10 @@ with tab_comp:
                 if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
                              use_container_width=True):
                     run_collection(asins, f"Конкуренты ({sel_mkt})")
-                b3.markdown("<div class='muted' style='margin-top:8px'>Галочки уже стоят там, где нет "
-                            "данных на последнем замере. Можно отметить любые другие.</div>",
+
+                st.markdown("<div class='muted' style='margin-top:8px'>Колонка «Собрано»: "
+                            "<b>★</b> рейтинг · <b>💬</b> отзывы · <b>#</b> BSR · <b>€</b> цена; "
+                            "точка — метрика не пришла. Галочки стоят там, где не пришло ничего.</div>",
                             unsafe_allow_html=True)
 
             st.markdown(html_c, unsafe_allow_html=True)
@@ -3255,4 +3324,4 @@ with tab_help:
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
