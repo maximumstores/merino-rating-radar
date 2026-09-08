@@ -755,8 +755,16 @@ if not calc_df.empty:
 # ==================== ГЛОБАЛЬНЫЕ ФИЛЬТРЫ ====================
 all_asins = calc_df["raw_asin"].tolist() if not calc_df.empty else []
 all_sources = sorted(calc_df["Источник"].dropna().unique().tolist()) if not calc_df.empty else []
-all_cats = sorted(calc_df["Категория"].unique().tolist()) if not calc_df.empty else []
-all_parents = sorted(p for p in calc_df["Parent"].unique().tolist() if p) if not calc_df.empty else []
+def _uniq_str(df, col):
+    """Уникальные значения строкой — None и числа не должны ронять sorted()."""
+    if df.empty or col not in df:
+        return []
+    vals = {str(v).strip() for v in df[col].dropna().tolist() if str(v).strip()}
+    return sorted(vals)
+
+
+all_cats = _uniq_str(calc_df, "Категория")
+all_parents = _uniq_str(calc_df, "Parent")
 
 fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
@@ -793,7 +801,7 @@ if not calc_df.empty:
     src_ok = ["US"] if only_us else (sel_sources if sel_sources else all_sources)
     filtered_df = calc_df[
         calc_df["raw_asin"].isin(sel_asins if sel_asins else all_asins)
-        & calc_df["Категория"].isin(sel_cats if sel_cats else all_cats)
+        & (calc_df["Категория"].astype(str).isin(sel_cats) if sel_cats else True)
         & (calc_df["Parent"].isin(sel_parents) if sel_parents else True)
         & calc_df["Источник"].isin(src_ok)
         & (calc_df["Статус"].isin(sel_status) if sel_status else True)
@@ -1046,7 +1054,7 @@ with tab_ai:
             st.markdown("---")
             st.markdown("**Шаг 2. Разбор причин**")
             a1, a2, a3 = st.columns([2, 1, 1])
-            cats = sorted(set(calc_df["Категория"].tolist())) if not calc_df.empty else []
+            cats = _uniq_str(calc_df, "Категория")
             an_cat = a1.selectbox("Категория (или все)", options=["Все"] + [c for c in cats if c != "—"],
                                   key="ai_an_cat")
             an_limit = a2.number_input("Сколько отзывов", 10, 200, 60, step=10, key="ai_an_limit")
@@ -1922,15 +1930,18 @@ def render_asin_manager(kind):
                 unsafe_allow_html=True)
 
     c_sel, c_hint = st.columns([1, 3])
-    country = c_sel.selectbox("Страна", options=["Все страны"] + list(MARKET_DOMAINS.keys()) + ["— без страны"],
-                              index=1, key=f"asin_country_sel_{kind}")
-    c_hint.markdown("<div class='muted' style='margin-top:30px'>Выбранная страна применяется ко всему блоку: "
-                    "показывает ASIN этой страны, новые ASIN из пачки получают её, пересохранение меняет только её список. "
-                    "Форматы: <code>B09NWGDK3S</code> · <code>B09NWGDK3S:DE</code> · ссылка на листинг "
-                    "(страна из суффикса/ссылки имеет приоритет).</div>", unsafe_allow_html=True)
+    country = c_sel.selectbox(
+        "Страна", options=["🌐 Авто (из ссылки)", "Все страны"] + list(MARKET_DOMAINS.keys()) + ["— без страны"],
+        index=0, key=f"asin_country_sel_{kind}")
+    c_hint.markdown(
+        "<div class='muted' style='margin-top:30px'><b>🌐 Авто</b> — страна берётся у каждого ASIN из его "
+        "собственной ссылки или суффикса, можно кидать вперемешку US, DE, BE в одной пачке. "
+        "Выбор конкретной страны фильтрует список и проставляет её тем ASIN, у которых подсказки нет. "
+        "Форматы: <code>B09NWGDK3S</code> · <code>B09NWGDK3S:DE</code> · "
+        "<code>https://www.amazon.de/dp/B09NWGDK3S</code></div>", unsafe_allow_html=True)
 
     sel_market = country if country in MARKET_DOMAINS else None
-    if country == "Все страны":
+    if country in ("Все страны", "🌐 Авто (из ссылки)"):
         display_tracked = tracked_k
     elif country == "— без страны":
         display_tracked = by_country.get("—", [])
@@ -1954,7 +1965,15 @@ def render_asin_manager(kind):
                     f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
                     + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
                     unsafe_allow_html=True)
-        lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (каскад)")
+
+        if new_c:      # как распределились по странам
+            dist = {}
+            for _c in new_c:
+                key = mk_map.get(_c, "— каскад BE/NL")
+                dist[key] = dist.get(key, 0) + 1
+            st.markdown("**Распределение новых по странам:** " + " · ".join(
+                f"`{k}` {v}" for k, v in sorted(dist.items(), key=lambda kv: (kv[0].startswith("—"), -kv[1]))))
+        lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (страна из ссылок)")
         if st.button(lbl, type="primary", disabled=not new_c, key=f"add_asins_btn_{kind}"):
             ensure_schema()
             try:
@@ -2032,7 +2051,8 @@ def render_asin_manager(kind):
 
     # ---- редактор списка выбранной страны ----
     st.markdown("---")
-    st.markdown(f"**Список ({country})** — {len(display_tracked)} из {len(tracked_k)} "
+    st.markdown(f"**Список ({'все' if country.startswith('🌐') else country})** "
+                f"— {len(display_tracked)} из {len(tracked_k)} "
                 "<span class='muted'>· удалить — сотри из текста и пересохрани</span>", unsafe_allow_html=True)
     edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
                           key=f"edit_tracked_list_{kind}_{country}_{len(display_tracked)}", label_visibility="collapsed")
