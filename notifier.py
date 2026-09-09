@@ -41,10 +41,31 @@ BOT_TOKEN = (_cfg("TELEGRAM_BOT_TOKEN") or "").strip()            # основн
 COMP_BOT_TOKEN = (_cfg("TELEGRAM_BOT_TOKEN_COMP") or "").strip()  # второй: отчёты по конкурентам
 DATABASE_URL = _cfg("DATABASE_URL")
 
+# Каналы: radar — алерты по рейтингам, comp — конкуренты общим потоком,
+# comp_<страна> — отдельный бот на страну. Появляется сам, если в окружении
+# есть TELEGRAM_BOT_TOKEN_DE / _US / _CA и т.д.
+MARKET_CODES = ["US", "CA", "MX", "BR", "UK", "DE", "FR", "IT", "ES", "NL", "BE",
+                "SE", "PL", "IE", "TR", "AE", "SA", "EG", "IN", "SG", "AU"]
+
 CHANNELS = {
     "radar": {"token": BOT_TOKEN, "title": "Rating Radar"},
     "comp": {"token": COMP_BOT_TOKEN or BOT_TOKEN, "title": "Мониторинг конкурентов"},
 }
+for _cc in MARKET_CODES:
+    _tok = (_cfg(f"TELEGRAM_BOT_TOKEN_{_cc}") or "").strip()
+    if _tok:
+        CHANNELS[f"comp_{_cc.lower()}"] = {"token": _tok, "title": f"Конкуренты — {_cc}"}
+
+
+def channel_for_country(code):
+    """Канал страны, если для неё заведён свой бот. Иначе общий comp."""
+    ch = f"comp_{str(code or '').lower()}"
+    return ch if CHANNELS.get(ch, {}).get("token") else "comp"
+
+
+def comp_channels():
+    """Все каналы конкурентов, у которых есть свой токен."""
+    return [c for c in CHANNELS if c.startswith("comp_")]
 
 
 def channel_token(channel="radar"):
@@ -495,7 +516,7 @@ def handle_command(msg, channel="radar"):
     user = msg.get("from", {}) or {}
     if not chat_id:
         return
-    help_text = COMP_HELP if channel == "comp" else HELP
+    help_text = COMP_HELP if channel.startswith("comp") else HELP
     if not text.startswith("/"):
         send_message(chat_id, help_text, channel=channel)
         return
@@ -514,7 +535,7 @@ def handle_command(msg, channel="radar"):
                           active=False, channel=channel)
         send_message(chat_id, "Отписал. /start — включить снова.", channel=channel)
 
-    elif channel == "comp":
+    elif channel.startswith("comp"):
         send_message(chat_id, COMP_HELP, channel=channel)
 
     elif cmd == "/status":
@@ -599,13 +620,13 @@ def process_updates(timeout=0, max_updates=50, channel="radar"):
 
 
 def process_all_channels():
-    """Разбирает команды обоих ботов. Возвращает {канал: сколько}."""
-    out = {}
+    """Разбирает команды всех настроенных ботов. Возвращает {канал: сколько}."""
+    out, seen_tokens = {}, set()
     for ch, cfg in CHANNELS.items():
-        if not cfg["token"]:
-            continue
-        if ch == "comp" and cfg["token"] == BOT_TOKEN:
-            continue      # второй бот не настроен — не дублируем
+        tok = (cfg.get("token") or "").strip()
+        if not tok or tok in seen_tokens:
+            continue          # один и тот же токен опрашиваем один раз
+        seen_tokens.add(tok)
         out[ch] = process_updates(channel=ch)
     return out
 
