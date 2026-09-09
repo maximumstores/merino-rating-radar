@@ -27,6 +27,7 @@ BSR_RETRIES = int(os.environ.get("BSR_RETRIES", "5"))   # доборы BSR/ги�
 
 DOMAIN_MARKETS = {
     "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
+    "amazon.ca": ("CA", "https://www.amazon.ca/dp/{asin}"),
     "amazon.com.be": ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
     "amazon.nl": ("NL", "https://www.amazon.nl/dp/{asin}?language=en_GB"),
     "amazon.de": ("DE", "https://www.amazon.de/dp/{asin}?language=en_GB"),
@@ -335,6 +336,7 @@ def in_variation(soup: BeautifulSoup) -> bool:
 # переменную окружения BSR_EXTRA_LABELS="слово1|слово2".
 BSR_LABELS = {
     "US": ["best sellers rank", "amazon best sellers rank"],
+    "CA": ["best sellers rank", "amazon best sellers rank", "classement des meilleures ventes"],
     "UK": ["best sellers rank", "amazon best sellers rank"],
     "BE": ["best sellers rank", "plaats in bestsellerlijst", "classement des meilleures ventes"],
     "NL": ["plaats in bestsellerlijst", "bestsellers-rang", "best sellers rank"],
@@ -583,6 +585,7 @@ CREATE TABLE IF NOT EXISTS review_counts (
 
 REVIEW_DOMAINS = {
     "US": "https://www.amazon.com/product-reviews/{asin}",
+    "CA": "https://www.amazon.ca/product-reviews/{asin}",
     "BE": "https://www.amazon.com.be/product-reviews/{asin}?language=en_GB",
     "NL": "https://www.amazon.nl/product-reviews/{asin}?language=en_GB",
     "DE": "https://www.amazon.de/product-reviews/{asin}?language=en_GB",
@@ -722,6 +725,7 @@ SD_REVIEWS_URL = "https://api.scrapingdog.com/amazon/reviews"
 # код рынка -> (domain, country) для Scrapingdog. Нужны ОБА параметра.
 SD_MARKET = {
     "US": ("com", "us"),
+    "CA": ("ca", "ca"),
     "BE": ("com.be", "be"),
     "NL": ("nl", "nl"),
     "DE": ("de", "de"),
@@ -1066,6 +1070,7 @@ BSR_VALUE_RE = re.compile(
 
 MAIN_CATEGORIES = {
     "us": ["clothing", "shoes", "jewelry", "electronics", "books", "sports"],
+    "ca": ["clothing", "shoes", "accessories", "electronics", "books", "sports"],
     "gb": ["clothing", "fashion", "electronics", "books", "sports"],
     "uk": ["clothing", "fashion", "electronics", "books", "sports"],
     "de": ["mode", "kleidung", "bekleidung", "elektronik", "bücher", "fashion", "sport"],
