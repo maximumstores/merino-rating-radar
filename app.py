@@ -299,7 +299,9 @@ def get_dictionary():
         return pd.DataFrame(columns=DICT_COLS)
     try:
         conn = _conn()
-        df = pd.read_sql("SELECT " + ", ".join(DICT_COLS) + " FROM asin_dictionary", conn)
+        df = pd.read_sql("SELECT " + ", ".join(DICT_COLS)
+                         + ", COALESCE(manual_cat, '') AS manual_cat"
+                         + ", COALESCE(title, '') AS title FROM asin_dictionary", conn)
         conn.close()
         return df
     except Exception:
@@ -1054,6 +1056,9 @@ def render_portfolio(filtered_df, kind):
                     "Источник": st.column_config.TextColumn("Страна", width="small", disabled=True),
                     "Категория": st.column_config.TextColumn("Категория", width="medium", disabled=True),
                     "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
+                    "С Amazon": st.column_config.TextColumn(
+                        "С Amazon", width="medium", disabled=True,
+                        help="Категория из API — только для справки, в фильтры не идёт"),
                     "Рейтинг ★": st.column_config.TextColumn("Рейтинг", width="small", disabled=True),
                     "Δ Рейтинг": st.column_config.NumberColumn("Δ★", format="%+.2f", width="small", disabled=True),
                     "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
@@ -1178,19 +1183,20 @@ def save_competitors(asins, group, market):
 
 
 def save_categories(pairs):
-    """pairs: {asin: категория}. Пишет вручную заданные категории в справочник."""
+    """pairs: {asin: категория}. Ручная категория, API её не перезаписывает."""
     if not pairs:
         return 0
     from psycopg2 import extras as _ex
     ensure_dict_table()
+    ensure_competitor_schema()
     conn = _conn()
     with conn.cursor() as cur:
         _ex.execute_values(
             cur,
             """
-            INSERT INTO asin_dictionary (asin, category, updated_at) VALUES %s
+            INSERT INTO asin_dictionary (asin, manual_cat, updated_at) VALUES %s
             ON CONFLICT (asin) DO UPDATE SET
-                category = EXCLUDED.category, updated_at = NOW();
+                manual_cat = EXCLUDED.manual_cat, updated_at = NOW();
             """,
             [(a, (c or "").strip(), datetime.datetime.now(datetime.timezone.utc))
              for a, c in pairs.items()], page_size=200)
@@ -2136,8 +2142,8 @@ def render_dynamics(filtered_df, hist_df, kind):
         st.info("Нет истории под текущие фильтры")
     else:
         d1, d2, d3 = st.columns([2, 1.5, 1.5])
-        params_sel = d1.multiselect("Параметры", ["Rating", "BSR", "Reviews", "1–2★ %"],
-                                    default=["Rating", "BSR", "Reviews"], key=f"dyn_params_{kind}")
+        params_sel = d1.multiselect("Параметры", ["Rating", "BSR", "Reviews", "Δ отзывов", "1–2★ %"],
+                                    default=["Rating", "Reviews", "Δ отзывов"], key=f"dyn_params_{kind}")
         sort_by = d2.selectbox("Сортировка ASIN", ["По последнему рейтингу ↑", "По последнему рейтингу ↓",
                                                    "По падению за период", "По алфавиту"], key=f"dyn_sort_{kind}")
         gran_d = d3.radio("Шаг", ["День", "Неделя"], horizontal=True, key=f"dyn_gran_{kind}")
@@ -2163,6 +2169,7 @@ def render_dynamics(filtered_df, hist_df, kind):
         # где реально был замер, а где значение будет перенесено
         measured = {"Rating": piv_r.notna(), "BSR": piv_b.notna(),
                     "Reviews": piv_c.notna(), "1–2★ %": piv_n.notna()}
+        measured["Δ отзывов"] = piv_c.notna()
         if fill_gaps:
             piv_r = piv_r.ffill(axis=1)
             piv_b = piv_b.ffill(axis=1)
@@ -2184,7 +2191,13 @@ def render_dynamics(filtered_df, hist_df, kind):
         src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
         grp_map = filtered_df.set_index("raw_asin")["_group"].to_dict() if GROUP_DF_COL else {}
         blocks = []
-        param_map = {"Rating": piv_r, "BSR": piv_b, "Reviews": piv_c, "1–2★ %": piv_n}
+        # прирост оценок за день: сколько новых оценок пришло между замерами
+        piv_d = piv_c.diff(axis=1)
+        # типичный дневной прирост по каждому ASIN — для сравнения со всплеском
+        spike_ref = piv_d.where(piv_d > 0).median(axis=1)
+
+        param_map = {"Rating": piv_r, "BSR": piv_b, "Reviews": piv_c,
+                     "Δ отзывов": piv_d, "1–2★ %": piv_n}
         if GROUP_DF_COL:
             order = sorted(order, key=lambda a: (str(grp_map.get(a, "—")), list(order).index(a)))
         cur_group = object()
@@ -2278,11 +2291,27 @@ def render_dynamics(filtered_df, hist_df, kind):
                 return f"{v:.1f}"
             if p == "1–2★ %":
                 return f"{int(v)}%"
+            if p == "Δ отзывов":
+                return "—" if v == 0 else f"{int(v):+d}"
             return f"{int(v)}"
 
-        def cell_style(p, v, prev):
+        def cell_style(p, v, prev, asin=None):
             if p in ("Группа (ср. ★)", "Rating"):
                 return rating_color(v)
+            if p == "Δ отзывов":
+                if pd.isna(v):
+                    return ""
+                if v < 0:      # число оценок уменьшилось — Amazon снял отзывы
+                    return "background:#d1c4e9;color:#311b92;font-weight:700"
+                ref = spike_ref.get(asin, np.nan) if asin else np.nan
+                if v == 0:
+                    return "color:#c7c7cc"
+                if pd.notnull(ref) and ref > 0:
+                    if v >= ref * 3:
+                        return "background:#e8534f;color:#fff;font-weight:700"
+                    if v >= ref * 2:
+                        return "background:#ffcc80;font-weight:600"
+                return "color:#1f8a4c;font-weight:600"
             if p == "1–2★ %" and pd.notnull(v):
                 return "background:#ffcdd2" if v > 15 else ("background:#fff9c4" if v > 8 else "")
             if p == "Reviews" and pd.notnull(v) and prev is not None and pd.notnull(prev) and v > prev:
@@ -2292,7 +2321,7 @@ def render_dynamics(filtered_df, hist_df, kind):
             return ""
 
         first_param = params_sel[0] if params_sel else ""
-        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Страна", "Параметр"] + day_labels)
+        th = "".join(f"<th>{c}</th>" for c in ["ASIN", "Страна", "Категория", "Параметр"] + day_labels)
         trs = []
         for _, r in wide.iterrows():
             p = r["Parameter"]
@@ -2306,12 +2335,19 @@ def render_dynamics(filtered_df, hist_df, kind):
                 c_cell = r["Страна"]
             else:
                 a_cell, c_cell = "", ""
+            cat_cell = ""
+            if head and not is_grp:
+                cat_cell = (dict_map.get(r["ASIN"], {}).get("manual_cat") or "")
+                if isinstance(cat_cell, float):
+                    cat_cell = ""
+                cat_cell = str(cat_cell).strip()[:22]
             tds = [f"<td class='c-asin'>{a_cell}</td>", f"<td class='c-cty'>{c_cell}</td>",
+                   f"<td class='c-cat'>{cat_cell}</td>",
                    f"<td class='c-par'>{'<b>' + p + '</b>' if is_grp else p}</td>"]
             prev = None
             for i, col in enumerate(day_labels):
                 v = r[col]
-                st_ = cell_style(p, v, prev)
+                st_ = cell_style(p, v, prev, r["ASIN"])
                 if not carried.loc[r.name, col]:
                     st_ = (st_ + ";" if st_ else "") + "font-style:italic;opacity:.45"
                 tds.append(f"<td style='{st_}'>{fmt_cell(v, p)}</td>")
@@ -2325,18 +2361,22 @@ def render_dynamics(filtered_df, hist_df, kind):
 .dyn {{ border-collapse:separate; border-spacing:0; font-size:13px; min-width:100%; }}
 .dyn th {{ position:sticky; top:0; background:#f5f5f7; color:#6e6e73; font-weight:600; text-align:right;
            padding:9px 12px; border-bottom:1px solid #e5e5ea; white-space:nowrap; z-index:2; }}
-.dyn th:nth-child(-n+3) {{ text-align:left; }}
+.dyn th:nth-child(-n+4) {{ text-align:left; }}
 .dyn td {{ padding:7px 12px; border-bottom:1px solid #f0f0f2; text-align:right; white-space:nowrap; }}
-.dyn td:nth-child(-n+3) {{ text-align:left; }}
+.dyn td:nth-child(-n+4) {{ text-align:left; }}
 .dyn td.c-asin {{ position:sticky; left:0; background:#fff; z-index:1; min-width:130px;
                   font-family:ui-monospace,Menlo,monospace; font-weight:600; }}
 .dyn td.c-cty {{ position:sticky; left:130px; background:#fff; z-index:1; min-width:64px; }}
+.dyn td.c-cat {{ position:sticky; left:194px; background:#fff; z-index:1; min-width:130px;
+                 color:#6e6e73; font-size:12px; }}
 .dyn th:nth-child(1) {{ position:sticky; left:0; z-index:3; }}
 .dyn th:nth-child(2) {{ position:sticky; left:130px; z-index:3; }}
+.dyn th:nth-child(3) {{ position:sticky; left:194px; z-index:3; }}
 .dyn td.c-asin a {{ color:#0071e3; text-decoration:none; }}
 .dyn td.c-asin a:hover {{ text-decoration:underline; }}
 .dyn tr.blk td {{ border-top:1px solid #d9d9de; }}
 .dyn tr.grp td {{ background:#e8e8ed; border-top:2px solid #c7c7cc; }}
+.dyn tr.grp td.c-cat {{ background:#e8e8ed; }}
 .dyn tr.grp td.c-asin, .dyn tr.grp td.c-cty {{ background:#e8e8ed; }}
 </style>
 <div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
@@ -2356,12 +2396,13 @@ def render_dynamics(filtered_df, hist_df, kind):
             cat_tbl = pd.DataFrame({
                 "ASIN": list(order),
                 "Страна": [str(src_map.get(a, "") or "") for a in order],
-                "Категория": [_dv(a, "category") for a in order],
+                "Категория": [_dv(a, "manual_cat") for a in order],
                 "Parent": [_dv(a, "parent_asin") for a in order],
+                "С Amazon": [_dv(a, "category")[:40] for a in order],
                 "Название": [_dv(a, "title")[:80] for a in order],
             })
             known_cats = sorted({str(c) for c in cat_tbl["Категория"].tolist() if str(c).strip()}
-                                | {str(c) for c in all_cats if str(c).strip() and str(c) != "—"})
+                                )
             if known_cats:
                 st.caption("Уже используются: " + " · ".join(f"`{c}`" for c in known_cats[:20]))
 
@@ -2404,13 +2445,16 @@ def render_dynamics(filtered_df, hist_df, kind):
                         "Категория", width="medium",
                         help="Пиши что угодно: Men LS, Men Pants, Socks… Пустая ячейка ничего не изменит"),
                     "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
+                    "С Amazon": st.column_config.TextColumn(
+                        "С Amazon", width="medium", disabled=True,
+                        help="Категория из API — только для справки, в фильтры не идёт"),
                     "Название": st.column_config.TextColumn("Название", width="large", disabled=True),
                 })
             cc1, cc2 = st.columns([1, 3])
             if cc1.button("💾 Сохранить категории", type="primary", key=f"cat_save_{kind}"):
                 changed = {r["ASIN"]: str(r["Категория"] or "").strip()
                            for _, r in edited_cat.iterrows()
-                           if str(r["Категория"] or "").strip() != _dv(r["ASIN"], "category")}
+                           if str(r["Категория"] or "").strip() != _dv(r["ASIN"], "manual_cat")}
                 if not changed:
                     st.info("Изменений нет")
                 else:
@@ -2440,7 +2484,13 @@ def render_dynamics(filtered_df, hist_df, kind):
         st.markdown(html, unsafe_allow_html=True)
         st.markdown("<div class='muted' style='margin-top:6px'>"
                     "🟢 ≥4.5 · 🟡 4.3–4.4 · 🔴 ≤4.2 · зелёные Reviews — прибавились · "
-                    "красный BSR — просел более чем на 15%"
+                    "красный BSR — просел более чем на 15%<br>"
+                    "<b>Δ отзывов</b> — сколько оценок пришло за день: "
+                    "<span style='background:#ffcc80;padding:0 6px;border-radius:3px'>жёлтый</span> — вдвое "
+                    "больше обычного, <span style='background:#e8534f;color:#fff;padding:0 6px;"
+                    "border-radius:3px'>красный</span> — втрое и выше, "
+                    "<span style='background:#d1c4e9;padding:0 6px;border-radius:3px'>сиреневый</span> — "
+                    "оценок стало меньше (Amazon снял). Сравнение с обычным дневным приростом этого же ASIN"
                     + (" · <i>курсивом и бледнее</i> — сбора в этот день не было, "
                        "показано последнее известное значение" if fill_gaps else "")
                     + "</div>", unsafe_allow_html=True)
@@ -2453,11 +2503,12 @@ def render_dynamics(filtered_df, hist_df, kind):
         def style_rows(row):
             p = wide.loc[row.name, "Parameter"]
             vals = wide.loc[row.name, day_labels]
+            a_ = wide.loc[row.name, "ASIN"]
             out = [""] * len(row)
             prev = None
             styles = []
             for v in vals:
-                styles.append(cell_style(p, v, prev))
+                styles.append(cell_style(p, v, prev, a_))
                 if pd.notnull(v):
                     prev = v
             out[3:] = styles
