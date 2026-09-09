@@ -28,6 +28,8 @@ BSR_RETRIES = int(os.environ.get("BSR_RETRIES", "5"))   # доборы BSR/ги�
 DOMAIN_MARKETS = {
     "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
     "amazon.ca": ("CA", "https://www.amazon.ca/dp/{asin}"),
+    "amazon.com.mx": ("MX", "https://www.amazon.com.mx/dp/{asin}"),
+    "amazon.com.br": ("BR", "https://www.amazon.com.br/dp/{asin}"),
     "amazon.com.be": ("BE", "https://www.amazon.com.be/dp/{asin}?language=en_GB"),
     "amazon.nl": ("NL", "https://www.amazon.nl/dp/{asin}?language=en_GB"),
     "amazon.de": ("DE", "https://www.amazon.de/dp/{asin}?language=en_GB"),
@@ -35,6 +37,16 @@ DOMAIN_MARKETS = {
     "amazon.fr": ("FR", "https://www.amazon.fr/dp/{asin}"),
     "amazon.it": ("IT", "https://www.amazon.it/dp/{asin}"),
     "amazon.es": ("ES", "https://www.amazon.es/dp/{asin}"),
+    "amazon.se": ("SE", "https://www.amazon.se/dp/{asin}?language=en_GB"),
+    "amazon.pl": ("PL", "https://www.amazon.pl/dp/{asin}?language=en_GB"),
+    "amazon.ie": ("IE", "https://www.amazon.ie/dp/{asin}"),
+    "amazon.com.tr": ("TR", "https://www.amazon.com.tr/dp/{asin}"),
+    "amazon.ae": ("AE", "https://www.amazon.ae/dp/{asin}"),
+    "amazon.sa": ("SA", "https://www.amazon.sa/dp/{asin}?language=en_AE"),
+    "amazon.eg": ("EG", "https://www.amazon.eg/dp/{asin}?language=en_AE"),
+    "amazon.in": ("IN", "https://www.amazon.in/dp/{asin}"),
+    "amazon.sg": ("SG", "https://www.amazon.sg/dp/{asin}"),
+    "amazon.com.au": ("AU", "https://www.amazon.com.au/dp/{asin}"),
 }
 # порядок важен: сначала самые длинные домены, чтобы amazon.com не съел amazon.com.be
 DOMAIN_ORDER = sorted(DOMAIN_MARKETS, key=len, reverse=True)
@@ -344,6 +356,14 @@ BSR_LABELS = {
     "FR": ["classement des meilleures ventes", "classement des meilleures ventes d'amazon"],
     "IT": ["posizione nella classifica bestseller", "posizione nella classifica"],
     "ES": ["clasificación en los más vendidos", "clasificacion en los mas vendidos"],
+    "MX": ["clasificación en los más vendidos", "clasificacion en los mas vendidos"],
+    "BR": ["ranking dos mais vendidos", "classificação nos mais vendidos"],
+    "SE": ["försäljningsrankning", "rangordning för bästsäljare", "best sellers rank"],
+    "PL": ["ranking bestsellerów", "pozycja w rankingu", "best sellers rank"],
+    "TR": ["çok satanlar sıralaması", "best sellers rank"],
+    "IE": ["best sellers rank"], "AE": ["best sellers rank"], "SA": ["best sellers rank"],
+    "EG": ["best sellers rank"], "IN": ["best sellers rank"], "SG": ["best sellers rank"],
+    "AU": ["best sellers rank"],
 }
 # «#123 in Category» на разных языках: перед номером и между номером и категорией
 BSR_NUM_RE = re.compile(
@@ -586,6 +606,18 @@ CREATE TABLE IF NOT EXISTS review_counts (
 REVIEW_DOMAINS = {
     "US": "https://www.amazon.com/product-reviews/{asin}",
     "CA": "https://www.amazon.ca/product-reviews/{asin}",
+    "MX": "https://www.amazon.com.mx/product-reviews/{asin}",
+    "BR": "https://www.amazon.com.br/product-reviews/{asin}",
+    "SE": "https://www.amazon.se/product-reviews/{asin}?language=en_GB",
+    "PL": "https://www.amazon.pl/product-reviews/{asin}?language=en_GB",
+    "IE": "https://www.amazon.ie/product-reviews/{asin}",
+    "TR": "https://www.amazon.com.tr/product-reviews/{asin}",
+    "AE": "https://www.amazon.ae/product-reviews/{asin}",
+    "SA": "https://www.amazon.sa/product-reviews/{asin}?language=en_AE",
+    "EG": "https://www.amazon.eg/product-reviews/{asin}?language=en_AE",
+    "IN": "https://www.amazon.in/product-reviews/{asin}",
+    "SG": "https://www.amazon.sg/product-reviews/{asin}",
+    "AU": "https://www.amazon.com.au/product-reviews/{asin}",
     "BE": "https://www.amazon.com.be/product-reviews/{asin}?language=en_GB",
     "NL": "https://www.amazon.nl/product-reviews/{asin}?language=en_GB",
     "DE": "https://www.amazon.de/product-reviews/{asin}?language=en_GB",
@@ -597,7 +629,9 @@ REVIEW_DOMAINS = {
 
 
 def ensure_competitor_schema():
-    """Группа конкурента (Men LS, Men Pants…) и бренд — в справочнике ASIN."""
+    """Конкуренты живут в своей таблице с ключом (asin, market):
+    один и тот же товар продаётся в нескольких странах, и в каждой у него
+    своя группа и свои показатели."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -609,6 +643,35 @@ def ensure_competitor_schema():
             # ручная категория — отдельно от category, которую пишет API
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS manual_cat TEXT;")
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS title TEXT;")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS competitors (
+                    asin       TEXT NOT NULL,
+                    market     TEXT NOT NULL,
+                    comp_group TEXT DEFAULT '',
+                    brand      TEXT DEFAULT '',
+                    title      TEXT DEFAULT '',
+                    added_at   TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (asin, market)
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_competitors_market "
+                        "ON competitors (market, comp_group);")
+
+            # разовая миграция старой схемы: конкуренты лежали в tracked_asins
+            cur.execute("SELECT COUNT(*) FROM competitors;")
+            if (cur.fetchone() or [0])[0] == 0:
+                cur.execute("""
+                    INSERT INTO competitors (asin, market, comp_group, brand, title)
+                    SELECT t.asin,
+                           COALESCE(NULLIF(d.market, ''), 'DE'),
+                           COALESCE(d.comp_group, ''), COALESCE(d.brand, ''), COALESCE(d.title, '')
+                    FROM tracked_asins t
+                    LEFT JOIN asin_dictionary d ON d.asin = t.asin
+                    WHERE t.kind = 'competitor'
+                    ON CONFLICT (asin, market) DO NOTHING;
+                """)
         conn.commit()
 
 
@@ -724,15 +787,12 @@ SD_REVIEWS_URL = "https://api.scrapingdog.com/amazon/reviews"
 
 # код рынка -> (domain, country) для Scrapingdog. Нужны ОБА параметра.
 SD_MARKET = {
-    "US": ("com", "us"),
-    "CA": ("ca", "ca"),
-    "BE": ("com.be", "be"),
-    "NL": ("nl", "nl"),
-    "DE": ("de", "de"),
-    "UK": ("co.uk", "gb"),
-    "FR": ("fr", "fr"),
-    "IT": ("it", "it"),
-    "ES": ("es", "es"),
+    "US": ("com", "us"), "CA": ("ca", "ca"), "MX": ("com.mx", "mx"), "BR": ("com.br", "br"),
+    "UK": ("co.uk", "gb"), "DE": ("de", "de"), "FR": ("fr", "fr"), "IT": ("it", "it"),
+    "ES": ("es", "es"), "NL": ("nl", "nl"), "BE": ("com.be", "be"), "SE": ("se", "se"),
+    "PL": ("pl", "pl"), "IE": ("ie", "ie"), "TR": ("com.tr", "tr"),
+    "AE": ("ae", "ae"), "SA": ("sa", "sa"), "EG": ("eg", "eg"), "IN": ("in", "in"),
+    "SG": ("sg", "sg"), "AU": ("com.au", "au"),
 }
 
 
