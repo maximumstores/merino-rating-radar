@@ -164,9 +164,15 @@ TIMEZONES = {
     "Нью-Йорк (EDT / EST)": "America/New_York",
 }
 MARKET_DOMAINS = {
-    "US": "amazon.com", "CA": "amazon.ca", "BE": "amazon.com.be", "NL": "amazon.nl",
-    "DE": "amazon.de", "UK": "amazon.co.uk", "FR": "amazon.fr", "IT": "amazon.it",
-    "ES": "amazon.es",
+    # Северная и Южная Америка
+    "US": "amazon.com", "CA": "amazon.ca", "MX": "amazon.com.mx", "BR": "amazon.com.br",
+    # Европа
+    "UK": "amazon.co.uk", "DE": "amazon.de", "FR": "amazon.fr", "IT": "amazon.it",
+    "ES": "amazon.es", "NL": "amazon.nl", "BE": "amazon.com.be", "SE": "amazon.se",
+    "PL": "amazon.pl", "IE": "amazon.ie", "TR": "amazon.com.tr",
+    # Ближний Восток, Азия, Океания
+    "AE": "amazon.ae", "SA": "amazon.sa", "EG": "amazon.eg", "IN": "amazon.in",
+    "SG": "amazon.sg", "AU": "amazon.com.au",
 }
 VALID_SOURCES = tuple(MARKET_DOMAINS.keys())
 
@@ -392,6 +398,28 @@ def parse_asin_batch(text, existing, default_market=None):
             markets[code] = mk
         (dups if code in existing else new).append(code)
     return new, dups, invalid, markets, batch_dups
+
+
+def set_markets_bulk(pairs):
+    """{asin: страна} — перезаписывает страну в справочнике, в отличие от save_markets."""
+    if not pairs:
+        return 0
+    from psycopg2 import extras as _ex
+    ensure_dict_table()
+    conn = _conn()
+    with conn.cursor() as cur:
+        _ex.execute_values(
+            cur,
+            """
+            INSERT INTO asin_dictionary (asin, market, updated_at) VALUES %s
+            ON CONFLICT (asin) DO UPDATE SET market = EXCLUDED.market, updated_at = NOW();
+            """,
+            [(a, m, datetime.datetime.now(datetime.timezone.utc)) for a, m in pairs.items()],
+            page_size=200)
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+    return len(pairs)
 
 
 def save_markets(markets):
@@ -3137,6 +3165,51 @@ def render_asin_manager(kind):
                 st.rerun()
             except Exception as e:
                 st.error(f"Ошибка добавления: {e}")
+
+    # ---- сменить страну у существующих ----
+    st.markdown("---")
+    with st.expander("🌍 Сменить страну у ASIN (уже в списке)", expanded=False):
+        st.markdown("<div class='muted'>Вставь ссылки — страна определится по домену каждой. "
+                    "Список отслеживания не меняется, обновляется только страна в справочнике.</div>",
+                    unsafe_allow_html=True)
+        mv_text = st.text_area("Ссылки", height=120, key=f"mv_text_{kind}",
+                               placeholder="https://www.amazon.ca/dp/B08LL8Q71V\n"
+                                           "https://www.amazon.ca/dp/B0HC6G7DKZ",
+                               label_visibility="collapsed")
+        if mv_text.strip():
+            codes, _d, inv, mk_map, _b = parse_asin_batch(mv_text, [], None)
+            in_list = [c for c in codes if c in tracked_k]
+            not_in = [c for c in codes if c not in tracked_k]
+            no_hint = [c for c in in_list if c not in mk_map]
+            pairs = {c: mk_map[c] for c in in_list if c in mk_map}
+            changed = {c: m for c, m in pairs.items() if asin_market_map.get(c) != m}
+
+            q1, q2, q3 = st.columns(3)
+            q1.markdown(f"🟢 **Сменится: {len(changed)}**")
+            q2.markdown(f"⚪ **Уже верная: {len(pairs) - len(changed)}**")
+            q3.markdown(f"🟡 **Нет в списке: {len(not_in)}**"
+                        + (f"<br><span class='muted'>{', '.join(not_in[:10])}</span>" if not_in else ""),
+                        unsafe_allow_html=True)
+            if no_hint:
+                st.caption(f"Без ссылки, страну не определить: {len(no_hint)} "
+                           f"({', '.join(no_hint[:8])}) — добавь домен")
+            if inv:
+                st.caption(f"Не распознано: {len(inv)} ({', '.join(inv[:5])})")
+            if changed:
+                prev_now = {}
+                for c, m in changed.items():
+                    key = f"{asin_market_map.get(c, '—')} → {m}"
+                    prev_now[key] = prev_now.get(key, 0) + 1
+                st.markdown("**Что поменяется:** " + " · ".join(f"`{k}` {v}" for k, v in prev_now.items()))
+            if st.button(f"🌍 Обновить страну у {len(changed)}", type="primary",
+                         disabled=not changed, key=f"mv_btn_{kind}"):
+                try:
+                    n = set_markets_bulk(changed)
+                    st.success(f"Страна обновлена у {n} позиций. Запусти прогон — "
+                               "данные соберутся уже с правильной витрины.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
 
     # ---- заменить ASIN ----
     st.markdown("---")
