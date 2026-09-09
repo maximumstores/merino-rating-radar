@@ -493,6 +493,9 @@ def set_setting(key, value):
 
 
 OWN_BRANDS_DEFAULT = "Merino.tech"
+# конкурент с меньшим числом отзывов не считается «лучшим»: один-два отзыва
+# дают 5.0 и портят сравнение
+COMP_MIN_REVIEWS = int(os.environ.get("COMP_MIN_REVIEWS", "20"))
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -1446,11 +1449,16 @@ if nav == "🥊 Конкуренты":
                 part = latest[latest["grp"] == g]
                 if part.empty:
                     continue
-                ours, comp = part[part["own"]], part[~part["own"]]
+                ours, comp_all = part[part["own"]], part[~part["own"]]
+                # «лучшим» не считаем новичка с парой оценок
+                comp = comp_all[comp_all["review_count"].fillna(0) >= COMP_MIN_REVIEWS]
+                if comp.empty:
+                    comp = comp_all.iloc[0:0]
                 lines.append(f"📌 <b>{g}</b>")
-                lines.append(f"  • Товары: {len(part)} (наших: {len(ours)}, конкурентов: {len(comp)})")
+                lines.append(f"  • Товары: {len(part)} (наших: {len(ours)}, конкурентов: {len(comp_all)}"
+                             + (f", сопоставимых: {len(comp)}" if len(comp) != len(comp_all) else "") + ")")
                 row = {"Группа": g, "ASIN всего": len(part),
-                       "Наших": len(ours), "Конкурентов": len(comp)}
+                       "Наших": len(ours), "Конкурентов": len(comp_all)}
 
                 def cmp_line(label, col, better="max", fmt="{:.1f}"):
                     o = ours[col].dropna()
@@ -1968,12 +1976,14 @@ if nav == "🥊 Конкуренты":
                     st.code(rep_text.replace("<b>", "").replace("</b>", "")
                             .replace("<i>", "").replace("</i>", ""), language=None)
                 sc1, sc2 = st.columns([1, 3])
-                comp_token = notifier.channel_token("comp") if NOTIFIER_OK else None
-                if comp_token and sc1.button("📤 Отправить в Telegram", key="comp_send_tg", type="primary"):
+                ch_for = notifier.channel_for_country(sel_mkt) if NOTIFIER_OK else "comp"
+                comp_token = notifier.channel_token(ch_for) if NOTIFIER_OK else None
+                if comp_token and sc1.button(f"📤 Отправить в Telegram ({ch_for})",
+                                             key="comp_send_tg", type="primary"):
                     try:
                         ok_n, total = notifier.broadcast(
                             rep_text + f"\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>",
-                            channel="comp")
+                            channel=ch_for)
                         if total == 0:
                             st.warning("В канале конкурентов пока нет подписчиков — открой бота и отправь /start")
                         else:
