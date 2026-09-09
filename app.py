@@ -2364,6 +2364,36 @@ def render_dynamics(filtered_df, hist_df, kind):
                                 | {str(c) for c in all_cats if str(c).strip() and str(c) != "—"})
             if known_cats:
                 st.caption("Уже используются: " + " · ".join(f"`{c}`" for c in known_cats[:20]))
+
+            sc1, sc2, sc3 = st.columns([2, 1.6, 1.2])
+            q = sc1.text_input("Поиск", key=f"cat_q_{kind}", placeholder="ASIN, часть названия или категории",
+                               label_visibility="collapsed")
+            only_empty = sc2.checkbox("Только без категории", key=f"cat_empty_{kind}")
+            bulk = sc3.text_input("Проставить всем найденным", key=f"cat_bulk_{kind}",
+                                  placeholder="категория для всех", label_visibility="collapsed")
+
+            mask = pd.Series(True, index=cat_tbl.index)
+            if q.strip():
+                ql = q.strip().lower()
+                mask &= (cat_tbl["ASIN"].str.lower().str.contains(ql)
+                         | cat_tbl["Категория"].str.lower().str.contains(ql)
+                         | cat_tbl["Название"].str.lower().str.contains(ql)
+                         | cat_tbl["Parent"].str.lower().str.contains(ql))
+            if only_empty:
+                mask &= cat_tbl["Категория"].str.strip() == ""
+            shown = cat_tbl[mask].reset_index(drop=True)
+            st.caption(f"Показано {len(shown)} из {len(cat_tbl)}")
+
+            if bulk.strip() and st.button(f"⇩ Поставить «{bulk.strip()}» всем показанным ({len(shown)})",
+                                          key=f"cat_bulk_btn_{kind}", disabled=shown.empty):
+                try:
+                    n = save_categories({a: bulk.strip() for a in shown["ASIN"]})
+                    st.success(f"Проставлено: {n}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+            cat_tbl = shown
             edited_cat = st.data_editor(
                 cat_tbl, use_container_width=True, hide_index=True,
                 height=min(500, 40 + 35 * len(cat_tbl)), key=f"cat_editor_{kind}",
