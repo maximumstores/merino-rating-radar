@@ -1177,6 +1177,29 @@ def save_competitors(asins, group, market):
     st.cache_data.clear()
 
 
+def save_categories(pairs):
+    """pairs: {asin: категория}. Пишет вручную заданные категории в справочник."""
+    if not pairs:
+        return 0
+    from psycopg2 import extras as _ex
+    ensure_dict_table()
+    conn = _conn()
+    with conn.cursor() as cur:
+        _ex.execute_values(
+            cur,
+            """
+            INSERT INTO asin_dictionary (asin, category, updated_at) VALUES %s
+            ON CONFLICT (asin) DO UPDATE SET
+                category = EXCLUDED.category, updated_at = NOW();
+            """,
+            [(a, (c or "").strip(), datetime.datetime.now(datetime.timezone.utc))
+             for a, c in pairs.items()], page_size=200)
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+    return len(pairs)
+
+
 def save_asin_meta(asin, brand="", title="", market="", category=""):
     """Пишет бренд/название/категорию в справочник, не затирая уже заполненное."""
     ensure_competitor_schema()
@@ -2318,6 +2341,51 @@ def render_dynamics(filtered_df, hist_df, kind):
 </style>
 <div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
 """
+
+        with st.expander(f"✏️ Категории — заполнить вручную ({len(order)} ASIN)", expanded=False):
+            st.markdown("<div class='muted'>Впиши категорию напротив ASIN и нажми «Сохранить». "
+                        "Значения попадут в справочник и станут доступны в фильтре «Категория» "
+                        "и в группировке.</div>", unsafe_allow_html=True)
+            cat_tbl = pd.DataFrame({
+                "ASIN": list(order),
+                "Страна": [src_map.get(a, "") for a in order],
+                "Категория": [(dict_map.get(a, {}).get("category") or "") for a in order],
+                "Parent": [(dict_map.get(a, {}).get("parent_asin") or "") for a in order],
+                "Название": [(dict_map.get(a, {}).get("title") or "")[:80] for a in order],
+            })
+            known_cats = sorted({c for c in cat_tbl["Категория"].tolist() if c}
+                                | {c for c in all_cats if c and c != "—"})
+            if known_cats:
+                st.caption("Уже используются: " + " · ".join(f"`{c}`" for c in known_cats[:20]))
+            edited_cat = st.data_editor(
+                cat_tbl, use_container_width=True, hide_index=True,
+                height=min(500, 40 + 35 * len(cat_tbl)), key=f"cat_editor_{kind}",
+                column_config={
+                    "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
+                    "Страна": st.column_config.TextColumn("Стр.", width="small", disabled=True),
+                    "Категория": st.column_config.TextColumn(
+                        "Категория", width="medium",
+                        help="Пиши что угодно: Men LS, Men Pants, Socks… Пустая ячейка ничего не изменит"),
+                    "Parent": st.column_config.TextColumn("Parent", width="small", disabled=True),
+                    "Название": st.column_config.TextColumn("Название", width="large", disabled=True),
+                })
+            cc1, cc2 = st.columns([1, 3])
+            if cc1.button("💾 Сохранить категории", type="primary", key=f"cat_save_{kind}"):
+                changed = {r["ASIN"]: r["Категория"] for _, r in edited_cat.iterrows()
+                           if str(r["Категория"] or "").strip()
+                           != str(dict_map.get(r["ASIN"], {}).get("category") or "").strip()}
+                if not changed:
+                    st.info("Изменений нет")
+                else:
+                    try:
+                        n = save_categories(changed)
+                        st.success(f"Сохранено категорий: {n}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка сохранения: {e}")
+            cc2.markdown("<div class='muted' style='margin-top:8px'>Можно вписывать любые названия. "
+                         "Сохранённые категории сразу появятся в фильтре «Категория» и в группировке.</div>",
+                         unsafe_allow_html=True)
 
         st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
 
