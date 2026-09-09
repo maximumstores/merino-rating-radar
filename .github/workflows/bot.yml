@@ -25,4 +25,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN_COMP: ${{ secrets.TELEGRAM_BOT_TOKEN_COMP }}
+          TELEGRAM_BOT_TOKEN_US: ${{ secrets.TELEGRAM_BOT_TOKEN_US }}
+          TELEGRAM_BOT_TOKEN_CA: ${{ secrets.TELEGRAM_BOT_TOKEN_CA }}
+          TELEGRAM_BOT_TOKEN_DE: ${{ secrets.TELEGRAM_BOT_TOKEN_DE }}
+          TELEGRAM_BOT_TOKEN_UK: ${{ secrets.TELEGRAM_BOT_TOKEN_UK }}
+          TELEGRAM_BOT_TOKEN_FR: ${{ secrets.TELEGRAM_BOT_TOKEN_FR }}
+          TELEGRAM_BOT_TOKEN_IT: ${{ secrets.TELEGRAM_BOT_TOKEN_IT }}
+          TELEGRAM_BOT_TOKEN_ES: ${{ secrets.TELEGRAM_BOT_TOKEN_ES }}
         run: python -c "import notifier; print('обработано:', notifier.process_all_channels())"
