@@ -2346,15 +2346,22 @@ def render_dynamics(filtered_df, hist_df, kind):
             st.markdown("<div class='muted'>Впиши категорию напротив ASIN и нажми «Сохранить». "
                         "Значения попадут в справочник и станут доступны в фильтре «Категория» "
                         "и в группировке.</div>", unsafe_allow_html=True)
+            def _dv(a, field):
+                """Значение из справочника строкой: NaN и None → пустая строка."""
+                v = dict_map.get(a, {}).get(field)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return ""
+                return str(v).strip()
+
             cat_tbl = pd.DataFrame({
                 "ASIN": list(order),
-                "Страна": [src_map.get(a, "") for a in order],
-                "Категория": [(dict_map.get(a, {}).get("category") or "") for a in order],
-                "Parent": [(dict_map.get(a, {}).get("parent_asin") or "") for a in order],
-                "Название": [(dict_map.get(a, {}).get("title") or "")[:80] for a in order],
+                "Страна": [str(src_map.get(a, "") or "") for a in order],
+                "Категория": [_dv(a, "category") for a in order],
+                "Parent": [_dv(a, "parent_asin") for a in order],
+                "Название": [_dv(a, "title")[:80] for a in order],
             })
-            known_cats = sorted({c for c in cat_tbl["Категория"].tolist() if c}
-                                | {c for c in all_cats if c and c != "—"})
+            known_cats = sorted({str(c) for c in cat_tbl["Категория"].tolist() if str(c).strip()}
+                                | {str(c) for c in all_cats if str(c).strip() and str(c) != "—"})
             if known_cats:
                 st.caption("Уже используются: " + " · ".join(f"`{c}`" for c in known_cats[:20]))
             edited_cat = st.data_editor(
@@ -2371,9 +2378,9 @@ def render_dynamics(filtered_df, hist_df, kind):
                 })
             cc1, cc2 = st.columns([1, 3])
             if cc1.button("💾 Сохранить категории", type="primary", key=f"cat_save_{kind}"):
-                changed = {r["ASIN"]: r["Категория"] for _, r in edited_cat.iterrows()
-                           if str(r["Категория"] or "").strip()
-                           != str(dict_map.get(r["ASIN"], {}).get("category") or "").strip()}
+                changed = {r["ASIN"]: str(r["Категория"] or "").strip()
+                           for _, r in edited_cat.iterrows()
+                           if str(r["Категория"] or "").strip() != _dv(r["ASIN"], "category")}
                 if not changed:
                     st.info("Изменений нет")
                 else:
