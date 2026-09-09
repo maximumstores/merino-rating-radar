@@ -2188,9 +2188,15 @@ def render_dynamics(filtered_df, hist_df, kind):
         else:
             order = sorted(piv_r.index)
 
-        # поиск по таблице: ASIN, категория, parent, название
-        q_dyn = st.text_input("Поиск в таблице", key=f"dyn_q_{kind}", label_visibility="collapsed",
-                              placeholder="🔍 поиск: ASIN, категория, parent или название")
+        # поиск и выбор ASIN — фильтруют таблицу
+        sq1, sq2 = st.columns([2, 3])
+        q_dyn = sq1.text_input("Поиск в таблице", key=f"dyn_q_{kind}", label_visibility="collapsed",
+                               placeholder="🔍 поиск: ASIN, категория, parent или название")
+        picked = sq2.multiselect("Показать только эти ASIN", options=list(order), default=[],
+                                 key=f"dyn_upd_{kind}", label_visibility="collapsed",
+                                 placeholder="или выбери конкретные ASIN — таблица покажет только их")
+        if picked:
+            order = [a for a in order if a in picked]
         if q_dyn.strip():
             ql = q_dyn.strip().lower()
 
@@ -2488,14 +2494,13 @@ def render_dynamics(filtered_df, hist_df, kind):
                    + (f" · фильтр: «{q_dyn}»" if q_dyn.strip() else ""))
 
         u1, u2, u3 = st.columns([3, 1, 1])
-        picked = u1.multiselect("Обновить ASIN", options=list(order), default=[],
-                                placeholder="выбери ASIN для пересбора", key=f"dyn_upd_{kind}",
-                                label_visibility="collapsed")
-        if u2.button(f"↻ Обновить ({len(picked)})", disabled=not picked, type="primary",
+        u1.markdown("<div class='muted' style='margin-top:8px'>Выбор ASIN и поиск — над таблицей. "
+                    "Кнопки пересобирают то, что сейчас показано.</div>", unsafe_allow_html=True)
+        if u2.button(f"↻ Обновить выбранные ({len(picked)})", disabled=not picked, type="primary",
                      key=f"dyn_upd_btn_{kind}", use_container_width=True):
             run_collection(picked, "Обновление")
-        if u3.button(f"↻ Все ({len(order)})", key=f"dyn_upd_all_{kind}", use_container_width=True,
-                     help="Пересобрать все ASIN из таблицы"):
+        if u3.button(f"↻ Все в таблице ({len(order)})", key=f"dyn_upd_all_{kind}", use_container_width=True,
+                     help="Пересобрать все ASIN, попавшие в таблицу после фильтров"):
             run_collection(list(order), "Обновление")
 
         st.markdown(html, unsafe_allow_html=True)
