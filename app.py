@@ -1314,30 +1314,11 @@ if nav == "🥊 Конкуренты":
                 "как в гугл-таблице.</div>", unsafe_allow_html=True)
 
     @st.cache_data(ttl=3600, show_spinner=False)
-    def _comp_bot_name():
+    def _bot_name(channel):
         try:
-            return notifier.bot_username("comp", with_error=True)
+            return notifier.bot_username(channel, with_error=True)
         except Exception as e:
             return None, str(e)
-
-    comp_user, comp_err = _comp_bot_name() if NOTIFIER_OK else (None, None)
-    has_own_bot = bool(os.environ.get("TELEGRAM_BOT_TOKEN_COMP"))
-    comp_user = comp_user or ("ваш новый бот" if has_own_bot else "RatingRadar_bot")
-    comp_link = f"https://t.me/{comp_user}" if not comp_user.startswith("ваш") else None
-
-    if comp_link:
-        st.markdown(
-            f"<div style='margin:8px 0 4px'>"
-            f"<a href='{comp_link}' target='_blank' style='display:inline-block;background:#229ED9;"
-            f"color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;"
-            f"text-decoration:none'>✈️ Отчёты по конкурентам — @{comp_user}</a>"
-            f"<span class='muted' style='margin-left:10px'>подписка в один клик: /start"
-            + ("" if has_own_bot else " · отдельный бот не задан, отчёты идут в основной") +
-            "</span></div>", unsafe_allow_html=True)
-    else:
-        st.warning(f"Telegram не принял токен второго бота: **{comp_err}**. "
-                   "Обычно это опечатка или лишние символы в TELEGRAM_BOT_TOKEN_COMP. "
-                   "Формат: `цифры:буквы`, без кавычек внутри значения и без пробелов.", icon="⚠️")
 
     comp_df = get_competitors()
 
@@ -1423,6 +1404,24 @@ if nav == "🥊 Конкуренты":
             "Раскраска", ["Изменение к прошлому замеру", "Место в группе"], key="comp_color_mode",
             help="«Изменение» — стало лучше или хуже со вчера. "
                  "«Место в группе» — как позиция выглядит на фоне остальных в этой же группе.")
+
+        # бот именно этой страны: свой, если задан TELEGRAM_BOT_TOKEN_<CC>, иначе общий
+        if NOTIFIER_OK:
+            ch_country = notifier.channel_for_country(sel_mkt)
+            bot_user, bot_err = _bot_name(ch_country)
+            own_bot = ch_country != "comp"
+            if bot_user:
+                st.markdown(
+                    f"<div style='margin:2px 0 10px'>"
+                    f"<a href='https://t.me/{bot_user}' target='_blank' style='display:inline-block;"
+                    f"background:#229ED9;color:#fff;padding:5px 13px;border-radius:999px;font-size:13px;"
+                    f"font-weight:600;text-decoration:none'>✈️ Отчёты по {sel_mkt} — @{bot_user}</a>"
+                    f"<span class='muted' style='margin-left:10px'>подписка: /start"
+                    + ("" if own_bot else f" · у {sel_mkt} своего бота нет, отчёты идут в общий "
+                                          "(секрет TELEGRAM_BOT_TOKEN_" + sel_mkt + ")") +
+                    "</span></div>", unsafe_allow_html=True)
+            elif bot_err:
+                st.caption(f"Telegram не принял токен канала {ch_country}: {bot_err}")
 
         use_groups = sel_groups or groups_all
         view = in_mkt[in_mkt["grp"].isin(use_groups)]
@@ -1934,16 +1933,41 @@ if nav == "🥊 Конкуренты":
         if comp_text.strip():
             existing = comp_df["asin"].tolist()
             new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(comp_text, existing, comp_market)
+            cmeta = comp_df.set_index("asin") if not comp_df.empty else pd.DataFrame()
+            # где именно уже лежат дубли и переедут ли они
+            dup_rows, moving = [], []
+            for a in dup_c:
+                g = str(cmeta.loc[a, "grp"]) if a in cmeta.index else ""
+                mk = str(cmeta.loc[a, "market"]) if a in cmeta.index else ""
+                dup_rows.append({"ASIN": a, "Сейчас в группе": g or "—", "Страна": mk or "—"})
+                if g != (comp_group or "").strip() or mk != comp_market:
+                    moving.append(a)
+            in_other_kind = [a for a in new_c if tracked_kind.get(a) in ("child", "parent")]
+
             c1, c2, c3 = st.columns(3)
-            c1.markdown(f"🟢 **Новых: {len(new_c)}**")
-            c2.markdown(f"🟡 **Уже есть: {len(dup_c)}**")
+            c1.markdown(f"🟢 **Новых: {len(new_c)}**"
+                        + (f"<br><span class='muted'>из них были в портфеле: {len(in_other_kind)} "
+                           f"({', '.join(in_other_kind[:8])})</span>" if in_other_kind else ""),
+                        unsafe_allow_html=True)
+            c2.markdown(f"🟡 **Уже в конкурентах: {len(dup_c)}**"
+                        + (f"<br><span class='muted'>переедут в «{comp_group}» → {comp_market}: "
+                           f"{len(moving)}</span>" if moving else ""), unsafe_allow_html=True)
             c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
                         + (f" · повторов: {len(bd)}" if bd else ""))
-            if st.button(f"➕ Добавить {len(new_c)} в «{comp_group or '—'}» → {comp_market}",
-                         type="primary", disabled=not (new_c and comp_group), key="comp_add"):
+            if dup_rows:
+                with st.expander(f"Где уже лежат эти {len(dup_c)} ASIN", expanded=False):
+                    st.dataframe(pd.DataFrame(dup_rows), use_container_width=True,
+                                 hide_index=True, height=min(300, 40 + 35 * len(dup_rows)))
+            to_save = new_c + moving          # новые + те, у кого меняется группа или страна
+            btn = f"➕ {len(new_c)} новых" + (f" · перенести {len(moving)}" if moving else "")
+            if st.button(f"{btn} → «{comp_group or '—'}» / {comp_market}",
+                         type="primary", disabled=not (to_save and comp_group), key="comp_add"):
                 try:
-                    save_competitors(new_c, comp_group.strip(), comp_market)
-                    st.success(f"Добавлено {len(new_c)} конкурентов в группу «{comp_group}»")
+                    save_competitors(to_save, comp_group.strip(), comp_market)
+                    msg = [f"добавлено {len(new_c)}"]
+                    if moving:
+                        msg.append(f"перенесено {len(moving)}")
+                    st.success(" · ".join(msg) + f" → «{comp_group}»")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
@@ -1990,11 +2014,13 @@ if nav == "🥊 Конкуренты":
                             st.success(f"Отправлено {ok_n} из {total}")
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
-                if comp_link:
+                _bu, _ = _bot_name(ch_for)
+                if _bu:
                     sc2.markdown(
-                        f"<div style='margin-top:6px'><a href='{comp_link}' target='_blank' "
+                        f"<div style='margin-top:6px'><a href='https://t.me/{_bu}' target='_blank' "
                         f"style='color:#229ED9;font-weight:600;text-decoration:none'>"
-                        f"@{comp_user} — подписаться на отчёты →</a></div>", unsafe_allow_html=True)
+                        f"@{_bu} — подписаться на отчёты по {sel_mkt} →</a></div>",
+                        unsafe_allow_html=True)
                 sc2.download_button("⬇ Скачать отчёт", rep_text.encode("utf-8"),
                                     f"competitors_{sel_mkt}.txt", "text/plain", key="comp_rep_dl")
 
