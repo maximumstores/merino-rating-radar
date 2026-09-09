@@ -159,6 +159,13 @@ def ensure_schema():
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS price TEXT;")
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr_num INTEGER;")
             cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
+            # индексы: без них выборка по ASIN и датам делает полный скан таблицы
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_asin_created "
+                        "ON asin_metrics (asin, created_at DESC);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_created "
+                        "ON asin_metrics (created_at DESC);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_runs_started "
+                        "ON collection_runs (started_at DESC);")
         conn.commit()
 
 
@@ -596,6 +603,8 @@ def ensure_competitor_schema():
                     product_type TEXT, brand TEXT, market TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
             """)
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS comp_group TEXT;")
+            # ручная категория — отдельно от category, которую пишет API
+            cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS manual_cat TEXT;")
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS title TEXT;")
         conn.commit()
 
