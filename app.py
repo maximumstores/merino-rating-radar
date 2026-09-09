@@ -1930,43 +1930,49 @@ if nav == "🥊 Конкуренты":
         comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
                                  placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\nB07NGJLLH4")
         if comp_text.strip():
-            existing = comp_df["asin"].tolist()
-            new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(comp_text, existing, comp_market)
-            cmeta = comp_df.set_index("asin") if not comp_df.empty else pd.DataFrame()
-            # где именно уже лежат дубли и переедут ли они
-            dup_rows, moving = [], []
-            for a in dup_c:
-                g = str(cmeta.loc[a, "grp"]) if a in cmeta.index else ""
-                mk = str(cmeta.loc[a, "market"]) if a in cmeta.index else ""
-                dup_rows.append({"ASIN": a, "Сейчас в группе": g or "—", "Страна": mk or "—"})
-                if g != (comp_group or "").strip() or mk != comp_market:
-                    moving.append(a)
-            in_other_kind = [a for a in new_c if tracked_kind.get(a) in ("child", "parent")]
+            codes, _d, inv_c, mk_map, bd = parse_asin_batch(comp_text, [], comp_market)
+            # позиция = ASIN + страна: один товар бывает конкурентом и в DE, и в CA
+            pairs = [(a, mk_map.get(a, comp_market)) for a in codes]
+            have = set(zip(comp_df["asin"], comp_df["market"])) if not comp_df.empty else set()
+            cmeta = comp_df.set_index(["asin", "market"]) if not comp_df.empty else None
+
+            fresh = [(a, m) for a, m in pairs if (a, m) not in have]
+            same = [(a, m) for a, m in pairs if (a, m) in have]
+            regroup = [(a, m) for a, m in same
+                       if str(cmeta.loc[(a, m), "grp"]) != (comp_group or "").strip()]
+            other_country = [a for a, m in fresh
+                             if not comp_df.empty and a in set(comp_df["asin"])]
 
             c1, c2, c3 = st.columns(3)
-            c1.markdown(f"🟢 **Новых: {len(new_c)}**"
-                        + (f"<br><span class='muted'>из них были в портфеле: {len(in_other_kind)} "
-                           f"({', '.join(in_other_kind[:8])})</span>" if in_other_kind else ""),
+            c1.markdown(f"🟢 **Новых: {len(fresh)}**"
+                        + (f"<br><span class='muted'>тот же ASIN уже есть в другой стране: "
+                           f"{len(other_country)} — это отдельные позиции, "
+                           f"старые не тронутся</span>" if other_country else ""),
                         unsafe_allow_html=True)
-            c2.markdown(f"🟡 **Уже в конкурентах: {len(dup_c)}**"
-                        + (f"<br><span class='muted'>переедут в «{comp_group}» → {comp_market}: "
-                           f"{len(moving)}</span>" if moving else ""), unsafe_allow_html=True)
+            c2.markdown(f"🟡 **Уже в {comp_market}: {len(same)}**"
+                        + (f"<br><span class='muted'>сменят группу на «{comp_group}»: "
+                           f"{len(regroup)}</span>" if regroup else ""), unsafe_allow_html=True)
             c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
-                        + (f" · повторов: {len(bd)}" if bd else ""))
-            if dup_rows:
-                with st.expander(f"Где уже лежат эти {len(dup_c)} ASIN", expanded=False):
-                    st.dataframe(pd.DataFrame(dup_rows), use_container_width=True,
-                                 hide_index=True, height=min(300, 40 + 35 * len(dup_rows)))
-            to_save = new_c + moving          # новые + те, у кого меняется группа или страна
-            btn = f"➕ {len(new_c)} новых" + (f" · перенести {len(moving)}" if moving else "")
+                        + (f" · повторов в пачке: {len(bd)}" if bd else ""))
+
+            if same:
+                with st.expander(f"Уже в базе по {comp_market}: {len(same)}", expanded=False):
+                    st.dataframe(pd.DataFrame(
+                        [{"ASIN": a, "Страна": m,
+                          "Группа сейчас": str(cmeta.loc[(a, m), "grp"]) or "—"} for a, m in same]),
+                        use_container_width=True, hide_index=True,
+                        height=min(300, 40 + 35 * len(same)))
+
+            to_save = fresh + regroup
+            btn = f"➕ {len(fresh)} новых" + (f" · сменить группу у {len(regroup)}" if regroup else "")
             if st.button(f"{btn} → «{comp_group or '—'}» / {comp_market}",
                          type="primary", disabled=not (to_save and comp_group), key="comp_add"):
                 try:
-                    save_competitors(to_save, comp_group.strip(), comp_market)
-                    msg = [f"добавлено {len(new_c)}"]
-                    if moving:
-                        msg.append(f"перенесено {len(moving)}")
-                    st.success(" · ".join(msg) + f" → «{comp_group}»")
+                    save_competitors(to_save, comp_group.strip())
+                    msg = [f"добавлено {len(fresh)}"]
+                    if regroup:
+                        msg.append(f"перегруппировано {len(regroup)}")
+                    st.success(" · ".join(msg) + f" → «{comp_group}» / {comp_market}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
@@ -3906,4 +3912,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
