@@ -3202,14 +3202,48 @@ def render_asin_manager(kind):
     st.markdown(f"**Список ({'все' if country.startswith('🌐') else country})** "
                 f"— {len(display_tracked)} из {len(tracked_k)} "
                 "<span class='muted'>· удалить — сотри из текста и пересохрани</span>", unsafe_allow_html=True)
-    edited = st.text_area("Список", value=", ".join(display_tracked), height=140,
-                          key=f"edit_tracked_list_{kind}_{country}_{len(display_tracked)}", label_visibility="collapsed")
+    lv1, lv2 = st.columns([1.4, 3])
+    as_links = lv1.checkbox("Показывать ссылками", value=True, key=f"list_links_{kind}",
+                            help="Ссылка несёт страну — так видно, где какая позиция, "
+                                 "и при замене можно просто вставить другую ссылку")
+
+    def _mk(a):
+        m = asin_market_map.get(a)
+        return f"https://www.{MARKET_DOMAINS[m]}/dp/{a}" if m in MARKET_DOMAINS else a
+
+    if as_links:
+        # группируем по странам: сначала те, у кого страна известна, потом «—»
+        ordered = sorted(display_tracked,
+                         key=lambda a: (asin_market_map.get(a, "—") == "—",
+                                        asin_market_map.get(a, "—"), a))
+        list_value = "\n".join(_mk(a) for a in ordered)
+        by_c = {}
+        for a in ordered:
+            by_c[asin_market_map.get(a, "—")] = by_c.get(asin_market_map.get(a, "—"), 0) + 1
+        lv2.markdown("<div class='muted' style='margin-top:8px'>По странам: "
+                     + " · ".join(f"<b>{k}</b> {v}" for k, v in by_c.items())
+                     + " — по одной ссылке в строке, порядок по странам</div>", unsafe_allow_html=True)
+    else:
+        ordered = sorted(display_tracked)
+        list_value = ", ".join(ordered)
+
+    # дубли внутри текущего среза
+    dupes = [a for a in set(display_tracked) if display_tracked.count(a) > 1]
+    if dupes:
+        st.warning(f"Повторы в списке ({len(dupes)}): {', '.join(sorted(dupes)[:20])}"
+                   + (" …" if len(dupes) > 20 else "") + " — при пересохранении останется по одному")
+
+    edited = st.text_area("Список", value=list_value, height=220,
+                          key=f"edit_tracked_list_{kind}_{country}_{len(display_tracked)}_{as_links}",
+                          label_visibility="collapsed")
     b1, b2, b3 = st.columns([1.2, 1.2, 3])
     if b1.button("💾 Пересохранить список", key=f"resave_btn_{kind}"):
         clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, [], None)
         if sel_market:
             for code in clean:
                 markets.setdefault(code, sel_market)
+        if bd:
+            st.caption(f"Повторов в тексте убрано: {len(bd)} ({', '.join(sorted(set(bd))[:10])})")
         ensure_schema()
         try:
             conn = _conn()
