@@ -164,8 +164,9 @@ TIMEZONES = {
     "Нью-Йорк (EDT / EST)": "America/New_York",
 }
 MARKET_DOMAINS = {
-    "US": "amazon.com", "BE": "amazon.com.be", "NL": "amazon.nl", "DE": "amazon.de",
-    "UK": "amazon.co.uk", "FR": "amazon.fr", "IT": "amazon.it", "ES": "amazon.es",
+    "US": "amazon.com", "CA": "amazon.ca", "BE": "amazon.com.be", "NL": "amazon.nl",
+    "DE": "amazon.de", "UK": "amazon.co.uk", "FR": "amazon.fr", "IT": "amazon.it",
+    "ES": "amazon.es",
 }
 VALID_SOURCES = tuple(MARKET_DOMAINS.keys())
 
