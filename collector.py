@@ -1274,4 +1274,4 @@ def extract_bsr_json(product_json: dict, country_code: str = "be"):
     # сначала основная категория; внутри неё берём больший ранг — это ранг
     # в общей категории, а не в узкой подкатегории
     rank, _prio, category = sorted(candidates, key=lambda x: (x[1], -x[0]))[0]
-    return f"#{rank:,}".replace(",", " ") + (f" {category}" if category else "")
+    return f"#{rank:,}".replace(",", " ") + (f" {category}" if category else "") 
