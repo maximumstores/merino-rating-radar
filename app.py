@@ -2188,6 +2188,22 @@ def render_dynamics(filtered_df, hist_df, kind):
         else:
             order = sorted(piv_r.index)
 
+        # поиск по таблице: ASIN, категория, parent, название
+        q_dyn = st.text_input("Поиск в таблице", key=f"dyn_q_{kind}", label_visibility="collapsed",
+                              placeholder="🔍 поиск: ASIN, категория, parent или название")
+        if q_dyn.strip():
+            ql = q_dyn.strip().lower()
+
+            def _hay(a):
+                d = dict_map.get(a, {})
+                parts = [a] + [str(d.get(f) or "") for f in ("manual_cat", "category", "parent_asin", "title")]
+                return " ".join(parts).lower()
+
+            order = [a for a in order if ql in _hay(a)]
+            if not order:
+                st.warning(f"По запросу «{q_dyn}» ничего не найдено — сбрось поиск")
+                order = []
+
         src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
         grp_map = filtered_df.set_index("raw_asin")["_group"].to_dict() if GROUP_DF_COL else {}
         blocks = []
@@ -2468,7 +2484,8 @@ def render_dynamics(filtered_df, hist_df, kind):
                          "Сохранённые категории сразу появятся в фильтре «Категория» и в группировке.</div>",
                          unsafe_allow_html=True)
 
-        st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк")
+        st.caption(f"{len(order)} ASIN × {len(days)} {'недель' if gran_d == 'Неделя' else 'дней'} · {len(wide)} строк"
+                   + (f" · фильтр: «{q_dyn}»" if q_dyn.strip() else ""))
 
         u1, u2, u3 = st.columns([3, 1, 1])
         picked = u1.multiselect("Обновить ASIN", options=list(order), default=[],
