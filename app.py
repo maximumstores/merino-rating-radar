@@ -3132,15 +3132,24 @@ def render_asin_manager(kind):
                             placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
                             label_visibility="collapsed")
     if add_text.strip():
-        new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked, sel_market)
-        p1, p2, p3 = st.columns(3)
-        p1.markdown(f"🟢 **Новых: {len(new_c)}**" + (f"<br><span class='muted'>{', '.join(new_c[:30])}"
-                    f"{' …' if len(new_c) > 30 else ''}</span>" if new_c else ""), unsafe_allow_html=True)
-        p2.markdown(f"🟡 **Уже в базе: {len(dup_c)}**" + (f"<br><span style='color:#b06000'>{', '.join(dup_c[:30])}"
-                    f"{' …' if len(dup_c) > 30 else ''}</span>" if dup_c else ""), unsafe_allow_html=True)
-        p3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**" + (f"<br><span style='color:#c5221f'>{', '.join(inv_c[:15])}"
-                    f"{' …' if len(inv_c) > 15 else ''}</span>" if inv_c else "")
-                    + (f"<br><span class='muted'>повторы внутри пачки: {len(bd)}</span>" if bd else ""),
+        # «уже есть» считаем по этому же списку: позиция из другого списка переносится сюда
+        new_c, dup_c, inv_c, mk_map, bd = parse_asin_batch(add_text, tracked_k, sel_market)
+        other = {"child": "parent", "parent": "child", "competitor": "child"}.get(kind, "child")
+        moving = [c for c in new_c if tracked_kind.get(c) and tracked_kind[c] != kind]
+        fresh = [c for c in new_c if c not in moving]
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.markdown(f"🟢 **Новых: {len(fresh)}**" + (f"<br><span class='muted'>{', '.join(fresh[:20])}"
+                    f"{' …' if len(fresh) > 20 else ''}</span>" if fresh else ""), unsafe_allow_html=True)
+        p2.markdown(f"🔵 **Переедут сюда: {len(moving)}**"
+                    + (f"<br><span class='muted'>из «{KIND_LABEL.get(other, other)}»: "
+                       f"{', '.join(moving[:20])}{' …' if len(moving) > 20 else ''}</span>" if moving else ""),
+                    unsafe_allow_html=True)
+        p3.markdown(f"🟡 **Уже здесь: {len(dup_c)}**" + (f"<br><span style='color:#b06000'>{', '.join(dup_c[:20])}"
+                    f"{' …' if len(dup_c) > 20 else ''}</span>" if dup_c else ""), unsafe_allow_html=True)
+        p4.markdown(f"🔴 **Нераспознано: {len(inv_c)}**" + (f"<br><span style='color:#c5221f'>{', '.join(inv_c[:10])}"
+                    f"{' …' if len(inv_c) > 10 else ''}</span>" if inv_c else "")
+                    + (f"<br><span class='muted'>повторы в пачке: {len(bd)}</span>" if bd else ""),
                     unsafe_allow_html=True)
 
         if new_c:      # как распределились по странам
@@ -3150,7 +3159,13 @@ def render_asin_manager(kind):
                 dist[key] = dist.get(key, 0) + 1
             st.markdown("**Распределение новых по странам:** " + " · ".join(
                 f"`{k}` {v}" for k, v in sorted(dist.items(), key=lambda kv: (kv[0].startswith("—"), -kv[1]))))
-        lbl = f"➕ Добавить {len(new_c)} новых" + (f" → {sel_market}" if sel_market else " (страна из ссылок)")
+        parts = []
+        if fresh:
+            parts.append(f"добавить {len(fresh)}")
+        if moving:
+            parts.append(f"перенести {len(moving)}")
+        lbl = ("➕ " + " · ".join(parts) if parts else "➕ Нечего добавлять") \
+            + (f" → {sel_market}" if sel_market and parts else "")
         if st.button(lbl, type="primary", disabled=not new_c, key=f"add_asins_btn_{kind}"):
             ensure_schema()
             try:
@@ -3161,7 +3176,14 @@ def render_asin_manager(kind):
                 conn.commit()
                 conn.close()
                 save_markets({c: m for c, m in mk_map.items() if c in new_c})
-                st.success(f"Добавлено {len(new_c)} · пропущено как дубли {len(dup_c)}")
+                msg = []
+                if fresh:
+                    msg.append(f"добавлено {len(fresh)}")
+                if moving:
+                    msg.append(f"перенесено из «{KIND_LABEL.get(other, other)}»: {len(moving)}")
+                if dup_c:
+                    msg.append(f"пропущено дублей {len(dup_c)}")
+                st.success(" · ".join(msg).capitalize())
                 st.rerun()
             except Exception as e:
                 st.error(f"Ошибка добавления: {e}")
