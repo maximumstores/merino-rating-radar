@@ -61,8 +61,26 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Разослать алерты
+      - name: Алерты по рейтингам
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python -c "import notifier; print(notifier.notify_all(header='Rating Radar — ежедневный сбор'))"
+
+      - name: Сводка по конкурентам
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN_COMP: ${{ secrets.TELEGRAM_BOT_TOKEN_COMP }}
+          # свой бот на страну — заводится сам, если секрет задан
+          TELEGRAM_BOT_TOKEN_US: ${{ secrets.TELEGRAM_BOT_TOKEN_US }}
+          TELEGRAM_BOT_TOKEN_CA: ${{ secrets.TELEGRAM_BOT_TOKEN_CA }}
+          TELEGRAM_BOT_TOKEN_DE: ${{ secrets.TELEGRAM_BOT_TOKEN_DE }}
+          TELEGRAM_BOT_TOKEN_UK: ${{ secrets.TELEGRAM_BOT_TOKEN_UK }}
+          TELEGRAM_BOT_TOKEN_FR: ${{ secrets.TELEGRAM_BOT_TOKEN_FR }}
+          TELEGRAM_BOT_TOKEN_IT: ${{ secrets.TELEGRAM_BOT_TOKEN_IT }}
+          TELEGRAM_BOT_TOKEN_ES: ${{ secrets.TELEGRAM_BOT_TOKEN_ES }}
+          RADAR_TZ: Europe/Kyiv
+          COMP_MIN_REVIEWS: "20"    # ниже порога конкурент не считается «лучшим»
+        run: python comp_report.py
