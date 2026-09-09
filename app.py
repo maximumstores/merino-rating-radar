@@ -1166,49 +1166,44 @@ if nav == "📋 Портфель (Парент)":
 # ---------- КОНКУРЕНТЫ ----------
 @st.cache_data(ttl=180, show_spinner=False)
 def get_competitors():
-    """Список конкурентов: ASIN, группа, страна, бренд, название."""
+    """Конкуренты: одна строка на пару (ASIN, страна) — один товар может
+    продаваться в нескольких странах, и это разные позиции."""
     try:
+        ensure_competitor_schema()
         conn = _conn()
         df = pd.read_sql(
             """
-            SELECT t.asin,
-                   COALESCE(d.comp_group, '') AS grp,
-                   COALESCE(d.market, '')     AS market,
-                   COALESCE(d.brand, '')      AS brand,
-                   COALESCE(d.title, '')      AS title
-            FROM tracked_asins t
-            LEFT JOIN asin_dictionary d ON d.asin = t.asin
-            WHERE t.kind = 'competitor'
-            ORDER BY grp, brand, t.asin;
+            SELECT c.asin,
+                   COALESCE(c.comp_group, '') AS grp,
+                   c.market                   AS market,
+                   COALESCE(NULLIF(c.brand, ''), COALESCE(d.brand, '')) AS brand,
+                   COALESCE(NULLIF(c.title, ''), COALESCE(d.title, '')) AS title
+            FROM competitors c
+            LEFT JOIN asin_dictionary d ON d.asin = c.asin
+            ORDER BY c.market, grp, brand, c.asin;
             """, conn)
         conn.close()
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"Не читаются конкуренты: {e}")
         return pd.DataFrame(columns=["asin", "grp", "market", "brand", "title"])
 
 
-def save_competitors(asins, group, market):
+def save_competitors(pairs, group):
+    """pairs: [(asin, market), …] — одна позиция на страну."""
     from psycopg2 import extras as _ex
-    ensure_schema()
     ensure_competitor_schema()
     conn = _conn()
+    now = datetime.datetime.now(datetime.timezone.utc)
     with conn.cursor() as cur:
         _ex.execute_values(
             cur,
-            "INSERT INTO tracked_asins (asin, kind) VALUES %s "
-            "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';",
-            [(a, "competitor") for a in asins], page_size=200)
-        _ex.execute_values(
-            cur,
             """
-            INSERT INTO asin_dictionary (asin, comp_group, market, updated_at) VALUES %s
-            ON CONFLICT (asin) DO UPDATE SET
-                comp_group = EXCLUDED.comp_group,
-                market = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
-                updated_at = NOW();
+            INSERT INTO competitors (asin, market, comp_group, updated_at) VALUES %s
+            ON CONFLICT (asin, market) DO UPDATE SET
+                comp_group = EXCLUDED.comp_group, updated_at = NOW();
             """,
-            [(a, group, market or "", datetime.datetime.now(datetime.timezone.utc)) for a in asins],
-            page_size=200)
+            [(a, m, group, now) for a, m in pairs], page_size=200)
     conn.commit()
     conn.close()
     st.cache_data.clear()
@@ -1358,26 +1353,25 @@ if nav == "🥊 Конкуренты":
 
 
     def save_competitors_table(df, default_market):
-        ensure_schema()
+        from psycopg2 import extras as _ex
         ensure_competitor_schema()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        rows = [(r.asin, (r.market or default_market or "DE"), r.group, r.brand, now)
+                for r in df.itertuples(index=False)]
         conn = _conn()
         with conn.cursor() as cur:
-            for r in df.itertuples(index=False):
-                cur.execute("INSERT INTO tracked_asins (asin, kind) VALUES (%s, 'competitor') "
-                            "ON CONFLICT (asin) DO UPDATE SET kind = 'competitor';", (r.asin,))
-                cur.execute(
-                    """
-                    INSERT INTO asin_dictionary (asin, comp_group, market, brand, updated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (asin) DO UPDATE SET
-                        comp_group = COALESCE(NULLIF(EXCLUDED.comp_group, ''), asin_dictionary.comp_group),
-                        market     = COALESCE(NULLIF(EXCLUDED.market, ''), asin_dictionary.market),
-                        brand      = COALESCE(NULLIF(EXCLUDED.brand, ''), asin_dictionary.brand),
-                        updated_at = NOW();
-                    """,
-                    (r.asin, r.group, r.market or default_market or "", r.brand))
+            _ex.execute_values(
+                cur,
+                """
+                INSERT INTO competitors (asin, market, comp_group, brand, updated_at) VALUES %s
+                ON CONFLICT (asin, market) DO UPDATE SET
+                    comp_group = COALESCE(NULLIF(EXCLUDED.comp_group, ''), competitors.comp_group),
+                    brand      = COALESCE(NULLIF(EXCLUDED.brand, ''), competitors.brand),
+                    updated_at = NOW();
+                """, rows, page_size=200)
         conn.commit()
         conn.close()
+        st.cache_data.clear()
 
 
     if comp_df.empty:
@@ -1431,7 +1425,8 @@ if nav == "🥊 Конкуренты":
         def build_group_report(country, groups, comp_view):
             ids = comp_view["asin"].tolist()
             cut3 = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=3)
-            last = (full_df[(full_df["asin"].isin(ids)) & (full_df["created_at"] >= cut3)].copy()
+            last = (full_df[(full_df["asin"].isin(ids)) & (full_df["source"] == country)
+                            & (full_df["created_at"] >= cut3)].copy()
                     if not full_df.empty else pd.DataFrame())
             if last.empty:
                 return None, pd.DataFrame()
@@ -1506,7 +1501,11 @@ if nav == "🥊 Конкуренты":
             hist = pd.DataFrame()
         else:
             cut = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(comp_days))
-            hist = full_df[(full_df["asin"].isin(asins)) & (full_df["created_at"] >= cut)].copy()
+            # source — страна, с витрины которой сняли замер: у одного ASIN
+            # могут быть данные и по DE, и по CA, берём только нужную
+            hist = full_df[(full_df["asin"].isin(asins))
+                           & (full_df["source"] == sel_mkt)
+                           & (full_df["created_at"] >= cut)].copy()
         if not asins:
             st.warning("В этой стране и группах нет ASIN — проверь фильтры выше")
         if hist.empty:
@@ -1802,10 +1801,10 @@ if nav == "🥊 Конкуренты":
                     b1, b2, b3 = st.columns([1.2, 1.2, 3])
                     if b1.button(f"↻ Обновить отмеченные ({len(pick_comp)})", disabled=not pick_comp,
                                  type="primary", key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
-                        run_collection(pick_comp, "Конкуренты (точечно)")
+                        run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in pick_comp], "Конкуренты (точечно)")
                     if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
                                  use_container_width=True):
-                        run_collection(asins, f"Конкуренты ({sel_mkt})")
+                        run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins], f"Конкуренты ({sel_mkt})")
 
                     st.markdown("<div class='muted' style='margin-top:8px'>Колонка «Собрано»: "
                                 "<b>★</b> рейтинг · <b>💬</b> отзывы · <b>#</b> BSR · <b>€</b> цена; "
@@ -1852,9 +1851,9 @@ if nav == "🥊 Конкуренты":
         r1.markdown(f"**{sel_mkt}** · групп: {len(use_groups)} · ASIN: {len(asins)}")
         if r2.button(f"▶ Прогнать {sel_mkt} ({len(asins)})", key="comp_run_mkt", type="primary",
                      use_container_width=True, disabled=not asins):
-            run_collection(asins, f"Конкуренты ({sel_mkt})")
+            run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins], f"Конкуренты ({sel_mkt})")
         if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
-            run_collection(comp_df["asin"].tolist(), "Конкуренты")
+            run_collection([f"https://www.{MARKET_DOMAINS.get(m, 'amazon.com')}/dp/{a}" for a, m in zip(comp_df["asin"], comp_df["market"])], "Конкуренты")
 
     with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
         load_mode = st.radio("Способ загрузки",
