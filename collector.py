@@ -177,6 +177,10 @@ def ensure_schema():
             # промо-признаки: API их отдаёт, в отчёте по конкурентам они важны
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS coupon BOOLEAN;")
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS prime_excl BOOLEAN;")
+            # промо и цена «до»: в старом шите это были List Price / Discount / Deal
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS list_price TEXT;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS discount TEXT;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS deal_info TEXT;")
             cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
             # индексы: без них выборка по ASIN и датам делает полный скан таблицы
             cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_asin_created "
@@ -244,8 +248,8 @@ def save_to_db(data: dict):
                 """
                 INSERT INTO asin_metrics
                     (asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num,
-                     price, note, coupon, prime_excl)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     price, note, coupon, prime_excl, list_price, discount, deal_info)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     clean_asin,
@@ -260,6 +264,9 @@ def save_to_db(data: dict):
                     data.get("note", ""),
                     data.get("coupon"),
                     data.get("prime_exclusive"),
+                    data.get("list_price"),
+                    data.get("discount"),
+                    data.get("deal_info"),
                 ),
             )
         conn.commit()
@@ -275,7 +282,8 @@ def save_batch(rows: list) -> int:
         clean.append((a, d.get("source"), d.get("rating"), d.get("count"),
                       json.dumps(d.get("hist", {})), d.get("image_url"),
                       d.get("bsr"), bsr_to_int(d.get("bsr")), d.get("price"), d.get("note", ""),
-                      d.get("coupon"), d.get("prime_exclusive")))
+                      d.get("coupon"), d.get("prime_exclusive"),
+                      d.get("list_price"), d.get("discount"), d.get("deal_info")))
     if not clean:
         return 0
     with db() as conn:
@@ -284,7 +292,7 @@ def save_batch(rows: list) -> int:
                 cur,
                 "INSERT INTO asin_metrics "
                 "(asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, "
-                "price, note, coupon, prime_excl) VALUES %s",
+                "price, note, coupon, prime_excl, list_price, discount, deal_info) VALUES %s",
                 clean, page_size=200)
         conn.commit()
     return len(clean)
@@ -660,6 +668,7 @@ def ensure_competitor_schema():
             # ручная категория — отдельно от category, которую пишет API
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS manual_cat TEXT;")
             cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS title TEXT;")
+            cur.execute("ALTER TABLE asin_dictionary ADD COLUMN IF NOT EXISTS attrs TEXT;")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS competitors (
@@ -944,6 +953,34 @@ def parse_product_json(obj: dict, asin: str, market: str) -> dict:
     out["category_path"] = obj.get("product_category") or ""
     out["price"] = str(obj.get("price") or obj.get("exact_price") or "").strip()[:40]
     out["brand"] = extract_brand(obj)
+    out["list_price"] = str(obj.get("list_price") or obj.get("previous_price")
+                            or obj.get("original_price") or "").strip()[:40]
+    # скидка: либо готовый бейдж, либо считаем из цены и list price
+    badge = obj.get("discount") or obj.get("savings_percentage") or obj.get("deal_badge")
+    out["discount"] = str(badge or "").strip()[:20]
+    if not out["discount"] and out["list_price"] and out.get("price"):
+        try:
+            lp = float(re.sub(r"[^\d.,]", "", out["list_price"]).replace(",", "."))
+            pp = float(re.sub(r"[^\d.,]", "", out["price"]).replace(",", "."))
+            if lp > 0 and pp > 0 and pp < lp:
+                out["discount"] = f"-{round((lp - pp) / lp * 100)}%"
+        except Exception:
+            pass
+    out["deal_info"] = str(obj.get("deal") or obj.get("deal_info")
+                           or obj.get("deal_badge") or "").strip()[:60]
+    if not out["deal_info"] and obj.get("is_coupon_exists"):
+        out["deal_info"] = "Coupon"
+    # характеристики варианта: цвет, размер, материал — как в старом шите
+    attrs = []
+    pi = obj.get("product_information")
+    if isinstance(pi, dict):
+        for key in ("Colour", "Color", "Farbe", "Couleur", "Colore",
+                    "Size", "Größe", "Taille", "Taglia", "Talla",
+                    "Material", "Materialzusammensetzung", "Matière", "Composizione"):
+            v = pi.get(key)
+            if isinstance(v, str) and v.strip():
+                attrs.append(f"{key}: {v.strip()[:40]}")
+    out["attrs"] = " · ".join(attrs[:4])[:200]
     out["coupon"] = bool(obj.get("is_coupon_exists"))
     out["prime_exclusive"] = bool(obj.get("is_prime_exclusive"))
     out["often_returned"] = bool(obj.get("is_frequently_returned"))
