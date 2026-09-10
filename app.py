@@ -1509,6 +1509,33 @@ if nav == "🥊 Конкуренты":
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
 
+        # быстрая отправка сводки по текущей стране
+        if NOTIFIER_OK:
+            _ch = notifier.channel_for_country(sel_mkt)
+            _bu, _ = _bot_name(_ch)
+            sb1, sb2 = st.columns([1.6, 4])
+            if _bu and sb1.button(f"📤 Отправить сводку по {sel_mkt}", key=f"quick_send_{sel_mkt}",
+                                  use_container_width=True,
+                                  help=f"Посчитает и отправит в @{_bu} прямо сейчас"):
+                with st.spinner("Считаю сводку…"):
+                    txt, _df = build_group_report(sel_mkt, use_groups, view)
+                if not txt:
+                    st.warning("Нет свежих замеров по этой стране — сначала прогон")
+                else:
+                    try:
+                        okn, tot = notifier.broadcast(
+                            txt + f"\n<a href=\"{notifier.DASHBOARD_URL}\">Открыть дашборд →</a>",
+                            channel=_ch)
+                        if tot == 0:
+                            st.warning(f"У @{_bu} нет подписчиков — открой бота и отправь /start")
+                        else:
+                            st.success(f"Отправлено {okn} из {tot} в @{_bu}")
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+            sb2.markdown(f"<div class='muted' style='margin-top:8px'>Сводка по группам "
+                         f"{sel_mkt} уходит в @{_bu or '—'}. То же самое приходит само "
+                         f"после каждого сбора.</div>", unsafe_allow_html=True)
+
         st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN")
         _t0 = time.time()
         _timing = {}
