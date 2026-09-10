@@ -112,19 +112,22 @@ def build_report(country=None, days=3):
             lines.append(f"📌 <b>{g}</b> — {len(part)} (наших {len(ours)}, конкурентов {len(comps)})")
 
             def cmp_line(label, col, better="max", fmt="{:.1f}"):
+                """Бренд сильнейшего конкурента показываем всегда, иначе непонятно,
+                с кем сравнение."""
                 o = ours[col].dropna()
                 c = solid[col].dropna()
                 if o.empty:
                     return
                 ov = o.max() if better == "max" else o.min()
                 if c.empty:
-                    lines.append(f"  • {label}: наш {fmt.format(ov)} · сопоставимых конкурентов нет")
+                    lines.append(f"  • {label}: у нас {fmt.format(ov)} · сопоставимых конкурентов нет")
                     return
                 idx = c.idxmax() if better == "max" else c.idxmin()
-                cv, cb = c.loc[idx], solid.loc[idx, "brand"]
+                cv, cb = c.loc[idx], (str(solid.loc[idx, "brand"])[:22] or "конкурент")
                 win = ov >= cv if better == "max" else ov <= cv
-                lines.append(f"  • {label}: наш {fmt.format(ov)} / лучший {fmt.format(cv)}"
-                             f"{'' if win else ' (' + str(cb)[:22] + ')'} {'🟢' if win else '🔴'}")
+                lines.append(f"  • {label}: у нас {fmt.format(ov)} · сильнейший из конкурентов "
+                             f"{fmt.format(cv)} ({cb}) — "
+                             + ("мы впереди 🟢" if win else "отстаём 🔴"))
 
             cmp_line("Рейтинг", "rating", "max", "{:.1f}")
             cmp_line("BSR", "bsr_num", "min", "{:,.0f}")
@@ -132,8 +135,8 @@ def build_report(country=None, days=3):
             po, pc = ours["price_num"].dropna(), solid["price_num"].dropna()
             if not po.empty and not pc.empty:
                 avg = pc.mean()
-                lines.append(f"  • Цена: наша {po.mean():.2f} / средняя {avg:.2f} "
-                             f"{'🟢' if po.mean() <= avg else '🔴'}")
+                lines.append(f"  • Цена: у нас {po.mean():.2f} · средняя у конкурентов {avg:.2f} — "
+                             + ("мы дешевле 🟢" if po.mean() <= avg else "мы дороже 🔴"))
             lines.append("")
             printed += 1
         if printed:
