@@ -732,21 +732,23 @@ with hdr_r:
                 f"color:#fff;padding:5px 13px;border-radius:999px;font-size:12.5px;font-weight:600;"
                 f"text-decoration:none;margin:0 6px 4px 0'>✈️ {text}</a>")
 
-    _parent_bot = "RatingRadar_bot"
-    _child_bot = None
-    if NOTIFIER_OK and os.environ.get("TELEGRAM_BOT_TOKEN_CHILD"):
+    _parent_bot, _child_bot = "RatingRadar_bot", None
+    if NOTIFIER_OK:
         try:
-            _child_bot = notifier.bot_username("radar_child")
+            _parent_bot = notifier.bot_username("radar") or _parent_bot
+            # отдельный бот только если токен реально другой
+            if notifier.channel_token("radar_child") != notifier.channel_token("radar"):
+                _child_bot = notifier.bot_username("radar_child")
         except Exception:
-            _child_bot = None
+            pass
 
     pills = _pill(f"https://t.me/{_parent_bot}", f"Паренты — @{_parent_bot}")
-    if _child_bot:
+    if _child_bot and _child_bot != _parent_bot:
         pills += _pill(f"https://t.me/{_child_bot}", f"Чайлды — @{_child_bot}")
         note = "по одному боту на портфель · подписка: /start"
     else:
-        note = ("чайлды и паренты идут в один бот · чтобы развести — "
-                "секрет TELEGRAM_BOT_TOKEN_CHILD")
+        note = ("чайлды и паренты идут в один бот · чтобы развести — секрет "
+                "TELEGRAM_BOT_TOKEN_CHILD (после добавления перезапусти приложение)")
     st.markdown(f"<div style='margin-top:6px'>{pills}"
                 f"<div class='muted' style='margin-top:2px'>{note}</div></div>",
                 unsafe_allow_html=True)
