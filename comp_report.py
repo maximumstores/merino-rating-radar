@@ -82,6 +82,11 @@ def load_data(days=3):
     return comp, hist
 
 
+def esc(v):
+    """& < > ломают HTML Telegram — «Men SS & Socks» без этого не уходит."""
+    return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def build_report(country=None, days=3):
     comp, hist = load_data(days)
     if comp.empty or hist.empty:
@@ -102,14 +107,14 @@ def build_report(country=None, days=3):
         part_m = latest[latest["market"] == mkt]
         if part_m.empty:
             continue
-        lines = [f"📊 <b>Конкуренты — {mkt}</b>", f"<i>{now:%d.%m.%Y %H:%M}</i>", ""]
+        lines = [f"📊 <b>Конкуренты — {esc(mkt)}</b>", f"<i>{now:%d.%m.%Y %H:%M}</i>", ""]
         printed = 0
         for g in sorted({x for x in part_m["grp"] if x}):
             part = part_m[part_m["grp"] == g]
             ours, comps = part[part["own"]], part[~part["own"]]
             # «лучший конкурент» ищем только среди тех, у кого база отзывов не игрушечная
             solid = comps[comps["review_count"].fillna(0) >= MIN_REVIEWS]
-            lines.append(f"📌 <b>{g}</b> — {len(part)} (наших {len(ours)}, конкурентов {len(comps)})")
+            lines.append(f"📌 <b>{esc(g)}</b> — {len(part)} (наших {len(ours)}, конкурентов {len(comps)})")
 
             def cmp_line(label, col, better="max", fmt="{:.1f}"):
                 """Бренд сильнейшего конкурента показываем всегда, иначе непонятно,
@@ -123,7 +128,7 @@ def build_report(country=None, days=3):
                     lines.append(f"  • {label}: у нас {fmt.format(ov)} · сопоставимых конкурентов нет")
                     return
                 idx = c.idxmax() if better == "max" else c.idxmin()
-                cv, cb = c.loc[idx], (str(solid.loc[idx, "brand"])[:22] or "конкурент")
+                cv, cb = c.loc[idx], (esc(str(solid.loc[idx, "brand"])[:22]) or "конкурент")
                 win = ov >= cv if better == "max" else ov <= cv
                 lines.append(f"  • {label}: у нас {fmt.format(ov)} · сильнейший из конкурентов "
                              f"{fmt.format(cv)} ({cb}) — "
