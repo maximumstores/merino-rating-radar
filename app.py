@@ -747,8 +747,18 @@ with hdr_r:
         pills += _pill(f"https://t.me/{_child_bot}", f"Чайлды — @{_child_bot}")
         note = "по одному боту на портфель · подписка: /start"
     else:
-        note = ("чайлды и паренты идут в один бот · чтобы развести — секрет "
-                "TELEGRAM_BOT_TOKEN_CHILD (после добавления перезапусти приложение)")
+        # без диагностики непонятно, чего не хватает: секрета, перезапуска или токен битый
+        _raw = (os.environ.get("TELEGRAM_BOT_TOKEN_CHILD") or "").strip()
+        if not _raw:
+            why = "секрета TELEGRAM_BOT_TOKEN_CHILD нет в Secrets"
+        elif NOTIFIER_OK and notifier.channel_token("radar_child") == notifier.channel_token("radar"):
+            why = (f"секрет виден (…{_raw[-6:]}), но notifier загрузился раньше — "
+                   "Manage app → ⋮ → Reboot app")
+        else:
+            _u, _e = (notifier.bot_username("radar_child", with_error=True)
+                      if NOTIFIER_OK else (None, "notifier не импортирован"))
+            why = f"Telegram не принял токен: {_e}"
+        note = f"чайлды и паренты идут в один бот · {why}"
     st.markdown(f"<div style='margin-top:6px'>{pills}"
                 f"<div class='muted' style='margin-top:2px'>{note}</div></div>",
                 unsafe_allow_html=True)
@@ -1460,24 +1470,66 @@ if nav == "🥊 Конкуренты":
         asins = view["asin"].tolist()
 
         # ---- сводка «мы против лучшего конкурента» ----
+        def comp_takeaways(facts):
+            """Короткий вывод в конце сводки: где горит, где выигрываем, что с ценой."""
+            if not facts:
+                return ""
+            out = []
+            worst = [f for f in facts if f["lag_rating"] and f["lag_bsr"] and f["lag_reviews"]]
+            if worst:
+                names = ", ".join(f["group"] for f in worst[:4])
+                out.append(f"🔥 Отстаём по всему: {names}"
+                           + (f" и ещё {len(worst) - 4}" if len(worst) > 4 else ""))
+            gaps = [f for f in facts if f["lag_bsr"] and f["our_bsr"] and f["best_bsr"]]
+            if gaps:
+                top = max(gaps, key=lambda f: f["our_bsr"] / max(1, f["best_bsr"]))
+                n = int(round(top["our_bsr"] / max(1, top["best_bsr"])))
+                if n >= 3:
+                    word = "раза" if n % 10 in (2, 3, 4) and not 11 <= n % 100 <= 14 else "раз"
+                    out.append(f"📉 Дальше всех по BSR: {top['group']} — наш "
+                               f"{top['our_bsr']:,.0f} против {top['best_bsr']:,.0f} "
+                               f"у {top['best_bsr_brand']} (в {n} {word})".replace(",", " "))
+            pricey = [f for f in facts if f["pricier"]]
+            if pricey:
+                both = [f["group"] for f in pricey if f["lag_bsr"]]
+                out.append(f"💸 Дороже рынка: {', '.join(f['group'] for f in pricey[:4])}"
+                           + (f" · из них просели по BSR: {', '.join(both)}" if both else ""))
+            else:
+                out.append("💸 По цене мы ниже рынка во всех группах")
+            lead = [f for f in facts if not f["lag_rating"] and not f["lag_bsr"]]
+            if lead:
+                out.append(f"✅ Уверенно идём: {', '.join(f['group'] for f in lead[:5])}")
+            lag_r = [f for f in facts if f["lag_rating"]]
+            if len(lag_r) >= max(3, int(len(facts) * 0.6)):
+                out.append(f"⭐ Рейтинг ниже конкурентов в {len(lag_r)} из {len(facts)} групп — "
+                           "смотри причины негатива, это не разовое")
+            return "\n<b>Итого</b>\n" + "\n".join(out) + "\n" if out else ""
+
         def _esc(v):
             """& < > ломают HTML-разметку Telegram — например «Men SS & Socks»."""
             return (str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
         def build_group_report(country, groups, comp_view):
             ids = comp_view["asin"].tolist()
-            cut3 = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=3)
+            cut3 = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=10)
             last = (full_df[(full_df["asin"].isin(ids)) & (full_df["source"] == country)
                             & (full_df["created_at"] >= cut3)].copy()
                     if not full_df.empty else pd.DataFrame())
             if last.empty:
                 return None, pd.DataFrame()
-            latest = last.sort_values("created_at").groupby("asin").last().reset_index()
+            last = last.sort_values("created_at")
+            latest = last.groupby("asin").last().reset_index()
+            # у каждой метрики свой последний удачный замер: BSR приходит не всегда
+            for _c in ("rating", "review_count", "bsr_num", "price_num"):
+                _ok = last.dropna(subset=[_c]).groupby("asin").last()
+                latest[_c] = latest["asin"].map(_ok[_c])
+                latest[f"{_c}_at"] = latest["asin"].map(_ok["created_at"])
             m = comp_view.set_index("asin")
             latest["brand"] = [str(m.loc[a, "brand"]) if a in m.index else "" for a in latest["asin"]]
             latest["grp"] = [str(m.loc[a, "grp"]) if a in m.index else "" for a in latest["asin"]]
             latest["own"] = latest["brand"].apply(is_own_brand)
 
+            facts = []
             lines = [f"📊 <b>Мониторинг конкурентов — {_esc(country)}</b>",
                      f"<i>{datetime.datetime.now(ZoneInfo(selected_tz)):%d.%m.%Y %H:%M}</i>", ""]
             rows = []
@@ -1496,32 +1548,48 @@ if nav == "🥊 Конкуренты":
                 row = {"Группа": g, "ASIN всего": len(part),
                        "Наших": len(ours), "Конкурентов": len(comp_all)}
 
+                def _age(row, col):
+                    ts = row.get(f"{col}_at")
+                    if ts is None or pd.isna(ts):
+                        return ""
+                    ts = pd.to_datetime(ts)
+                    if (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600 <= 30:
+                        return ""
+                    return f" ⏳ от {ts.tz_convert(ZoneInfo(selected_tz)):%d.%m}"
+
                 def cmp_line(label, col, better="max", fmt="{:.1f}"):
-                    """Сравнение с сильнейшим конкурентом. Бренд показываем всегда,
-                    иначе непонятно, с кем сравниваем."""
+                    """Сравнение с сильнейшим конкурентом. Бренд показываем всегда;
+                    ⏳ — цифра не из последнего прогона."""
                     o = ours[col].dropna()
                     c = comp[col].dropna()
                     if o.empty and c.empty:
                         return
-                    ov = (o.max() if better == "max" else o.min()) if not o.empty else None
+                    if o.empty:
+                        ov, o_age = None, ""
+                    else:
+                        oidx = o.idxmax() if better == "max" else o.idxmin()
+                        ov, o_age = o.loc[oidx], _age(ours.loc[oidx], col)
                     if c.empty:
-                        cv, cb = None, ""
+                        cv, cb, c_age = None, "", ""
                     else:
                         idx = c.idxmax() if better == "max" else c.idxmin()
-                        cv, cb = c.loc[idx], _esc(str(comp.loc[idx, "brand"])[:22]) or "конкурент"
+                        cv = c.loc[idx]
+                        cb = _esc(str(comp.loc[idx, "brand"])[:22]) or "конкурент"
+                        c_age = _age(comp.loc[idx], col)
                     if ov is None:
                         lines.append(f"  • {label}: у нас данных нет · сильнейший "
-                                     f"{fmt.format(cv)} — {cb} 🔴")
+                                     f"{fmt.format(cv)}{c_age} — {cb} 🔴")
                         row[label] = f"— / {fmt.format(cv)}"
                         return
                     if cv is None:
-                        lines.append(f"  • {label}: у нас {fmt.format(ov)} · сопоставимых конкурентов нет")
+                        lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · "
+                                     "сопоставимых конкурентов нет")
                         row[label] = f"{fmt.format(ov)} / —"
                         return
                     win = ov >= cv if better == "max" else ov <= cv
                     verdict = "мы впереди 🟢" if win else "отстаём 🔴"
-                    lines.append(f"  • {label}: у нас {fmt.format(ov)} · сильнейший из конкурентов "
-                                 f"{fmt.format(cv)} ({cb}) — {verdict}")
+                    lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · сильнейший из "
+                                 f"конкурентов {fmt.format(cv)}{c_age} ({cb}) — {verdict}")
                     row[label] = f"{fmt.format(ov)} / {fmt.format(cv)} {'🟢' if win else '🔴'}"
 
                 cmp_line("Рейтинг", "rating", "max", "{:.1f}")
@@ -1529,15 +1597,33 @@ if nav == "🥊 Конкуренты":
                 cmp_line("Отзывы", "review_count", "max", "{:,.0f}")
                 # цена: сравниваем со средней у конкурентов
                 po, pc = ours["price_num"].dropna(), comp["price_num"].dropna()
+                pricier = False
                 if not po.empty and not pc.empty:
                     avg = pc.mean()
-                    cheaper = po.mean() <= avg
+                    pricier = po.mean() > avg
                     lines.append(f"  • Цена: у нас {po.mean():.2f} · средняя у конкурентов {avg:.2f} — "
-                                 + ("мы дешевле 🟢" if cheaper else "мы дороже 🔴"))
-                    row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {'🟢' if cheaper else '🔴'}"
+                                 + ("мы дороже 🔴" if pricier else "мы дешевле 🟢"))
+                    row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {'🔴' if pricier else '🟢'}"
+
+                def _lag(col, better):
+                    o, c = ours[col].dropna(), comp[col].dropna()
+                    if o.empty or c.empty:
+                        return False, None, None, ""
+                    ov = o.max() if better == "max" else o.min()
+                    idx = c.idxmax() if better == "max" else c.idxmin()
+                    cv = c.loc[idx]
+                    lag = ov < cv if better == "max" else ov > cv
+                    return bool(lag), float(ov), float(cv), str(comp.loc[idx, "brand"])[:22]
+
+                _lr, _, _, _ = _lag("rating", "max")
+                _lb, _ob, _cb, _bb = _lag("bsr_num", "min")
+                _lv, _, _, _ = _lag("review_count", "max")
+                facts.append({"group": g, "lag_rating": _lr, "lag_bsr": _lb, "lag_reviews": _lv,
+                              "pricier": pricier, "our_bsr": _ob, "best_bsr": _cb,
+                              "best_bsr_brand": _bb})
                 lines.append("")
                 rows.append(row)
-            return "\n".join(lines), pd.DataFrame(rows)
+            return "\n".join(lines) + comp_takeaways(facts), pd.DataFrame(rows)
 
         # быстрая отправка сводки по текущей стране
         if NOTIFIER_OK:
