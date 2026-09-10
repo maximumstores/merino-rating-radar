@@ -223,6 +223,23 @@ def get_runs_history(limit=60):
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def asin_label(asin, markets=None, meta=None, with_title=True):
+    """«B0XXXXXXXX · DE · Merino Wool Socks» — без страны в списке непонятно,
+    о какой витрине речь: один ASIN живёт в нескольких странах."""
+    mk = (markets or {}).get(asin) or "—"
+    out = f"{asin} · {mk}"
+    if with_title and meta is not None:
+        try:
+            if asin in meta.index:
+                row = meta.loc[asin]
+                name = str(row.get("title") or row.get("brand") or "").strip()
+                if name and name.lower() != "nan":
+                    out += f" · {name[:38]}"
+        except Exception:
+            pass
+    return out
+
+
 def get_asin_markets_map(all_tracked):
     if not DATABASE_URL:
         return {a: "—" for a in all_tracked}
@@ -249,7 +266,9 @@ def get_full_history(days=120):
             """
             SELECT asin, source, rating, review_count, histogram_json, image_url,
                    bsr, bsr_num, price, note, COALESCE(coupon, FALSE) AS coupon,
-                   COALESCE(prime_excl, FALSE) AS prime_excl, created_at
+                   COALESCE(prime_excl, FALSE) AS prime_excl,
+                   COALESCE(list_price, '') AS list_price, COALESCE(discount, '') AS discount,
+                   COALESCE(deal_info, '') AS deal_info, created_at
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
@@ -1006,7 +1025,9 @@ all_parents = _uniq_str(calc_df, "Parent")
 
 fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
-    sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN")
+    _mk_all = get_asin_markets_map(all_asins)
+    sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN",
+                               format_func=lambda a: asin_label(a, _mk_all, with_title=False))
 with fc2:
     sel_cats = st.multiselect("Категория", options=all_cats, default=[], placeholder="Все")
 with fc3:
@@ -1441,8 +1462,12 @@ if nav == "🥊 Конкуренты":
                                     placeholder="все группы этой страны")
         comp_days = f3.selectbox("Период", [7, 14, 30, 60, 90], index=0,
                                  format_func=lambda d: f"{d} дн.", key="comp_f_days")
-        metrics = f4.multiselect("Метрики", ["BSR", "Reviews", "Rating", "Price"],
-                                 default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics")
+        metrics = f4.multiselect("Метрики",
+                                 ["BSR", "Reviews", "Rating", "Price", "List Price", "Скидка",
+                                  "Deal", "Купон"],
+                                 default=["BSR", "Reviews", "Rating", "Price"], key="comp_f_metrics",
+                                 help="List Price — цена до скидки · Скидка — бейдж −N% · "
+                                      "Deal — «Price Drop» и подобные · Купон — есть ли купон")
         color_mode = f5.selectbox(
             "Раскраска", ["Изменение к прошлому замеру", "Место в группе"], key="comp_color_mode",
             help="«Изменение» — стало лучше или хуже со вчера. "
@@ -1724,11 +1749,25 @@ if nav == "🥊 Конкуренты":
                 "Rating": snap.pivot(index="asin", columns="day", values="rating").reindex(columns=days_c),
                 "Price": snap.pivot(index="asin", columns="day", values="price_num").reindex(columns=days_c),
             }
+            # промо-метрики: приходят строками, поэтому pivot без агрегации чисел
+            for _key, _col in (("List Price", "list_price"), ("Скидка", "discount"),
+                               ("Deal", "deal_info")):
+                if _col in snap.columns:
+                    piv[_key] = (snap.pivot(index="asin", columns="day", values=_col)
+                                 .reindex(columns=days_c))
+            if "coupon" in snap.columns:
+                piv["Купон"] = (snap.assign(_c=snap["coupon"].map({True: "есть", False: ""}))
+                                .pivot(index="asin", columns="day", values="_c")
+                                .reindex(columns=days_c))
             meta = view.set_index("asin")
+
+            TEXT_METRICS = {"List Price", "Скидка", "Deal", "Купон"}
 
             def fmt_v(metric, v):
                 if pd.isna(v):
                     return ""
+                if metric in TEXT_METRICS:          # приходят строкой как есть
+                    return str(v)
                 if metric == "Rating":
                     return f"{v:.1f}"
                 if metric == "Price":
@@ -1762,6 +1801,8 @@ if nav == "🥊 Конкуренты":
                     return "background:#e8534f;color:#fff" if strong else "background:#ffcdd2"
                 if metric == "Reviews":
                     return "background:#c8f7c5" if v > prev else "background:#ffe0b2"
+                if metric in TEXT_METRICS:
+                    return ""              # текст не красим: сравнивать нечего
                 if metric == "Price":      # конкурент снизил цену — тревога
                     drop = abs(prev - v) / prev if prev else 0
                     strong = drop > 0.1
@@ -1888,6 +1929,7 @@ if nav == "🥊 Конкуренты":
             pick_now = rf1.multiselect(
                 "Обновить позиции", options=asins, default=[], key=f"comp_quick_{sel_mkt}",
                 label_visibility="collapsed",
+                format_func=lambda a: f"{a} · {sel_mkt}",
                 placeholder="выбери ASIN — соберём заново и покажем актуальные данные")
             if rf2.button(f"↻ Обновить ({len(pick_now)})", disabled=not pick_now, type="primary",
                           key=f"comp_quick_btn_{sel_mkt}", use_container_width=True):
@@ -2327,7 +2369,9 @@ if nav == "🧠 AI-анализ":
             f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
             pool = filtered_df["raw_asin"].tolist() if not filtered_df.empty else all_asins
             default_pick = filtered_df.nsmallest(5, "Рейтинг")["raw_asin"].tolist() if not filtered_df.empty else []
+            _rm = get_asin_markets_map(pool)
             rv_asins = f1.multiselect("ASIN для сбора отзывов", options=pool, default=default_pick,
+                                      format_func=lambda a: asin_label(a, _rm, with_title=False),
                                       key="ai_rv_asins")
             rv_market = f2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="ai_rv_market")
             rv_pages = f3.number_input("Страниц", 1, 5, 2, key="ai_rv_pages")
@@ -2492,6 +2536,7 @@ def render_dynamics(filtered_df, hist_df, kind):
                                placeholder="🔍 поиск: ASIN, категория, parent или название")
         picked = sq2.multiselect("Показать только эти ASIN", options=list(order), default=[],
                                  key=f"dyn_upd_{kind}", label_visibility="collapsed",
+                                 format_func=lambda a: asin_label(a, src_map),
                                  placeholder="или выбери конкретные ASIN — таблица покажет только их")
         if picked:
             order = [a for a in order if a in picked]
@@ -2701,6 +2746,88 @@ def render_dynamics(filtered_df, hist_df, kind):
 </style>
 <div class='dyn-wrap'><table class='dyn'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
 """
+
+        # что происходило с позицией и как быстро она отыгрывает падения
+        with st.expander("🕒 История изменений и скорость реакции", expanded=False):
+            if not order:
+                st.caption("Нет позиций для разбора")
+            else:
+                h_asin = st.selectbox("ASIN", options=list(order), key=f"hist_asin_{kind}",
+                                      format_func=lambda a: asin_label(a, src_map))
+                h = (hist_df[hist_df["asin"] == h_asin].sort_values("created_at").copy()
+                     if not hist_df.empty else pd.DataFrame())
+                if h.empty:
+                    st.info("По этой позиции замеров пока нет")
+                else:
+                    for _c in ("rating", "review_count", "bsr_num"):
+                        if _c in h.columns:
+                            h[_c] = pd.to_numeric(h[_c], errors="coerce")
+                        else:
+                            h[_c] = pd.NA
+
+                    ev, prev = [], None
+                    for _, r in h.iterrows():
+                        if prev is None:
+                            ev.append({"ts": r["created_at"], "what": "первый замер",
+                                       "rating": r["rating"], "d_rating": None,
+                                       "reviews": r["review_count"], "d_rev": None,
+                                       "bsr": r["bsr_num"]})
+                            prev = r
+                            continue
+                        dr = ((r["rating"] - prev["rating"])
+                              if pd.notnull(r["rating"]) and pd.notnull(prev["rating"]) else 0)
+                        dv = ((r["review_count"] - prev["review_count"])
+                              if pd.notnull(r["review_count"]) and pd.notnull(prev["review_count"]) else 0)
+                        if abs(dr) >= 0.05 or abs(dv) >= 1:
+                            parts = []
+                            if abs(dr) >= 0.05:
+                                parts.append(f"рейтинг {dr:+.2f}")
+                            if abs(dv) >= 1:
+                                parts.append(f"оценок {int(dv):+d}")
+                            ev.append({"ts": r["created_at"], "what": " · ".join(parts),
+                                       "rating": r["rating"], "d_rating": dr,
+                                       "reviews": r["review_count"], "d_rev": dv,
+                                       "bsr": r["bsr_num"]})
+                        prev = r
+
+                    if len(ev) <= 1:
+                        st.info("Изменений за период не было — позиция стоит ровно")
+                    else:
+                        ev_df = pd.DataFrame(ev)
+                        ev_df["ts"] = pd.to_datetime(ev_df["ts"]).dt.tz_convert(ZoneInfo(selected_tz))
+                        ev_df["Пауза"] = ev_df["ts"].diff().apply(
+                            lambda d: "—" if pd.isna(d) else
+                            (f"{d.days} дн." if d.days >= 1 else f"{int(d.total_seconds() // 3600)} ч"))
+
+                        # скорость реакции: сколько прошло от падения до возврата на прежний уровень
+                        rec = []
+                        for _, d in ev_df[ev_df["d_rating"].fillna(0) <= -0.05].iterrows():
+                            before = d["rating"] - d["d_rating"]
+                            after = ev_df[(ev_df["ts"] > d["ts"]) & (ev_df["rating"] >= before - 0.001)]
+                            if not after.empty:
+                                rec.append(f"{d['ts']:%d.%m} падение на {abs(d['d_rating']):.2f} — "
+                                           f"отыграно за {(after.iloc[0]['ts'] - d['ts']).days} дн.")
+                            else:
+                                days = (pd.Timestamp.now(tz=ZoneInfo(selected_tz)) - d["ts"]).days
+                                rec.append(f"{d['ts']:%d.%m} падение на {abs(d['d_rating']):.2f} — "
+                                           f"не отыграно, {days} дн.")
+
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Событий", len(ev_df) - 1)
+                        gaps = ev_df["ts"].diff().dropna()
+                        m2.metric("Между изменениями", f"{gaps.mean().days} дн." if len(gaps) else "—")
+                        m3.metric("Оценок за период", f"{int(ev_df['d_rev'].fillna(0).sum()):+d}")
+
+                        if rec:
+                            st.markdown("**Скорость восстановления после падений**")
+                            for ln in rec[:8]:
+                                st.markdown(f"- {ln}")
+
+                        show = ev_df[["ts", "what", "rating", "reviews", "bsr", "Пауза"]].iloc[::-1]
+                        show.columns = ["Когда", "Что изменилось", "Рейтинг", "Оценок", "BSR", "Пауза"]
+                        show["Когда"] = show["Когда"].dt.strftime("%d.%m %H:%M")
+                        st.dataframe(show, use_container_width=True, hide_index=True,
+                                     height=min(400, 40 + 35 * len(show)))
 
         with st.expander(f"✏️ Категории — заполнить вручную ({len(order)} ASIN)", expanded=False):
             st.markdown("<div class='muted'>Впиши категорию напротив ASIN и нажми «Сохранить». "
@@ -3226,9 +3353,88 @@ if nav == "📈 Прогноз":
     if not all_asins:
         st.info("Нет данных")
     else:
-        pc1, pc2 = st.columns([2, 1])
-        target = pc1.selectbox("ASIN для детального прогноза", options=f_asins or all_asins)
-        horizon = pc2.slider("Горизонт, дней", 7, 90, 30, step=1)
+        _fm = get_asin_markets_map(all_asins)
+        pool_f = list(f_asins or all_asins)
+
+        # страна → потом уже ASIN: без этого в списке две одинаковых позиции из разных стран
+        fc0, fc1, fc2 = st.columns([1, 2.4, 1.2])
+        mkts_f = sorted({_fm.get(a) or "—" for a in pool_f})
+        sel_mkt_f = fc0.selectbox("Страна", options=["Все"] + mkts_f, key="fc_market")
+        if sel_mkt_f != "Все":
+            pool_f = [a for a in pool_f if (_fm.get(a) or "—") == sel_mkt_f]
+
+        q_f = fc1.text_input("Поиск", key="fc_q", label_visibility="collapsed",
+                             placeholder="🔍 поиск: ASIN или название")
+        if q_f.strip():
+            _dm_f = get_dictionary()
+            _dm_f = _dm_f.set_index("asin") if not _dm_f.empty else None
+            ql = q_f.strip().lower()
+
+            def _hay_f(a):
+                extra = ""
+                if _dm_f is not None and a in _dm_f.index:
+                    extra = f"{_dm_f.loc[a].get('title') or ''} {_dm_f.loc[a].get('brand') or ''}"
+                return f"{a} {extra}".lower()
+
+            pool_f = [a for a in pool_f if ql in _hay_f(a)]
+
+        horizon = fc2.slider("Горизонт, дней", 7, 90, 30, step=1)
+
+        if not pool_f:
+            st.warning("Под фильтры ничего не попало")
+            st.stop()
+
+        sc1, sc2 = st.columns([3, 1])
+        targets = sc1.multiselect(
+            "ASIN для прогноза", options=pool_f, default=pool_f[:1], key="fc_targets",
+            format_func=lambda a: asin_label(a, _fm, with_title=False),
+            help="Можно выбрать несколько — сверху появится сводная таблица по всем")
+        if sc2.button(f"Взять все ({len(pool_f)})", key="fc_take_all", use_container_width=True):
+            st.session_state["fc_targets"] = pool_f
+            st.rerun()
+
+        if not targets:
+            st.info("Выбери хотя бы один ASIN")
+            st.stop()
+
+        # сводка по всем выбранным: где просядем за горизонт
+        if len(targets) > 1:
+            rows_f = []
+            for a in targets:
+                hh = full_df[full_df["asin"] == a].sort_values("created_at")
+                if hh.empty:
+                    continue
+                xs = hh["created_at"].astype(np.int64) // 10**9
+                ys = hh["rating"].ffill().fillna(0.0).values
+                cur = float(ys[-1])
+                if len(hh) >= 2:
+                    m = LinearRegression().fit(xs.values.reshape(-1, 1), ys)
+                    slope_day = m.coef_[0] * 86400
+                    pred = float(np.clip(cur + slope_day * horizon, 1, 5))
+                    to42 = int((cur - 4.2) / -slope_day) if slope_day < 0 and cur > 4.2 else None
+                else:
+                    slope_day, pred, to42 = 0.0, cur, None
+                rows_f.append({
+                    "ASIN": a, "Страна": _fm.get(a) or "—",
+                    "Сейчас": round(cur, 2), f"Через {horizon} дн.": round(pred, 2),
+                    "Δ": round(pred - cur, 2), "★/мес": round(slope_day * 30, 3),
+                    "Дней до 4.2": to42 if to42 is not None else "—",
+                    "Замеров": len(hh)})
+            if rows_f:
+                sm = pd.DataFrame(rows_f).sort_values("Δ")
+                st.markdown(f"**Сводный прогноз — {len(sm)} позиций**")
+                st.dataframe(
+                    sm.style.background_gradient(subset=["Δ"], cmap="RdYlGn", vmin=-0.3, vmax=0.3)
+                      .format({"Сейчас": "{:.2f}", f"Через {horizon} дн.": "{:.2f}",
+                               "Δ": "{:+.2f}", "★/мес": "{:+.3f}"}),
+                    use_container_width=True, hide_index=True,
+                    height=min(420, 40 + 35 * len(sm)))
+                st.caption("Δ — изменение рейтинга за горизонт по линейному тренду. "
+                           "Красные строки — те, что просядут сильнее всего.")
+                st.markdown("---")
+
+        target = st.selectbox("Детальный разбор", options=targets, key="fc_detail",
+                              format_func=lambda a: asin_label(a, _fm, with_title=False))
 
         ah = full_df[full_df["asin"] == target].sort_values("created_at").copy()
         if ah.empty:
@@ -3507,7 +3713,9 @@ def render_asin_manager(kind):
     st.markdown("**🔁 Заменить ASIN** <span class='muted'>— старый уходит из отслеживания, новый встаёт на его место "
                 "и наследует категорию/parent/страну из справочника</span>", unsafe_allow_html=True)
     r1, r2, r3, r4 = st.columns([2, 2, 1.2, 1])
-    old_asin = r1.selectbox("Старый ASIN", options=[""] + tracked_k, key=f"repl_old_{kind}")
+    old_asin = r1.selectbox("Старый ASIN", options=[""] + tracked_k, key=f"repl_old_{kind}",
+                            format_func=lambda a: (asin_label(a, asin_market_map, with_title=False)
+                                                   if a else "—"))
     new_asin_raw = r2.text_input("Новый ASIN / ссылка", key=f"repl_new_{kind}", placeholder="B0XXXXXXXX или ссылка")
     keep_hist = r3.checkbox("Сохранить историю старого", value=True, key=f"repl_keep_{kind}")
     new_code = extract_asin(new_asin_raw) if new_asin_raw.strip() else ""
