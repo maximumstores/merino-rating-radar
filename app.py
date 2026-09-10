@@ -1678,7 +1678,24 @@ if nav == "🥊 Конкуренты":
                          f"{sel_mkt} уходит в @{_bu or '—'}. То же самое приходит само "
                          f"после каждого сбора.</div>", unsafe_allow_html=True)
 
-        st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN")
+        # поиск по таблице: ASIN, бренд, название, группа
+        q_comp = st.text_input("Поиск", key=f"comp_q_{sel_mkt}", label_visibility="collapsed",
+                               placeholder="🔍 поиск: ASIN, бренд, название или группа")
+        if q_comp.strip():
+            ql = q_comp.strip().lower()
+            _m = view.set_index("asin")
+            keep = [a for a in asins
+                    if ql in " ".join([a] + [str(_m.loc[a, f] or "") for f in
+                                             ("brand", "title", "grp")]).lower()]
+            if keep:
+                asins = keep
+                view = view[view["asin"].isin(keep)]   # история берётся по asins ниже
+            else:
+                st.warning(f"По запросу «{q_comp}» ничего не найдено")
+                asins, view = [], view.iloc[0:0]
+
+        st.markdown(f"#### Таблица — {sel_mkt} · {len(asins)} ASIN"
+                    + (f" · фильтр: «{q_comp}»" if q_comp.strip() else ""))
         _t0 = time.time()
         _timing = {}
         # берём из уже загруженной истории — отдельный запрос к базе не нужен
