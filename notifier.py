@@ -407,9 +407,9 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
         if part.empty and silent_if_empty:
             continue
         label = {"child": "Чайлд", "parent": "Парент"}.get(kind or str(sub["kinds"]))
-        res = send_message(int(sub["chat_id"]), format_report(part, label, header),
-                           channel=channel)
-        if res.get("ok"):
+        sent_ok, _err = send_long(int(sub["chat_id"]), format_report(part, label, header),
+                                  channel=channel)
+        if sent_ok:
             sent += 1
             with conn() as c:
                 with c.cursor() as cur:
@@ -458,6 +458,46 @@ def bot_link(channel="radar"):
 
 
 LAST_SEND_ERRORS = []
+TG_LIMIT = 4096          # жёсткий лимит Telegram на одно сообщение
+CHUNK = 3600             # с запасом на ссылку и разметку
+
+
+def split_message(text, limit=CHUNK):
+    """Режет длинный отчёт по границам строк, не разрывая абзацы.
+    Telegram отказывает целиком, если сообщение длиннее 4096 символов."""
+    if len(text) <= limit:
+        return [text]
+    parts, buf = [], ""
+    for line in text.split("\n"):
+        if len(buf) + len(line) + 1 > limit and buf:
+            parts.append(buf.rstrip())
+            buf = ""
+        # одна строка длиннее лимита — режем грубо
+        while len(line) > limit:
+            parts.append(line[:limit])
+            line = line[limit:]
+        buf += line + "\n"
+    if buf.strip():
+        parts.append(buf.rstrip())
+    total = len(parts)
+    return [f"{p}\n\n<i>({i} из {total})</i>" if total > 1 else p
+            for i, p in enumerate(parts, 1)]
+
+
+def send_long(chat_id, text, channel="radar"):
+    """Отправляет текст любой длины: режет на части, при отказе HTML — без разметки."""
+    ok_all, err = True, None
+    for part in split_message(text):
+        res = send_message(chat_id, part, channel=channel)
+        if not res.get("ok"):
+            err = res.get("description")
+            plain = re.sub(r"<[^>]+>", "", part)
+            res2 = tg_call("sendMessage", channel=channel, chat_id=chat_id, text=plain,
+                           disable_web_page_preview=True)
+            if not res2.get("ok"):
+                ok_all = False
+                err = f"{err} · без разметки: {res2.get('description')}"
+    return ok_all, err
 
 
 def broadcast(text, channel="radar"):
@@ -468,22 +508,13 @@ def broadcast(text, channel="radar"):
     LAST_SEND_ERRORS = []
     subs = get_subscribers(active_only=True, channel=channel)
     ok = 0
-    plain = re.sub(r"<[^>]+>", "", text) if "<" in text else text
     for _, sub in subs.iterrows():
         chat = int(sub["chat_id"])
-        res = send_message(chat, text, channel=channel)
-        if res.get("ok"):
+        sent_ok, err = send_long(chat, text, channel=channel)
+        if sent_ok:
             ok += 1
-            continue
-        LAST_SEND_ERRORS.append(f"{chat}: {res.get('description') or res}")
-        # вторая попытка без разметки
-        res2 = tg_call("sendMessage", channel=channel, chat_id=chat, text=plain,
-                       disable_web_page_preview=True)
-        if res2.get("ok"):
-            ok += 1
-            LAST_SEND_ERRORS[-1] += " · ушло без разметки"
         else:
-            LAST_SEND_ERRORS[-1] += f" · и без разметки: {res2.get('description')}"
+            LAST_SEND_ERRORS.append(f"{chat}: {err}")
     return ok, len(subs)
 
 
