@@ -61,11 +61,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Алерты по рейтингам
+      - name: Алерты по портфелям
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python -c "import notifier; print(notifier.notify_all(header='Rating Radar — ежедневный сбор'))"
+          TELEGRAM_BOT_TOKEN_CHILD: ${{ secrets.TELEGRAM_BOT_TOKEN_CHILD }}
+        run: python -c "import notifier; print(notifier.notify_portfolios(header='Rating Radar — ежедневный сбор'))"
 
       - name: Сводка по конкурентам
         if: always()
