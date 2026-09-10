@@ -17,8 +17,11 @@ from sklearn.linear_model import LinearRegression
 # Секреты: .env локально, st.secrets в Streamlit Cloud. Прокидываем в os.environ
 # ДО импорта collector/notifier — они читают переменные на уровне модуля.
 load_dotenv()
-for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN_COMP",
-           "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GITHUB_REPO"):
+for _k in ("DATABASE_URL", "SCRAPINGDOG_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN_CHILD",
+           "TELEGRAM_BOT_TOKEN_COMP", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GITHUB_REPO",
+           "TELEGRAM_BOT_TOKEN_US", "TELEGRAM_BOT_TOKEN_CA", "TELEGRAM_BOT_TOKEN_DE",
+           "TELEGRAM_BOT_TOKEN_UK", "TELEGRAM_BOT_TOKEN_FR", "TELEGRAM_BOT_TOKEN_IT",
+           "TELEGRAM_BOT_TOKEN_ES"):
     if not os.environ.get(_k):
         try:
             _v = st.secrets.get(_k)
@@ -698,8 +701,8 @@ def run_collection(items, label="Прогон"):
     if not stopped and NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
         try:
             notifier.process_updates()
-            sent, total = notifier.notify_all(header=f"Rating Radar — {label.lower()} завершён")
-            msg += f" Telegram: отправлено {sent} из {total}."
+            res = notifier.notify_portfolios(header=f"Rating Radar — {label.lower()} завершён")
+            msg += " Telegram: " + " · ".join(f"{k} {v[0]}/{v[1]}" for k, v in res.items()) + "."
         except Exception as e:
             msg += f" Telegram: ошибка отправки ({e})."
     st.success(msg)
@@ -723,13 +726,30 @@ with hdr_r:
             + (f" · шардов {shards}" if shards > 1 else ""))
     else:
         st.warning("История сборов пуста")
-    st.markdown(
-        "<div style='margin-top:6px'>"
-        "<a href='https://t.me/RatingRadar_bot' target='_blank' "
-        "style='display:inline-block;background:#229ED9;color:#fff;padding:6px 14px;border-radius:999px;"
-        "font-size:13px;font-weight:600;text-decoration:none'>✈️ Алерты в Telegram — @RatingRadar_bot</a>"
-        "<span class='muted' style='margin-left:10px'>подписка в один клик: /start</span></div>",
-        unsafe_allow_html=True)
+    # какой бот за что отвечает — видно сразу в шапке
+    def _pill(url, text):
+        return (f"<a href='{url}' target='_blank' style='display:inline-block;background:#229ED9;"
+                f"color:#fff;padding:5px 13px;border-radius:999px;font-size:12.5px;font-weight:600;"
+                f"text-decoration:none;margin:0 6px 4px 0'>✈️ {text}</a>")
+
+    _parent_bot = "RatingRadar_bot"
+    _child_bot = None
+    if NOTIFIER_OK and os.environ.get("TELEGRAM_BOT_TOKEN_CHILD"):
+        try:
+            _child_bot = notifier.bot_username("radar_child")
+        except Exception:
+            _child_bot = None
+
+    pills = _pill(f"https://t.me/{_parent_bot}", f"Паренты — @{_parent_bot}")
+    if _child_bot:
+        pills += _pill(f"https://t.me/{_child_bot}", f"Чайлды — @{_child_bot}")
+        note = "по одному боту на портфель · подписка: /start"
+    else:
+        note = ("чайлды и паренты идут в один бот · чтобы развести — "
+                "секрет TELEGRAM_BOT_TOKEN_CHILD")
+    st.markdown(f"<div style='margin-top:6px'>{pills}"
+                f"<div class='muted' style='margin-top:2px'>{note}</div></div>",
+                unsafe_allow_html=True)
 
 def ensure_kind_column():
     if not DATABASE_URL or st.session_state.get('_ensure_kind_column_ok'):
@@ -3724,9 +3744,9 @@ if nav == "⚙️ Сбор и управление":
             b1, b2, b3 = st.columns([1.2, 1.2, 2])
             if b1.button("📤 Отправить отчёт сейчас", key="tg_send_now"):
                 try:
-                    sent, total = notifier.notify_all(header="Rating Radar — отчёт по запросу",
-                                                      silent_if_empty=False)
-                    st.success(f"Отправлено {sent} из {total}")
+                    res = notifier.notify_portfolios(header="Rating Radar — отчёт по запросу",
+                                                     silent_if_empty=False)
+                    st.success(" · ".join(f"{k}: {v[0]} из {v[1]}" for k, v in res.items()))
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
             with st.expander("🩺 Диагностика бота", expanded=False):
@@ -3992,4 +4012,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
