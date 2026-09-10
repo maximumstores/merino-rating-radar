@@ -24,6 +24,9 @@ SCRAPE_URL = "https://api.scrapingdog.com/scrape"
 RETRIES = 5
 TIMEOUT = 90
 BSR_RETRIES = int(os.environ.get("BSR_RETRIES", "5"))   # доборы BSR/гистограммы, если не распарсились
+# сколько раз переспрашивать API по своей стране: пустой ответ у Scrapingdog
+# бывает и на третьем заходе, товар при этом на месте
+API_MARKET_TRIES = int(os.environ.get("API_MARKET_TRIES", "4"))
 
 DOMAIN_MARKETS = {
     "amazon.com": ("US", "https://www.amazon.com/dp/{asin}"),
@@ -509,7 +512,7 @@ def parse_reviews_page(asin: str) -> dict:
             "image_url": image_url, "bsr": None}
 
 
-def check_asin(raw_input: str, log=print) -> dict:
+def check_asin(raw_input: str, log=print, only_market: str = None) -> dict:
     clean_asin, target_market, custom_tmpl = extract_asin_and_market(raw_input)
     if not clean_asin:
         log(f"  пропуск: не распознан ASIN в «{raw_input}»")
@@ -536,7 +539,14 @@ def check_asin(raw_input: str, log=print) -> dict:
         except Exception as e:
             log(f"  [{target_market}] ошибка: {e}")
 
-    # 2) каскад BE -> NL
+    # 2) каскад BE -> NL. Только если страна неизвестна: у товара с явной
+    # страной чужая витрина даст чужие цифры.
+    if only_market or target_market:
+        log("  страна задана — каскад BE/NL пропускаем")
+        return {"asin": clean_asin, "source": "none", "rating": None, "count": None,
+                "hist": {}, "image_url": None, "bsr": None,
+                "note": f"не найден на {only_market or target_market}"}
+
     for market, tmpl in DEFAULT_MARKETS:
         url = tmpl.format(asin=clean_asin)
         try:
@@ -1069,15 +1079,27 @@ def enrich_bsr_hist(asin: str, market: str, need_bsr=True, need_hist=True,
 
 
 def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=True) -> dict:
-    """Сбор через structured API с откатом на HTML-парсер."""
+    """Сбор через structured API с откатом на HTML-парсер.
+
+    Если страна известна (ссылка, суффикс :DE, справочник) — работаем только по ней.
+    Каскад BE→NL включается лишь когда страны нет: раньше он срабатывал всегда и
+    тянул данные с чужой витрины, попутно расходуя кредиты.
+    """
     clean, mkt_from_input, _ = extract_asin_and_market(raw_input)
     if not clean:
         return {"asin": "", "source": "none", "rating": None, "count": None,
                 "hist": {}, "image_url": None, "bsr": None, "note": "не распознан ASIN"}
 
-    for mkt in [m for m in (market, mkt_from_input, "BE", "NL") if m]:
-        obj = fetch_product_json(clean, mkt, log=log)
+    known = market or mkt_from_input
+    # Scrapingdog нередко отдаёт пусто с первого раза и нормально — с третьего.
+    # Поэтому повторяем по своей стране, а не уходим на чужую витрину.
+    tries = [known] * API_MARKET_TRIES if known else ["BE", "NL"]
+    for attempt, mkt in enumerate([m for m in tries if m], 1):
+        obj = fetch_product_json(clean, mkt, log=log if attempt == 1 else (lambda *_a, **_k: None))
         if not obj:
+            if known and attempt < len(tries):
+                log(f"  [{mkt}] пусто, попытка {attempt + 1}/{len(tries)}")
+                time.sleep(1.5 * attempt)
             continue
         parsed = parse_product_json(obj, clean, mkt)
 
@@ -1109,13 +1131,15 @@ def check_asin_api(raw_input: str, market: str = None, log=print, fallback_html=
                     parsed["hist"] = extra["hist"]
             parsed["_raw"] = obj
             return parsed
-        log(f"  [{mkt}] API: рейтинга нет в ответе")
+        if attempt == len(tries) or not known:
+            log(f"  [{mkt}] API: рейтинга нет в ответе")
 
     if fallback_html:
-        log("  откат на HTML-парсер")
-        return check_asin(raw_input, log=log)
+        log(f"  откат на HTML-парсер{f' ({known})' if known else ''}")
+        return check_asin(raw_input, log=log, only_market=known)
     return {"asin": clean, "source": "none", "rating": None, "count": None,
-            "hist": {}, "image_url": None, "bsr": None, "note": "API не отдал рейтинг"}
+            "hist": {}, "image_url": None, "bsr": None,
+            "note": f"нет данных{f' на {known}' if known else ''}"}
 
 
 # ================================================================= BSR из JSON структурированного API
