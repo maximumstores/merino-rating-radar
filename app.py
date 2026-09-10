@@ -248,7 +248,8 @@ def get_full_history(days=120):
         df = pd.read_sql(
             """
             SELECT asin, source, rating, review_count, histogram_json, image_url,
-                   bsr, bsr_num, price, note, created_at
+                   bsr, bsr_num, price, note, COALESCE(coupon, FALSE) AS coupon,
+                   COALESCE(prime_excl, FALSE) AS prime_excl, created_at
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
@@ -1569,10 +1570,11 @@ if nav == "🥊 Конкуренты":
                     if o.empty and c.empty:
                         return
                     if o.empty:
-                        ov, o_age = None, ""
+                        ov, o_age, o_asin = None, "", ""
                     else:
                         oidx = o.idxmax() if better == "max" else o.idxmin()
                         ov, o_age = o.loc[oidx], _age(ours.loc[oidx], col)
+                        o_asin = str(ours.loc[oidx, "asin"])
                     if c.empty:
                         cv, cb, c_age = None, "", ""
                     else:
@@ -1592,8 +1594,8 @@ if nav == "🥊 Конкуренты":
                         return
                     win = ov >= cv if better == "max" else ov <= cv
                     verdict = "мы впереди 🟢" if win else "отстаём 🔴"
-                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший из "
-                                 f"конкурентов {_n(fmt, cv)}{c_age} ({cb}) — {verdict}")
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
+                                 f"сильнейший {_n(fmt, cv)}{c_age} — {cb} — {verdict}")
                     row[label] = f"{_n(fmt, ov)} / {_n(fmt, cv)} {'🟢' if win else '🔴'}"
 
                 cmp_line("Рейтинг", "rating", "max", "{:.1f}")
@@ -1608,6 +1610,23 @@ if nav == "🥊 Конкуренты":
                     lines.append(f"  • Цена: у нас {po.mean():.2f} · средняя у конкурентов {avg:.2f} — "
                                  + ("мы дороже 🔴" if pricier else "мы дешевле 🟢"))
                     row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {'🔴' if pricier else '🟢'}"
+
+                # промо: купоны и Prime-эксклюзив — видно, чем давит конкурент
+                for pcol, plabel in (("coupon", "Купоны"), ("prime_excl", "Prime")):
+                    if pcol not in part.columns:
+                        continue
+                    o_on = int(ours[pcol].fillna(False).astype(bool).sum())
+                    c_on = int(comp[pcol].fillna(False).astype(bool).sum())
+                    if o_on == 0 and c_on == 0:
+                        lines.append(f"  • {plabel}: нет ни у кого 🟢")
+                    elif c_on and not o_on:
+                        lines.append(f"  • {plabel}: у нас нет · у конкурентов {c_on} из "
+                                     f"{len(comp)} 🔴")
+                    elif o_on and not c_on:
+                        lines.append(f"  • {plabel}: у нас {o_on} · у конкурентов нет 🟢")
+                    else:
+                        lines.append(f"  • {plabel}: у нас {o_on} из {len(ours)} · "
+                                     f"у конкурентов {c_on} из {len(comp)}")
 
                 def _lag(col, better):
                     o, c = ours[col].dropna(), comp[col].dropna()
