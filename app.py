@@ -605,13 +605,16 @@ def dispatch_github_run(force=True, workflow="collect.yml"):
 
 
 def actions_button(key, label="🚀 Запустить сбор в GitHub Actions"):
-    if st.button(label, key=key, use_container_width=True,
+    if st.button(label, key=key, type="primary", use_container_width=True,
                  help="Сбор пойдёт на серверах GitHub в 10 параллельных потоков. "
-                      "Вкладку можно закрыть, отчёт придёт в Telegram."):
+                      "Вкладку можно закрыть, отчёты придут в Telegram."):
         ok, msg = dispatch_github_run()
-        (st.success if ok else st.error)(msg)
         if ok:
-            st.markdown(f"[Открыть лог прогона →](https://github.com/{GH_REPO}/actions)")
+            st.success("Запущено. Идёт 5–10 минут, потом придут отчёты в Telegram. "
+                       "Данные в дашборде появятся после «🔄 Обновить данные из базы».")
+            st.markdown(f"[Смотреть ход прогона на GitHub →](https://github.com/{GH_REPO}/actions)")
+        else:
+            st.error(msg)
 
 
 def run_collection(items, label="Прогон"):
@@ -1705,6 +1708,10 @@ if nav == "🥊 Конкуренты":
                     t = piv[metric]
                     return t.loc[a, d] if (a in t.index and d is not None) else None
 
+                # время последнего замера по каждой позиции
+                last_ts = (hist.sort_values("created_at").groupby("asin")["created_at"].last()
+                           if not hist.empty else pd.Series(dtype="datetime64[ns, UTC]"))
+
                 rows = []
                 for a in asins:
                     m = meta.loc[a] if a in meta.index else {}
@@ -1719,8 +1726,11 @@ if nav == "🥊 Конкуренты":
                             and pd.notnull(rc) and pd.notnull(val("Reviews", a, prev_day2))) else None
                     d_pr = (pr - val("Price", a, prev_day2)) if (prev_day2 is not None
                             and pd.notnull(pr) and pd.notnull(val("Price", a, prev_day2))) else None
+                    ts = last_ts.get(a)
                     rows.append({
                         "Наш": "🔵" if is_own_brand(brand) else "",
+                        "Замер": (pd.to_datetime(ts).tz_convert(ZoneInfo(selected_tz)).strftime("%d.%m %H:%M")
+                                  if pd.notnull(ts) else "—"),
                         "ASIN": f"https://www.{MARKET_DOMAINS.get(sel_mkt, 'amazon.com.be')}/dp/{a}",
                         "Бренд": brand or "—",
                         "Группа": str(m.get("grp", "") or ""),
@@ -1743,6 +1753,9 @@ if nav == "🥊 Конкуренты":
                     height=min(760, 40 + 35 * len(flat)),
                     column_config={
                         "Наш": st.column_config.TextColumn("", width="small"),
+                        "Замер": st.column_config.TextColumn(
+                            "Замер", width="small",
+                            help="Когда сняли последние данные по этой позиции"),
                         "ASIN": st.column_config.LinkColumn("ASIN", width="medium",
                                                             display_text=r"/dp/([A-Z0-9]{10})"),
                         "Бренд": st.column_config.TextColumn("Бренд", width="medium"),
@@ -3452,23 +3465,38 @@ if nav == "⚙️ Сбор и управление":
     st.markdown("---")
 
     with o1:
-        st.markdown("### Ручной прогон")
-        st.caption("Сбор по всему списку прямо сейчас")
-        if st.button(f"▶ Все ({len(tracked)} ASIN)", type="primary", key="run_all",
-                     use_container_width=True, disabled=not tracked):
-            run_collection(tracked, "Прогон")
-        actions_button("gh_run_ops", "🚀 Запустить весь сбор в GitHub Actions")
-        st.caption("Рекомендуется для списков больше "
-                   f"{BROWSER_RUN_LIMIT} позиций — браузерный прогон на них обрывается.")
-        rk1, rk2 = st.columns(2)
         n_child = len(tracked_by_kind.get("child", []))
         n_parent = len(tracked_by_kind.get("parent", []))
-        if rk1.button(f"▶ Чайлды ({n_child})", key="run_child", use_container_width=True,
-                      disabled=not n_child):
-            run_collection(tracked_by_kind["child"], "Прогон (Чайлд)")
-        if rk2.button(f"▶ Паренты ({n_parent})", key="run_parent", use_container_width=True,
-                      disabled=not n_parent):
-            run_collection(tracked_by_kind["parent"], "Прогон (Парент)")
+        try:
+            n_comp = len(get_competitors())
+        except Exception:
+            n_comp = 0
+        n_all = n_child + n_parent + n_comp
+
+        st.markdown("### Запустить сбор")
+        st.markdown(f"<div class='muted'>В работе <b>{n_all}</b> позиций: "
+                    f"чайлды {n_child} · паренты {n_parent} · конкуренты {n_comp}</div>",
+                    unsafe_allow_html=True)
+
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        actions_button("gh_run_ops", f"🚀 Собрать всё ({n_all}) — на серверах GitHub")
+        st.caption("Так собирается весь список: 10 параллельных потоков, 5–10 минут. "
+                   "Вкладку можно закрыть — отчёты придут в Telegram. "
+                   "Это же происходит само каждый день в заданное ниже время.")
+
+        with st.expander("Собрать в браузере (для мелких прогонов)", expanded=False):
+            st.caption(f"Держать вкладку открытой. На списках больше {BROWSER_RUN_LIMIT} позиций "
+                       "Streamlit обрывает соединение, поэтому для полного сбора — кнопка выше.")
+            if st.button(f"▶ Все ({len(tracked)})", key="run_all",
+                         use_container_width=True, disabled=not tracked):
+                run_collection(tracked, "Прогон")
+            rk1, rk2 = st.columns(2)
+            if rk1.button(f"▶ Чайлды ({n_child})", key="run_child", use_container_width=True,
+                          disabled=not n_child):
+                run_collection(tracked_by_kind["child"], "Прогон (Чайлд)")
+            if rk2.button(f"▶ Паренты ({n_parent})", key="run_parent", use_container_width=True,
+                          disabled=not n_parent):
+                run_collection(tracked_by_kind["parent"], "Прогон (Парент)")
 
         st.markdown("### Автосбор")
         saved_time = get_setting("auto_time", "13:00")
