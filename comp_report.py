@@ -65,7 +65,9 @@ def load_data(days=3):
         return comp, pd.DataFrame()
     hist = pd.read_sql(
         """
-        SELECT asin, rating, review_count, bsr_num, price, created_at
+        SELECT asin, rating, review_count, bsr_num, price,
+               COALESCE(coupon, FALSE) AS coupon, COALESCE(prime_excl, FALSE) AS prime_excl,
+               created_at
         FROM asin_metrics
         WHERE asin = ANY(%s) AND created_at >= NOW() - (%s || ' days')::interval
         ORDER BY created_at ASC;
@@ -202,16 +204,19 @@ def build_report(country=None, days=10):
                 oidx = o.idxmax() if better == "max" else o.idxmin()
                 ov = o.loc[oidx]
                 o_age = _age(ours.loc[oidx], col)
+                # ASIN обязателен: в группе несколько наших товаров, и без него
+                # непонятно, к какому относится цифра
+                o_asin = str(ours.loc[oidx, "asin"])
                 if c.empty:
-                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · "
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
                                  "сопоставимых конкурентов нет")
                     return
                 idx = c.idxmax() if better == "max" else c.idxmin()
                 cv, cb = c.loc[idx], (esc(str(solid.loc[idx, "brand"])[:22]) or "конкурент")
                 c_age = _age(solid.loc[idx], col)
                 win = ov >= cv if better == "max" else ov <= cv
-                lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший из конкурентов "
-                             f"{_n(fmt, cv)}{c_age} ({cb}) — "
+                lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
+                             f"сильнейший {_n(fmt, cv)}{c_age} — {cb} — "
                              + ("мы впереди 🟢" if win else "отстаём 🔴"))
 
             cmp_line("Рейтинг", "rating", "max", "{:.1f}")
@@ -224,6 +229,21 @@ def build_report(country=None, days=10):
                 pricier = po.mean() > avg
                 lines.append(f"  • Цена: у нас {po.mean():.2f} · средняя у конкурентов {avg:.2f} — "
                              + ("мы дороже 🔴" if pricier else "мы дешевле 🟢"))
+
+            for pcol, plabel in (("coupon", "Купоны"), ("prime_excl", "Prime")):
+                if pcol not in part.columns:
+                    continue
+                o_on = int(ours[pcol].fillna(False).astype(bool).sum())
+                c_on = int(comps[pcol].fillna(False).astype(bool).sum())
+                if o_on == 0 and c_on == 0:
+                    lines.append(f"  • {plabel}: нет ни у кого 🟢")
+                elif c_on and not o_on:
+                    lines.append(f"  • {plabel}: у нас нет · у конкурентов {c_on} из {len(comps)} 🔴")
+                elif o_on and not c_on:
+                    lines.append(f"  • {plabel}: у нас {o_on} · у конкурентов нет 🟢")
+                else:
+                    lines.append(f"  • {plabel}: у нас {o_on} из {len(ours)} · "
+                                 f"у конкурентов {c_on} из {len(comps)}")
 
             def _lag(col, better):
                 o, c = ours[col].dropna(), solid[col].dropna()
