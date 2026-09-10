@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import psycopg2
+import re
 import requests
 from dotenv import load_dotenv
 
@@ -47,8 +48,11 @@ DATABASE_URL = _cfg("DATABASE_URL")
 MARKET_CODES = ["US", "CA", "MX", "BR", "UK", "DE", "FR", "IT", "ES", "NL", "BE",
                 "SE", "PL", "IE", "TR", "AE", "SA", "EG", "IN", "SG", "AU"]
 
+CHILD_BOT_TOKEN = (_cfg("TELEGRAM_BOT_TOKEN_CHILD") or "").strip()
+
 CHANNELS = {
-    "radar": {"token": BOT_TOKEN, "title": "Rating Radar"},
+    "radar": {"token": BOT_TOKEN, "title": "Rating Radar — паренты"},
+    "radar_child": {"token": CHILD_BOT_TOKEN or BOT_TOKEN, "title": "Rating Radar — чайлды"},
     "comp": {"token": COMP_BOT_TOKEN or BOT_TOKEN, "title": "Мониторинг конкурентов"},
 }
 for _cc in MARKET_CODES:
@@ -384,31 +388,48 @@ def _filter_for_subscriber(alerts, sub):
     return out
 
 
-def notify_all(header="Rating Radar — прогон завершён", silent_if_empty=True):
-    """Считает алерты и рассылает подписчикам с учётом их фильтров. Возвращает (отправлено, всего подписчиков)."""
+def notify_all(header="Rating Radar — прогон завершён", silent_if_empty=True,
+               kind=None, channel="radar"):
+    """Рассылает алерты подписчикам канала.
+
+    kind='parent' или 'child' — слать только по этому портфелю. Если для чайлдов
+    заведён свой бот (TELEGRAM_BOT_TOKEN_CHILD), они идут в канал radar_child.
+    """
     ensure_subs_schema()
     alerts = build_alerts()
-    subs = get_subscribers(active_only=True)
+    if kind and not alerts.empty and "kind" in alerts.columns:
+        alerts = alerts[alerts["kind"] == kind]
+
+    subs = get_subscribers(active_only=True, channel=channel)
     sent = 0
     for _, sub in subs.iterrows():
         part = _filter_for_subscriber(alerts, sub)
         if part.empty and silent_if_empty:
             continue
-        kinds = str(sub["kinds"])
-        label = None
-        if kinds == "child":
-            label = "Чайлд"
-        elif kinds == "parent":
-            label = "Парент"
-        res = send_message(int(sub["chat_id"]), format_report(part, label, header))
+        label = {"child": "Чайлд", "parent": "Парент"}.get(kind or str(sub["kinds"]))
+        res = send_message(int(sub["chat_id"]), format_report(part, label, header),
+                           channel=channel)
         if res.get("ok"):
             sent += 1
             with conn() as c:
                 with c.cursor() as cur:
-                    cur.execute("UPDATE telegram_subscribers SET last_sent_at = now() WHERE chat_id = %s",
-                                (int(sub["chat_id"]),))
+                    cur.execute("UPDATE telegram_subscribers SET last_sent_at = now() "
+                                "WHERE chat_id = %s AND channel = %s",
+                                (int(sub["chat_id"]), channel))
                 c.commit()
     return sent, len(subs)
+
+
+def notify_portfolios(header="Rating Radar — сбор завершён", silent_if_empty=True):
+    """Паренты — в основной бот, чайлды — в свой, если он заведён.
+    Возвращает {канал: (отправлено, подписчиков)}."""
+    out = {}
+    child_ch = "radar_child" if CHILD_BOT_TOKEN else "radar"
+    out["radar"] = notify_all(header=header + " · паренты", silent_if_empty=silent_if_empty,
+                              kind="parent", channel="radar")
+    out[child_ch] = notify_all(header=header + " · чайлды", silent_if_empty=silent_if_empty,
+                               kind="child", channel=child_ch)
+    return out
 
 
 _USERNAME_CACHE = {}
@@ -436,13 +457,33 @@ def bot_link(channel="radar"):
     return f"https://t.me/{u}" if u else None
 
 
+LAST_SEND_ERRORS = []
+
+
 def broadcast(text, channel="radar"):
-    """Ручная рассылка произвольного текста всем активным подписчикам канала."""
+    """Рассылка всем активным подписчикам канала.
+    При отказе Telegram причина складывается в LAST_SEND_ERRORS и повторяется
+    попытка без HTML — чаще всего ломается именно разметка (& или < в тексте)."""
+    global LAST_SEND_ERRORS
+    LAST_SEND_ERRORS = []
     subs = get_subscribers(active_only=True, channel=channel)
     ok = 0
+    plain = re.sub(r"<[^>]+>", "", text) if "<" in text else text
     for _, sub in subs.iterrows():
-        if send_message(int(sub["chat_id"]), text, channel=channel).get("ok"):
+        chat = int(sub["chat_id"])
+        res = send_message(chat, text, channel=channel)
+        if res.get("ok"):
             ok += 1
+            continue
+        LAST_SEND_ERRORS.append(f"{chat}: {res.get('description') or res}")
+        # вторая попытка без разметки
+        res2 = tg_call("sendMessage", channel=channel, chat_id=chat, text=plain,
+                       disable_web_page_preview=True)
+        if res2.get("ok"):
+            ok += 1
+            LAST_SEND_ERRORS[-1] += " · ушло без разметки"
+        else:
+            LAST_SEND_ERRORS[-1] += f" · и без разметки: {res2.get('description')}"
     return ok, len(subs)
 
 
@@ -517,6 +558,8 @@ def handle_command(msg, channel="radar"):
     if not chat_id:
         return
     help_text = COMP_HELP if channel.startswith("comp") else HELP
+    if channel == "radar_child":
+        help_text = help_text.replace("Rating Radar", "Rating Radar — чайлды")
     if not text.startswith("/"):
         send_message(chat_id, help_text, channel=channel)
         return
@@ -691,4 +734,4 @@ if __name__ == "__main__":
     ensure_subs_schema()
     print("команд обработано:", process_updates())
     n, total = notify_all(silent_if_empty=False)
-    print(f"отправлено {n} из {total}") 
+    print(f"отправлено {n} из {total}")
