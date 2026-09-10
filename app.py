@@ -1471,6 +1471,8 @@ if nav == "🥊 Конкуренты":
                        "Наших": len(ours), "Конкурентов": len(comp_all)}
 
                 def cmp_line(label, col, better="max", fmt="{:.1f}"):
+                    """Сравнение с сильнейшим конкурентом. Бренд показываем всегда,
+                    иначе непонятно, с кем сравниваем."""
                     o = ours[col].dropna()
                     c = comp[col].dropna()
                     if o.empty and c.empty:
@@ -1480,20 +1482,21 @@ if nav == "🥊 Конкуренты":
                         cv, cb = None, ""
                     else:
                         idx = c.idxmax() if better == "max" else c.idxmin()
-                        cv, cb = c.loc[idx], comp.loc[idx, "brand"]
+                        cv, cb = c.loc[idx], str(comp.loc[idx, "brand"])[:22] or "конкурент"
                     if ov is None:
-                        lines.append(f"  • {label}: у нас нет данных / лучший {fmt.format(cv)} ({cb}) 🔴")
+                        lines.append(f"  • {label}: у нас данных нет · сильнейший "
+                                     f"{fmt.format(cv)} — {cb} 🔴")
                         row[label] = f"— / {fmt.format(cv)}"
                         return
                     if cv is None:
-                        lines.append(f"  • {label}: наш {fmt.format(ov)} · конкурентов нет 🟢")
+                        lines.append(f"  • {label}: у нас {fmt.format(ov)} · сопоставимых конкурентов нет")
                         row[label] = f"{fmt.format(ov)} / —"
                         return
                     win = ov >= cv if better == "max" else ov <= cv
-                    mark = "🟢" if win else "🔴"
-                    tail = "" if win else f" ({cb})"
-                    lines.append(f"  • {label}: наш {fmt.format(ov)} / лучший {fmt.format(cv)}{tail} {mark}")
-                    row[label] = f"{fmt.format(ov)} / {fmt.format(cv)} {mark}"
+                    verdict = "мы впереди 🟢" if win else "отстаём 🔴"
+                    lines.append(f"  • {label}: у нас {fmt.format(ov)} · сильнейший из конкурентов "
+                                 f"{fmt.format(cv)} ({cb}) — {verdict}")
+                    row[label] = f"{fmt.format(ov)} / {fmt.format(cv)} {'🟢' if win else '🔴'}"
 
                 cmp_line("Рейтинг", "rating", "max", "{:.1f}")
                 cmp_line("BSR", "bsr_num", "min", "{:,.0f}")
@@ -1502,9 +1505,10 @@ if nav == "🥊 Конкуренты":
                 po, pc = ours["price_num"].dropna(), comp["price_num"].dropna()
                 if not po.empty and not pc.empty:
                     avg = pc.mean()
-                    mark = "🟢" if po.mean() <= avg else "🔴"
-                    lines.append(f"  • Цена: наша {po.mean():.2f} / средняя у конкурентов {avg:.2f} {mark}")
-                    row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {mark}"
+                    cheaper = po.mean() <= avg
+                    lines.append(f"  • Цена: у нас {po.mean():.2f} · средняя у конкурентов {avg:.2f} — "
+                                 + ("мы дешевле 🟢" if cheaper else "мы дороже 🔴"))
+                    row["Цена"] = f"{po.mean():.2f} / {avg:.2f} {'🟢' if cheaper else '🔴'}"
                 lines.append("")
                 rows.append(row)
             return "\n".join(lines), pd.DataFrame(rows)
