@@ -204,19 +204,16 @@ def build_report(country=None, days=10):
                 oidx = o.idxmax() if better == "max" else o.idxmin()
                 ov = o.loc[oidx]
                 o_age = _age(ours.loc[oidx], col)
-                # ASIN обязателен: в группе несколько наших товаров, и без него
-                # непонятно, к какому относится цифра
-                o_asin = str(ours.loc[oidx, "asin"])
                 if c.empty:
-                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · "
                                  "сопоставимых конкурентов нет")
                     return
                 idx = c.idxmax() if better == "max" else c.idxmin()
                 cv, cb = c.loc[idx], (esc(str(solid.loc[idx, "brand"])[:22]) or "конкурент")
                 c_age = _age(solid.loc[idx], col)
                 win = ov >= cv if better == "max" else ov <= cv
-                lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
-                             f"сильнейший {_n(fmt, cv)}{c_age} — {cb} — "
+                lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший "
+                             f"{_n(fmt, cv)}{c_age} ({cb}) — "
                              + ("мы впереди 🟢" if win else "отстаём 🔴"))
 
             cmp_line("Рейтинг", "rating", "max", "{:.1f}")
@@ -304,4 +301,4 @@ if __name__ == "__main__":
             print(f"{mkt} → канал {ch}: отправлено {ok} из {total}")
         except Exception as e:
             print(f"{mkt} → канал {ch}: ошибка {e}")
-    print("итого отправлено:", total_sent)
+    print("итого отправлено:", total_sent) 
