@@ -10,6 +10,7 @@
 import argparse
 import datetime
 import os
+import re
 import sys
 from zoneinfo import ZoneInfo
 
@@ -78,10 +79,29 @@ def load_data(days=3):
     hist["created_at"] = pd.to_datetime(hist["created_at"], utc=True)
     for c in ("rating", "review_count", "bsr_num"):
         hist[c] = pd.to_numeric(hist[c], errors="coerce")
-    hist["price_num"] = pd.to_numeric(
-        hist["price"].astype(str).str.replace(r"[^\d,.]", "", regex=True)
-        .str.replace(r"\.(?=\d{3}\b)", "", regex=True).str.replace(",", "."), errors="coerce")
+    hist["price_num"] = hist["price"].map(price_to_num)
     return comp, hist
+
+
+def price_to_num(val):
+    """«86.99 C$», «1.234,56 €», «$1,299.00» → число. Последний разделитель — десятичный."""
+    txt = re.sub(r"[^\d,.]", "", str(val or ""))
+    if not txt or not any(ch.isdigit() for ch in txt):
+        return None
+    last_dot, last_com = txt.rfind("."), txt.rfind(",")
+    if last_dot == -1 and last_com == -1:
+        num = txt
+    else:
+        sep = "." if last_dot > last_com else ","
+        head, _, tail = txt.rpartition(sep)
+        if len(tail) == 3 and (last_dot == -1 or last_com == -1) and head.count(sep) == 0 and len(head) <= 3:
+            num = (head + tail).replace(".", "").replace(",", "")
+        else:
+            num = head.replace(".", "").replace(",", "") + "." + tail
+    try:
+        return float(num)
+    except ValueError:
+        return None
 
 
 def esc(v):
@@ -301,4 +321,4 @@ if __name__ == "__main__":
             print(f"{mkt} → канал {ch}: отправлено {ok} из {total}")
         except Exception as e:
             print(f"{mkt} → канал {ch}: ошибка {e}")
-    print("итого отправлено:", total_sent) 
+    print("итого отправлено:", total_sent)
