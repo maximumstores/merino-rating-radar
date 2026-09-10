@@ -256,6 +256,29 @@ def get_asin_markets_map(all_tracked):
 
 
 @st.cache_data(ttl=180, show_spinner=False)
+def price_to_num(val):
+    """Цена в число. Amazon пишет по-разному: «86.99 C$», «1.234,56 €», «$1,299.00».
+    Правило: последний разделитель — десятичный, всё, что до него, — разряды."""
+    txt = re.sub(r"[^\d,.]", "", str(val or ""))
+    if not txt or not any(ch.isdigit() for ch in txt):
+        return None
+    last_dot, last_com = txt.rfind("."), txt.rfind(",")
+    if last_dot == -1 and last_com == -1:
+        num = txt
+    else:
+        sep = "." if last_dot > last_com else ","
+        head, _, tail = txt.rpartition(sep)
+        # три цифры после разделителя и ни одного другого — это разряды, не копейки
+        if len(tail) == 3 and (last_dot == -1 or last_com == -1) and head.count(sep) == 0 and len(head) <= 3:
+            num = (head + tail).replace(".", "").replace(",", "")
+        else:
+            num = head.replace(".", "").replace(",", "") + "." + tail
+    try:
+        return float(num)
+    except ValueError:
+        return None
+
+
 def get_full_history(days=120):
     """История метрик за период. Без ограничения запрос перебирает всю таблицу."""
     if not DATABASE_URL:
@@ -279,11 +302,7 @@ def get_full_history(days=120):
         df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
         df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
         df["bsr_num"] = pd.to_numeric(df.get("bsr_num"), errors="coerce")
-        df["price_num"] = pd.to_numeric(
-            df.get("price", pd.Series(dtype=str)).astype(str)
-            .str.replace(r"[^\d,.]", "", regex=True)
-            .str.replace(r"\.(?=\d{3}\b)", "", regex=True).str.replace(",", "."),
-            errors="coerce")
+        df["price_num"] = df.get("price", pd.Series(dtype=str)).map(price_to_num)
         return df
     except Exception as e:
         st.error(f"Не читается история метрик: {e}")
@@ -1363,10 +1382,7 @@ def get_competitor_history(asins, days):
         df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
         for c in ("rating", "review_count", "bsr_num"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["price_num"] = pd.to_numeric(
-            df["price"].astype(str).str.replace(r"[^\d,.]", "", regex=True)
-            .str.replace(r"\.(?=\d{3}\b)", "", regex=True).str.replace(",", "."),
-            errors="coerce")
+        df["price_num"] = df["price"].map(price_to_num)
         return df
     except Exception:
         return pd.DataFrame()
