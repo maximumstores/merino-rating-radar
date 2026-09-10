@@ -184,13 +184,24 @@ def _conn():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_last_run():
+    """Последний прогон целиком: сбор идёт 10 шардами, каждый пишет свою строку,
+    поэтому берём все запуски за последний час и складываем."""
     try:
         conn = _conn()
         row = pd.read_sql(
-            "SELECT started_at, finished_at, asin_count, ok_count, status "
-            "FROM collection_runs ORDER BY started_at DESC LIMIT 1", conn)
+            """
+            WITH last AS (SELECT MAX(started_at) AS t FROM collection_runs)
+            SELECT MIN(started_at) AS started_at, MAX(finished_at) AS finished_at,
+                   SUM(asin_count) AS asin_count, SUM(ok_count) AS ok_count,
+                   COUNT(*) AS shards,
+                   CASE WHEN BOOL_OR(status = 'running') THEN 'running'
+                        WHEN BOOL_OR(status = 'stopped') THEN 'stopped'
+                        ELSE 'done' END AS status
+            FROM collection_runs, last
+            WHERE started_at >= last.t - interval '1 hour';
+            """, conn)
         conn.close()
-        return row.iloc[0] if not row.empty else None
+        return row.iloc[0] if not row.empty and pd.notnull(row.iloc[0]["started_at"]) else None
     except Exception:
         return None
 
@@ -702,9 +713,11 @@ with hdr_r:
     if last_run is not None:
         started_kyiv = pd.to_datetime(last_run["started_at"]).tz_convert(ZoneInfo("Europe/Kyiv"))
         status_label = {"done": "завершён", "stopped": "остановлен"}.get(last_run["status"], "в процессе")
+        shards = int(last_run.get("shards") or 1)
         st.info(
             f"Последний сбор: **{started_kyiv:%d.%m.%Y %H:%M}** (Киев) · {status_label} · "
-            f"валидных **{int(last_run['ok_count'] or 0)} / {int(last_run['asin_count'] or 0)}**")
+            f"валидных **{int(last_run['ok_count'] or 0)} / {int(last_run['asin_count'] or 0)}**"
+            + (f" · шардов {shards}" if shards > 1 else ""))
     else:
         st.warning("История сборов пуста")
     st.markdown(
