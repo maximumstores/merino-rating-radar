@@ -171,6 +171,9 @@ def ensure_schema():
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr TEXT;")
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS price TEXT;")
             cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS bsr_num INTEGER;")
+            # промо-признаки: API их отдаёт, в отчёте по конкурентам они важны
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS coupon BOOLEAN;")
+            cur.execute("ALTER TABLE asin_metrics ADD COLUMN IF NOT EXISTS prime_excl BOOLEAN;")
             cur.execute("ALTER TABLE tracked_asins ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'child';")
             # индексы: без них выборка по ASIN и датам делает полный скан таблицы
             cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_asin_created "
@@ -237,8 +240,9 @@ def save_to_db(data: dict):
             cursor.execute(
                 """
                 INSERT INTO asin_metrics
-                    (asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, price, note)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num,
+                     price, note, coupon, prime_excl)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     clean_asin,
@@ -251,6 +255,8 @@ def save_to_db(data: dict):
                     bsr_to_int(data.get("bsr")),
                     data.get("price"),
                     data.get("note", ""),
+                    data.get("coupon"),
+                    data.get("prime_exclusive"),
                 ),
             )
         conn.commit()
@@ -265,7 +271,8 @@ def save_batch(rows: list) -> int:
             continue
         clean.append((a, d.get("source"), d.get("rating"), d.get("count"),
                       json.dumps(d.get("hist", {})), d.get("image_url"),
-                      d.get("bsr"), bsr_to_int(d.get("bsr")), d.get("price"), d.get("note", "")))
+                      d.get("bsr"), bsr_to_int(d.get("bsr")), d.get("price"), d.get("note", ""),
+                      d.get("coupon"), d.get("prime_exclusive")))
     if not clean:
         return 0
     with db() as conn:
@@ -273,8 +280,8 @@ def save_batch(rows: list) -> int:
             extras.execute_values(
                 cur,
                 "INSERT INTO asin_metrics "
-                "(asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, price, note) "
-                "VALUES %s",
+                "(asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, "
+                "price, note, coupon, prime_excl) VALUES %s",
                 clean, page_size=200)
         conn.commit()
     return len(clean)
@@ -1274,4 +1281,4 @@ def extract_bsr_json(product_json: dict, country_code: str = "be"):
     # сначала основная категория; внутри неё берём больший ранг — это ранг
     # в общей категории, а не в узкой подкатегории
     rank, _prio, category = sorted(candidates, key=lambda x: (x[1], -x[0]))[0]
-    return f"#{rank:,}".replace(",", " ") + (f" {category}" if category else "") 
+    return f"#{rank:,}".replace(",", " ") + (f" {category}" if category else "")
