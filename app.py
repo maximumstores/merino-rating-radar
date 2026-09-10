@@ -1570,11 +1570,10 @@ if nav == "🥊 Конкуренты":
                     if o.empty and c.empty:
                         return
                     if o.empty:
-                        ov, o_age, o_asin = None, "", ""
+                        ov, o_age = None, ""
                     else:
                         oidx = o.idxmax() if better == "max" else o.idxmin()
                         ov, o_age = o.loc[oidx], _age(ours.loc[oidx], col)
-                        o_asin = str(ours.loc[oidx, "asin"])
                     if c.empty:
                         cv, cb, c_age = None, "", ""
                     else:
@@ -1594,8 +1593,8 @@ if nav == "🥊 Конкуренты":
                         return
                     win = ov >= cv if better == "max" else ov <= cv
                     verdict = "мы впереди 🟢" if win else "отстаём 🔴"
-                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} ({o_asin}) · "
-                                 f"сильнейший {_n(fmt, cv)}{c_age} — {cb} — {verdict}")
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший "
+                                 f"{_n(fmt, cv)}{c_age} ({cb}) — {verdict}")
                     row[label] = f"{_n(fmt, ov)} / {_n(fmt, cv)} {'🟢' if win else '🔴'}"
 
                 cmp_line("Рейтинг", "rating", "max", "{:.1f}")
