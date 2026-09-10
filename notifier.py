@@ -691,4 +691,4 @@ if __name__ == "__main__":
     ensure_subs_schema()
     print("команд обработано:", process_updates())
     n, total = notify_all(silent_if_empty=False)
-    print(f"отправлено {n} из {total}")
+    print(f"отправлено {n} из {total}") 
