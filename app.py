@@ -1438,6 +1438,10 @@ if nav == "🥊 Конкуренты":
         asins = view["asin"].tolist()
 
         # ---- сводка «мы против лучшего конкурента» ----
+        def _esc(v):
+            """& < > ломают HTML-разметку Telegram — например «Men SS & Socks»."""
+            return (str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
         def build_group_report(country, groups, comp_view):
             ids = comp_view["asin"].tolist()
             cut3 = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=3)
@@ -1452,7 +1456,7 @@ if nav == "🥊 Конкуренты":
             latest["grp"] = [str(m.loc[a, "grp"]) if a in m.index else "" for a in latest["asin"]]
             latest["own"] = latest["brand"].apply(is_own_brand)
 
-            lines = [f"📊 <b>Мониторинг конкурентов — {country}</b>",
+            lines = [f"📊 <b>Мониторинг конкурентов — {_esc(country)}</b>",
                      f"<i>{datetime.datetime.now(ZoneInfo(selected_tz)):%d.%m.%Y %H:%M}</i>", ""]
             rows = []
             for g in groups:
@@ -1464,7 +1468,7 @@ if nav == "🥊 Конкуренты":
                 comp = comp_all[comp_all["review_count"].fillna(0) >= COMP_MIN_REVIEWS]
                 if comp.empty:
                     comp = comp_all.iloc[0:0]
-                lines.append(f"📌 <b>{g}</b>")
+                lines.append(f"📌 <b>{_esc(g)}</b>")
                 lines.append(f"  • Товары: {len(part)} (наших: {len(ours)}, конкурентов: {len(comp_all)}"
                              + (f", сопоставимых: {len(comp)}" if len(comp) != len(comp_all) else "") + ")")
                 row = {"Группа": g, "ASIN всего": len(part),
@@ -1482,7 +1486,7 @@ if nav == "🥊 Конкуренты":
                         cv, cb = None, ""
                     else:
                         idx = c.idxmax() if better == "max" else c.idxmin()
-                        cv, cb = c.loc[idx], str(comp.loc[idx, "brand"])[:22] or "конкурент"
+                        cv, cb = c.loc[idx], _esc(str(comp.loc[idx, "brand"])[:22]) or "конкурент"
                     if ov is None:
                         lines.append(f"  • {label}: у нас данных нет · сильнейший "
                                      f"{fmt.format(cv)} — {cb} 🔴")
@@ -1532,6 +1536,10 @@ if nav == "🥊 Конкуренты":
                             channel=_ch)
                         if tot == 0:
                             st.warning(f"У @{_bu} нет подписчиков — открой бота и отправь /start")
+                        elif okn < tot:
+                            st.warning(f"Отправлено {okn} из {tot} в @{_bu}")
+                            for err in getattr(notifier, "LAST_SEND_ERRORS", [])[:5]:
+                                st.caption(f"Telegram: {err}")
                         else:
                             st.success(f"Отправлено {okn} из {tot} в @{_bu}")
                     except Exception as e:
@@ -3984,4 +3992,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    )
+    ) 
