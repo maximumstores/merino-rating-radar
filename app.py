@@ -1883,6 +1883,22 @@ if nav == "🥊 Конкуренты":
                        f"позиций с данными: {piv['Rating'].shape[0]} · "
                        f"подготовка {_timing['подготовка']:.2f}с · "
                        f"история загружена за {st.session_state.get('full_df_sec', 0):.2f}с")
+            # быстрый пересбор: проверить, что по позиции сейчас на Amazon
+            rf1, rf2, rf3 = st.columns([2.4, 1.2, 1.2])
+            pick_now = rf1.multiselect(
+                "Обновить позиции", options=asins, default=[], key=f"comp_quick_{sel_mkt}",
+                label_visibility="collapsed",
+                placeholder="выбери ASIN — соберём заново и покажем актуальные данные")
+            if rf2.button(f"↻ Обновить ({len(pick_now)})", disabled=not pick_now, type="primary",
+                          key=f"comp_quick_btn_{sel_mkt}", use_container_width=True):
+                run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in pick_now],
+                               "Конкуренты (точечно)")
+            if rf3.button(f"↻ Всё, что видно ({len(asins)})", key=f"comp_quick_all_{sel_mkt}",
+                          use_container_width=True, disabled=not asins,
+                          help="Пересобрать все позиции, попавшие в таблицу после фильтров и поиска"):
+                run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins],
+                               f"Конкуренты ({sel_mkt})")
+
             vmode = st.radio("Вид", ["Список позиций", "По датам (как в шите)"], horizontal=True,
                              key=f"comp_view_{sel_mkt}", label_visibility="collapsed")
 
