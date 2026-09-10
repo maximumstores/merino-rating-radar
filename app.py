@@ -1470,6 +1470,10 @@ if nav == "🥊 Конкуренты":
         asins = view["asin"].tolist()
 
         # ---- сводка «мы против лучшего конкурента» ----
+        def _n(fmt, v):
+            """Тысячи — неразрывным пробелом: 40 575, а не 40,575."""
+            return fmt.format(v).replace(",", "\u00a0")
+
         def comp_takeaways(facts):
             """Короткий вывод в конце сводки: где горит, где выигрываем, что с ценой."""
             if not facts:
@@ -1578,19 +1582,19 @@ if nav == "🥊 Конкуренты":
                         c_age = _age(comp.loc[idx], col)
                     if ov is None:
                         lines.append(f"  • {label}: у нас данных нет · сильнейший "
-                                     f"{fmt.format(cv)}{c_age} — {cb} 🔴")
-                        row[label] = f"— / {fmt.format(cv)}"
+                                     f"{_n(fmt, cv)}{c_age} — {cb} 🔴")
+                        row[label] = f"— / {_n(fmt, cv)}"
                         return
                     if cv is None:
                         lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · "
                                      "сопоставимых конкурентов нет")
-                        row[label] = f"{fmt.format(ov)} / —"
+                        row[label] = f"{_n(fmt, ov)} / —"
                         return
                     win = ov >= cv if better == "max" else ov <= cv
                     verdict = "мы впереди 🟢" if win else "отстаём 🔴"
-                    lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · сильнейший из "
-                                 f"конкурентов {fmt.format(cv)}{c_age} ({cb}) — {verdict}")
-                    row[label] = f"{fmt.format(ov)} / {fmt.format(cv)} {'🟢' if win else '🔴'}"
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший из "
+                                 f"конкурентов {_n(fmt, cv)}{c_age} ({cb}) — {verdict}")
+                    row[label] = f"{_n(fmt, ov)} / {_n(fmt, cv)} {'🟢' if win else '🔴'}"
 
                 cmp_line("Рейтинг", "rating", "max", "{:.1f}")
                 cmp_line("BSR", "bsr_num", "min", "{:,.0f}")
