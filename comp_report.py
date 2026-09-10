@@ -87,6 +87,11 @@ def esc(v):
     return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _n(fmt, v):
+    """Тысячи — неразрывным пробелом: 40 575, а не 40,575."""
+    return fmt.format(v).replace(",", "\u00a0")
+
+
 def make_takeaways(facts):
     """Короткий вывод в конце отчёта: где горит, где выигрываем, что с ценой.
     Считается по фактам, без моделей — правила прозрачные и повторяемые."""
@@ -198,15 +203,15 @@ def build_report(country=None, days=10):
                 ov = o.loc[oidx]
                 o_age = _age(ours.loc[oidx], col)
                 if c.empty:
-                    lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · "
+                    lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · "
                                  "сопоставимых конкурентов нет")
                     return
                 idx = c.idxmax() if better == "max" else c.idxmin()
                 cv, cb = c.loc[idx], (esc(str(solid.loc[idx, "brand"])[:22]) or "конкурент")
                 c_age = _age(solid.loc[idx], col)
                 win = ov >= cv if better == "max" else ov <= cv
-                lines.append(f"  • {label}: у нас {fmt.format(ov)}{o_age} · сильнейший из конкурентов "
-                             f"{fmt.format(cv)}{c_age} ({cb}) — "
+                lines.append(f"  • {label}: у нас {_n(fmt, ov)}{o_age} · сильнейший из конкурентов "
+                             f"{_n(fmt, cv)}{c_age} ({cb}) — "
                              + ("мы впереди 🟢" if win else "отстаём 🔴"))
 
             cmp_line("Рейтинг", "rating", "max", "{:.1f}")
