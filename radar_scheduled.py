@@ -68,11 +68,44 @@ def markets_map():
         return {}
 
 
-def pick_shard(asins, shard, shards):
-    """Делит список стабильно: один и тот же ASIN всегда попадает в тот же шард."""
+def build_targets():
+    """Что собирать: [(asin, market)].
+
+    Портфель берём из tracked_asins, страну — из справочника.
+    Конкуренты живут парами (asin, market): один товар может отслеживаться
+    в нескольких странах, и это разные позиции.
+    """
+    mk = markets_map()
+    targets = []
+    seen = set()
+
+    for a in get_tracked_asins():
+        pair = (a, mk.get(a))
+        if pair not in seen:
+            seen.add(pair)
+            targets.append(pair)
+
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT asin, market FROM competitors WHERE market <> ''")
+            for a, m in cur.fetchall():
+                if (a, m) not in seen:
+                    seen.add((a, m))
+                    targets.append((a, m))
+    except Exception as e:
+        print("конкуренты не прочитались:", e, flush=True)
+
+    return targets
+
+
+def pick_shard(pairs, shard, shards):
+    """Делит стабильно: одна и та же позиция всегда попадает в тот же шард."""
     if shards <= 1:
-        return asins
-    return [a for a in asins if sum(ord(ch) for ch in a) % shards == shard]
+        return pairs
+    def key(p):
+        a, m = p if isinstance(p, tuple) else (p, "")
+        return sum(ord(ch) for ch in f"{a}{m or ''}")
+    return [p for p in pairs if key(p) % shards == shard]
 
 
 BATCH_SIZE = int(os.environ.get("RADAR_BATCH", "50"))
@@ -89,14 +122,19 @@ def collect_one(asin, market):
 
 def run(shard=0, shards=1):
     ensure_schema()
-    tracked = pick_shard(get_tracked_asins(), shard, shards)
+    try:
+        from collector import ensure_competitor_schema
+        ensure_competitor_schema()
+    except Exception:
+        pass
+
+    tracked = pick_shard(build_targets(), shard, shards)
     if not tracked:
         print("нечего собирать в этом шарде")
         return
 
-    mk = markets_map()
     label = f"шард {shard + 1}/{shards}" if shards > 1 else "полный список"
-    print(f"старт: {len(tracked)} ASIN ({label}), потоков {WORKERS}", flush=True)
+    print(f"старт: {len(tracked)} позиций ({label}), потоков {WORKERS}", flush=True)
 
     run_id = start_run(len(tracked))
     started = time.time()
@@ -115,7 +153,7 @@ def run(shard=0, shards=1):
         buffer = []
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futures = [ex.submit(collect_one, a, mk.get(a)) for a in tracked]
+        futures = [ex.submit(collect_one, a, m) for a, m in tracked]
         for fut in as_completed(futures):
             done += 1
             try:
