@@ -444,8 +444,11 @@ def parse_asin_batch(text, existing, default_market=None):
         if ":" in tok and tail in MARKET_DOMAINS:
             mk = tail
         else:
-            for k, dom in MARKET_DOMAINS.items():
-                if dom in tok.lower():
+            # длинные домены первыми: иначе «amazon.com» съедает «amazon.com.be»,
+            # «amazon.com.mx» и «amazon.com.au»
+            low = tok.lower()
+            for k, dom in sorted(MARKET_DOMAINS.items(), key=lambda kv: -len(kv[1])):
+                if dom in low:
                     mk = k
                     break
         if not mk and default_market in MARKET_DOMAINS:
@@ -3908,6 +3911,7 @@ def render_asin_manager(kind):
                 msg += f" · повторов в тексте убрано: {len(bd)}"
             if inv_c:
                 msg += f" · нераспознано: {len(inv_c)} ({', '.join(inv_c[:5])}{' …' if len(inv_c) > 5 else ''})"
+            st.cache_data.clear()      # счётчик и список читаются из кэша — иначе покажет старое
             st.success(msg)
             st.rerun()
         except Exception as e:
