@@ -747,6 +747,24 @@ def run_collection(items, label="Прогон"):
             msg += " Telegram: " + " · ".join(f"{k} {v[0]}/{v[1]}" for k, v in res.items()) + "."
         except Exception as e:
             msg += f" Telegram: ошибка отправки ({e})."
+
+        # сводка по конкурентам — по тем странам, что были в прогоне
+        try:
+            import comp_report
+            touched = set()
+            comp_pairs = get_competitors()
+            if not comp_pairs.empty:
+                run_asins = {extract_asin(str(i)) for i in items}
+                touched = set(comp_pairs[comp_pairs["asin"].isin(run_asins)]["market"])
+            for mkt in sorted(touched):
+                rep = comp_report.build_report(country=mkt)
+                if not rep or mkt not in rep:
+                    continue
+                ch = notifier.channel_for_country(mkt)
+                okn, tot = notifier.broadcast(rep[mkt], channel=ch)
+                msg += f" Конкуренты {mkt}: {okn}/{tot}."
+        except Exception as e:
+            msg += f" Сводка конкурентов: ошибка ({e})."
     st.success(msg)
     st.rerun()
 
@@ -936,7 +954,9 @@ def build_calc_df(df):
         rows.append({
             "Выбор": False,
             "raw_asin": str(r["asin"]),
-            "kind": tracked_kind.get(str(r["asin"]), "child"),
+            # «child» по умолчанию сваливал в портфель чайлдов всё, чего нет
+            # в списке: удалённые позиции и конкурентов
+            "kind": tracked_kind.get(str(r["asin"]), "—"),
             "Parent": d.get("parent_asin") or "",
             "Категория": d.get("category") or "—",
             "Подкатегория": d.get("subcategory") or "—",
@@ -1133,8 +1153,12 @@ def render_portfolio(filtered_df, kind):
             run_collection(kind_asins, f"Прогон ({KIND_LABEL[kind]})")
     else:
         hc, rc, vc = st.columns([2.4, 1.4, 1])
-        hc.markdown(f"### Сводный отчёт — {KIND_LABEL[kind]} <span class='muted'>· {len(filtered_df)} из {len(kind_asins)} позиций</span>",
-                    unsafe_allow_html=True)
+        _no_data = len(kind_asins) - len(filtered_df)
+        hc.markdown(
+            f"### Сводный отчёт — {KIND_LABEL[kind]} <span class='muted'>· "
+            f"{len(filtered_df)} из {len(kind_asins)} позиций"
+            + (f" · без данных: {_no_data}" if _no_data > 0 else "") + "</span>",
+            unsafe_allow_html=True)
         rc.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
         if rc.button(f"▶ Прогнать {KIND_LABEL[kind].lower()}ов ({len(kind_asins)})",
                      key=f"run_kind_{kind}", type="primary", use_container_width=True,
@@ -1221,9 +1245,12 @@ def render_portfolio(filtered_df, kind):
                 a1.markdown(f"**Выбрано: {len(selected_asins)}** · `{_shown}`")
             else:
                 a1.caption("Отметьте строки галочкой для массовых действий")
-            if a2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins, key=f"upd_{kind}"):
-                run_collection(selected_asins, "Обновление")
-            if a3.button("✕ Удалить выбранные", use_container_width=True, disabled=not selected_asins, key=f"del_{kind}"):
+            if a2.button(f"↻ Обновить выбранные ({len(selected_asins)})", use_container_width=True,
+                         disabled=not selected_asins, key=f"upd_{kind}"):
+                # страна берётся из справочника, иначе ушли бы на чужую витрину
+                run_collection(with_market(selected_asins), "Обновление")
+            if a3.button(f"✕ Удалить выбранные ({len(selected_asins)})", use_container_width=True,
+                         disabled=not selected_asins, key=f"del_{kind}"):
                 for a in selected_asins:
                     delete_asin_completely(a)
                 st.success(f"Удалено: {len(selected_asins)}")
