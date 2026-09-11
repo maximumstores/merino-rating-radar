@@ -10,6 +10,11 @@ on:
         description: "Собрать сейчас, игнорируя время и «уже собирали сегодня»"
         type: boolean
         default: false
+      scope:
+        description: "Что собирать"
+        type: choice
+        default: all
+        options: [all, child, parent, competitor]
 
 concurrency:
   group: radar-collect
@@ -48,6 +53,7 @@ jobs:
         run: |
           python radar_scheduled.py \
             --shard ${{ matrix.shard }} --shards 10 \
+            --scope ${{ inputs.scope || 'all' }} \
             ${{ inputs.force && '--force' || '' }}
 
   notify:
