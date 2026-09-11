@@ -3912,14 +3912,20 @@ def render_asin_manager(kind):
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка сохранения: {e}")
-    if b2.button(f"🗑️ Очистить список ({KIND_LABEL[kind]})", key=f"clear_btn_{kind}"):
+    sure = b2.checkbox("подтвердить очистку", key=f"clear_ok_{kind}",
+                       help="Удалится только список отслеживания. Замеры и справочник остаются")
+    if b2.button(f"🗑️ Очистить список ({KIND_LABEL[kind]})", key=f"clear_btn_{kind}",
+                 disabled=not sure):
         try:
             conn = _conn()
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM tracked_asins WHERE kind = %s;", (kind,))
+                gone = cur.rowcount
             conn.commit()
             conn.close()
-            st.success(f"Список «{KIND_LABEL[kind]}» очищен")
+            st.cache_data.clear()      # иначе на экране останется прежний список из кэша
+            st.success(f"Список «{KIND_LABEL[kind]}» очищен: удалено {gone}. "
+                       "Замеры и справочник не тронуты.")
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка очистки: {e}")
