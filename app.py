@@ -629,7 +629,7 @@ GH_REPO = os.environ.get("GITHUB_REPO", "maximumstores/merino-rating-radar")
 BROWSER_RUN_LIMIT = int(os.environ.get("BROWSER_RUN_LIMIT", "80"))
 
 
-def dispatch_github_run(force=True, workflow="collect.yml"):
+def dispatch_github_run(force=True, workflow="collect.yml", scope="all"):
     """Запускает сбор в GitHub Actions. Возвращает (ok, сообщение)."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -640,22 +640,25 @@ def dispatch_github_run(force=True, workflow="collect.yml"):
             f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow}/dispatches",
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/vnd.github+json"},
-            json={"ref": "main", "inputs": {"force": "true" if force else "false"}},
+            json={"ref": "main", "inputs": {"force": "true" if force else "false",
+                                            "scope": scope}},
             timeout=30)
         if r.status_code == 204:
-            return True, "Сбор запущен в GitHub Actions"
+            what = {"all": "весь список", "child": "чайлды", "parent": "паренты",
+                    "competitor": "конкуренты"}.get(scope, scope)
+            return True, f"Запущено в GitHub Actions: {what}"
         return False, f"GitHub ответил {r.status_code}: {r.text[:200]}"
     except Exception as e:
         return False, str(e)
 
 
-def actions_button(key, label="🚀 Запустить сбор в GitHub Actions"):
-    if st.button(label, key=key, type="primary", use_container_width=True,
+def actions_button(key, label="🚀 Запустить сбор в GitHub Actions", scope="all", ptype="primary"):
+    if st.button(label, key=key, type=ptype, use_container_width=True,
                  help="Сбор пойдёт на серверах GitHub в 10 параллельных потоков. "
                       "Вкладку можно закрыть, отчёты придут в Telegram."):
-        ok, msg = dispatch_github_run()
+        ok, msg = dispatch_github_run(scope=scope)
         if ok:
-            st.success("Запущено. Идёт 5–10 минут, потом придут отчёты в Telegram. "
+            st.success(f"{msg}. Идёт 5–10 минут, потом придут отчёты в Telegram. "
                        "Данные в дашборде появятся после «🔄 Обновить данные из базы».")
             st.markdown(f"[Смотреть ход прогона на GitHub →](https://github.com/{GH_REPO}/actions)")
         else:
@@ -3941,22 +3944,38 @@ if nav == "⚙️ Сбор и управление":
     with o1:
         n_child = len(tracked_by_kind.get("child", []))
         n_parent = len(tracked_by_kind.get("parent", []))
+        comp_by_mkt = ""
         try:
-            n_comp = len(get_competitors())
+            _cdf = get_competitors()
+            n_comp = len(_cdf)
+            if not _cdf.empty:
+                _bm = _cdf.groupby("market").size().sort_values(ascending=False)
+                comp_by_mkt = " (" + " · ".join(f"{k} {v}" for k, v in _bm.items()) + ")"
         except Exception:
             n_comp = 0
         n_all = n_child + n_parent + n_comp
 
         st.markdown("### Запустить сбор")
         st.markdown(f"<div class='muted'>В работе <b>{n_all}</b> позиций: "
-                    f"чайлды {n_child} · паренты {n_parent} · конкуренты {n_comp}</div>",
+                    f"чайлды {n_child} · паренты {n_parent} · конкуренты {n_comp}{comp_by_mkt}"
+                    f"<br>Конкурент в двух странах — две позиции: и запросов будет два</div>",
                     unsafe_allow_html=True)
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         actions_button("gh_run_ops", f"🚀 Собрать всё ({n_all}) — на серверах GitHub")
-        st.caption("Так собирается весь список: 10 параллельных потоков, 5–10 минут. "
-                   "Вкладку можно закрыть — отчёты придут в Telegram. "
-                   "Это же происходит само каждый день в заданное ниже время.")
+        st.caption("Весь список: 10 параллельных потоков, 5–10 минут. Вкладку можно закрыть — "
+                   "отчёты придут в Telegram. Это же происходит само каждый день в заданное ниже время.")
+
+        st.markdown("<div class='muted' style='margin:10px 0 4px'>Или собрать срез — "
+                    "когда нужен не весь список</div>", unsafe_allow_html=True)
+        gk1, gk2, gk3 = st.columns(3)
+        with gk1:
+            actions_button("gh_run_child", f"👶 Чайлды ({n_child})", scope="child", ptype="secondary")
+        with gk2:
+            actions_button("gh_run_parent", f"👪 Паренты ({n_parent})", scope="parent", ptype="secondary")
+        with gk3:
+            actions_button("gh_run_comp", f"🥊 Конкуренты ({n_comp})", scope="competitor",
+                           ptype="secondary")
 
         with st.expander("Собрать в браузере (для мелких прогонов)", expanded=False):
             st.caption(f"Держать вкладку открытой. На списках больше {BROWSER_RUN_LIMIT} позиций "
