@@ -2597,6 +2597,7 @@ def render_dynamics(filtered_df, hist_df, kind):
         else:
             order = sorted(piv_r.index)
 
+        order = list(order)          # ниже нужны срезы и проверки длины
         # страна по каждому ASIN нужна уже здесь: она идёт в подписи списка
         src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
 
@@ -2619,7 +2620,7 @@ def render_dynamics(filtered_df, hist_df, kind):
                 return " ".join(parts).lower()
 
             order = [a for a in order if ql in _hay(a)]
-            if not order:
+            if len(order) == 0:
                 st.warning(f"По запросу «{q_dyn}» ничего не найдено — сбрось поиск")
                 order = []
 
@@ -2818,7 +2819,7 @@ def render_dynamics(filtered_df, hist_df, kind):
 
         # что происходило с позицией и как быстро она отыгрывает падения
         with st.expander("🕒 История изменений и скорость реакции", expanded=False):
-            if not order:
+            if len(order) == 0:
                 st.caption("Нет позиций для разбора")
             else:
                 h_asin = st.selectbox("ASIN", options=list(order), key=f"hist_asin_{kind}",
