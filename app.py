@@ -2597,6 +2597,9 @@ def render_dynamics(filtered_df, hist_df, kind):
         else:
             order = sorted(piv_r.index)
 
+        # страна по каждому ASIN нужна уже здесь: она идёт в подписи списка
+        src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
+
         # поиск и выбор ASIN — фильтруют таблицу
         sq1, sq2 = st.columns([2, 3])
         q_dyn = sq1.text_input("Поиск в таблице", key=f"dyn_q_{kind}", label_visibility="collapsed",
@@ -2620,7 +2623,6 @@ def render_dynamics(filtered_df, hist_df, kind):
                 st.warning(f"По запросу «{q_dyn}» ничего не найдено — сбрось поиск")
                 order = []
 
-        src_map = filtered_df.set_index("raw_asin")["Источник"].to_dict()
         grp_map = filtered_df.set_index("raw_asin")["_group"].to_dict() if GROUP_DF_COL else {}
         blocks = []
         # прирост оценок за день: сколько новых оценок пришло между замерами
@@ -4446,4 +4448,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
