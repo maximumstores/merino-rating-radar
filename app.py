@@ -2878,9 +2878,10 @@ def render_dynamics(filtered_df, hist_df, kind):
                                 rec.append(f"{d['ts']:%d.%m} падение на {abs(d['d_rating']):.2f} — "
                                            f"отыграно за {(after.iloc[0]['ts'] - d['ts']).days} дн.")
                             else:
-                                days = (pd.Timestamp.now(tz=ZoneInfo(selected_tz)) - d["ts"]).days
+                                # имя days занято списком дат таблицы выше — не затираем
+                                held = (pd.Timestamp.now(tz=ZoneInfo(selected_tz)) - d["ts"]).days
                                 rec.append(f"{d['ts']:%d.%m} падение на {abs(d['d_rating']):.2f} — "
-                                           f"не отыграно, {days} дн.")
+                                           f"не отыграно, {held} дн.")
 
                         m1, m2, m3 = st.columns(3)
                         m1.metric("Событий", len(ev_df) - 1)
