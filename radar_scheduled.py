@@ -26,6 +26,8 @@ from collector import (check_asin_api, ensure_schema, finish_run,
                        get_tracked_asins, save_batch, start_run)
 
 load_dotenv()
+import warnings
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 TZ = os.environ.get("RADAR_TZ", "Europe/Kyiv")
 WORKERS = int(os.environ.get("RADAR_WORKERS", "6"))
@@ -68,32 +70,45 @@ def markets_map():
         return {}
 
 
-def build_targets():
+def build_targets(scope="all"):
     """Что собирать: [(asin, market)].
 
-    Портфель берём из tracked_asins, страну — из справочника.
-    Конкуренты живут парами (asin, market): один товар может отслеживаться
-    в нескольких странах, и это разные позиции.
+    scope: all | child | parent | competitor — чтобы можно было гонять
+    портфели и конкурентов по отдельности, не тратя запросы на всё сразу.
     """
     mk = markets_map()
-    targets = []
-    seen = set()
+    targets, seen = [], set()
 
-    for a in get_tracked_asins():
-        pair = (a, mk.get(a))
-        if pair not in seen:
-            seen.add(pair)
-            targets.append(pair)
+    if scope in ("all", "child", "parent"):
+        kinds = {}
+        try:
+            with _conn() as c, c.cursor() as cur:
+                cur.execute("SELECT asin, COALESCE(kind, 'child') FROM tracked_asins")
+                kinds = dict(cur.fetchall())
+        except Exception as e:
+            print("типы ASIN не прочитались:", e, flush=True)
 
-    try:
-        with _conn() as c, c.cursor() as cur:
-            cur.execute("SELECT asin, market FROM competitors WHERE market <> ''")
-            for a, m in cur.fetchall():
-                if (a, m) not in seen:
-                    seen.add((a, m))
-                    targets.append((a, m))
-    except Exception as e:
-        print("конкуренты не прочитались:", e, flush=True)
+        for a in get_tracked_asins():
+            k = kinds.get(a, "child")
+            if scope in ("child", "parent") and k != scope:
+                continue
+            if k == "competitor":          # конкуренты идут из своей таблицы
+                continue
+            pair = (a, mk.get(a))
+            if pair not in seen:
+                seen.add(pair)
+                targets.append(pair)
+
+    if scope in ("all", "competitor"):
+        try:
+            with _conn() as c, c.cursor() as cur:
+                cur.execute("SELECT asin, market FROM competitors WHERE market <> ''")
+                for a, m in cur.fetchall():
+                    if (a, m) not in seen:
+                        seen.add((a, m))
+                        targets.append((a, m))
+        except Exception as e:
+            print("конкуренты не прочитались:", e, flush=True)
 
     return targets
 
@@ -120,7 +135,7 @@ def collect_one(asin, market):
                 "hist": {}, "image_url": None, "bsr": None, "note": f"ошибка: {e}"[:200]}
 
 
-def run(shard=0, shards=1):
+def run(shard=0, shards=1, scope="all"):
     ensure_schema()
     try:
         from collector import ensure_competitor_schema
@@ -128,12 +143,13 @@ def run(shard=0, shards=1):
     except Exception:
         pass
 
-    tracked = pick_shard(build_targets(), shard, shards)
+    tracked = pick_shard(build_targets(scope), shard, shards)
     if not tracked:
         print("нечего собирать в этом шарде")
         return
 
-    label = f"шард {shard + 1}/{shards}" if shards > 1 else "полный список"
+    label = (f"шард {shard + 1}/{shards}" if shards > 1 else "полный список")
+    label += "" if scope == "all" else f", только {scope}"
     print(f"старт: {len(tracked)} позиций ({label}), потоков {WORKERS}", flush=True)
 
     run_id = start_run(len(tracked))
@@ -188,6 +204,8 @@ def notify():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--shard", type=int, default=0)
+    ap.add_argument("--scope", default="all", choices=["all", "child", "parent", "competitor"],
+                    help="что собирать: весь список или только один срез")
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--force", action="store_true", help="не проверять время и факт сбора")
     ap.add_argument("--notify", action="store_true", help="разослать алерты после сбора")
@@ -207,6 +225,6 @@ if __name__ == "__main__":
             print("сегодня уже собирали")
             sys.exit(0)
 
-    run(shard=args.shard, shards=max(1, args.shards))
+    run(shard=args.shard, shards=max(1, args.shards), scope=args.scope)
     if args.notify:
         notify()
