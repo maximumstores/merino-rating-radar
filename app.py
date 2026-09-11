@@ -257,26 +257,29 @@ def get_asin_markets_map(all_tracked):
 
 @st.cache_data(ttl=180, show_spinner=False)
 def price_to_num(val):
-    """Цена в число. Amazon пишет по-разному: «86.99 C$», «1.234,56 €», «$1,299.00».
-    Правило: последний разделитель — десятичный, всё, что до него, — разряды."""
-    txt = re.sub(r"[^\d,.]", "", str(val or ""))
-    if not txt or not any(ch.isdigit() for ch in txt):
+    """Цена в число. Берём ПЕРВОЕ число из строки: в поле price у Amazon
+    часто прилипает хвост («86.99 C$5% off»), и склейка всех цифр давала 86995.
+    Разделители: последний — десятичный, предыдущие — разряды."""
+    raw = str(val or "")
+    m = re.search(r"\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?(?![\d])|\d+(?:[.,]\d{1,2})?(?![\d])", raw)
+    if not m:
         return None
+    txt = m.group(0).replace(" ", "").replace("\u00a0", "")
     last_dot, last_com = txt.rfind("."), txt.rfind(",")
     if last_dot == -1 and last_com == -1:
         num = txt
     else:
         sep = "." if last_dot > last_com else ","
         head, _, tail = txt.rpartition(sep)
-        # три цифры после разделителя и ни одного другого — это разряды, не копейки
-        if len(tail) == 3 and (last_dot == -1 or last_com == -1) and head.count(sep) == 0 and len(head) <= 3:
+        if len(tail) == 3:      # три знака после разделителя — это разряды
             num = (head + tail).replace(".", "").replace(",", "")
         else:
             num = head.replace(".", "").replace(",", "") + "." + tail
     try:
-        return float(num)
+        v = float(num)
     except ValueError:
         return None
+    return round(v, 2) if v else None
 
 
 def get_full_history(days=120):
@@ -1165,6 +1168,23 @@ def render_portfolio(filtered_df, kind):
             if sel_asins:
                 display_tbl = display_tbl.assign(Выбор=filtered_df["raw_asin"].isin(sel_asins))
 
+            # отметить всё разом: по одной галочке на 240 строк — нерабочий вариант
+            sa1, sa2, sa3 = st.columns([1.1, 1.1, 4])
+            _mark_key = f"mark_all_{kind}"
+            if sa1.button(f"☑️ Отметить все ({len(display_tbl)})", key=f"mark_{kind}",
+                          use_container_width=True):
+                st.session_state[_mark_key] = True
+                st.rerun()
+            if sa2.button("☐ Снять отметки", key=f"unmark_{kind}", use_container_width=True):
+                st.session_state[_mark_key] = False
+                st.rerun()
+            if st.session_state.get(_mark_key) is not None:
+                display_tbl = display_tbl.assign(Выбор=bool(st.session_state[_mark_key]))
+                sa3.markdown(f"<div class='muted' style='margin-top:8px'>"
+                             f"{'Отмечено всё, что прошло фильтры' if st.session_state[_mark_key] else 'Отметки сняты'}"
+                             f" — дальше можно снять или поставить точечно</div>",
+                             unsafe_allow_html=True)
+
             edited_df = st.data_editor(
                 display_tbl,
                 column_config={
@@ -1197,7 +1217,8 @@ def render_portfolio(filtered_df, kind):
 
             a1, a2, a3, a4 = st.columns([3, 1, 1, 1])
             if selected_asins:
-                a1.markdown(f"**Выбрано: {len(selected_asins)}** · `{', '.join(selected_asins)}`")
+                _shown = ", ".join(selected_asins[:12]) + ("…" if len(selected_asins) > 12 else "")
+                a1.markdown(f"**Выбрано: {len(selected_asins)}** · `{_shown}`")
             else:
                 a1.caption("Отметьте строки галочкой для массовых действий")
             if a2.button("↻ Обновить выбранные", use_container_width=True, disabled=not selected_asins, key=f"upd_{kind}"):
