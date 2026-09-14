@@ -72,7 +72,18 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN_CHILD: ${{ secrets.TELEGRAM_BOT_TOKEN_CHILD }}
-        run: python -c "import notifier; print(notifier.notify_portfolios(header='Rating Radar — ежедневный сбор'))"
+          RADAR_TZ: Europe/Kyiv
+          PORTFOLIO_REPORT_TIMES: "09:00,17:00"
+        run: |
+          python - <<'PY'
+          import os, notifier
+          ok, why = notifier.due_now("portfolio_report", os.environ["PORTFOLIO_REPORT_TIMES"])
+          if not ok:
+              print("пропуск отправки:", why)
+          else:
+              print("слот", why, "—", notifier.notify_portfolios(
+                  header="Rating Radar — сбор"))
+          PY
 
       - name: Сводка по конкурентам
         if: always()
@@ -90,4 +101,5 @@ jobs:
           TELEGRAM_BOT_TOKEN_ES: ${{ secrets.TELEGRAM_BOT_TOKEN_ES }}
           RADAR_TZ: Europe/Kyiv
           COMP_MIN_REVIEWS: "20"    # ниже порога конкурент не считается «лучшим»
-        run: python comp_report.py
+          COMP_REPORT_TIMES: "09:00,17:00"
+        run: python comp_report.py --at "$COMP_REPORT_TIMES"
