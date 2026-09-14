@@ -20,6 +20,8 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+import warnings
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 
 
 def _cfg(name, default=""):
@@ -418,6 +420,32 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
                                 (int(sub["chat_id"]), channel))
                 c.commit()
     return sent, len(subs)
+
+
+def due_now(key, times="09:00,17:00", tz=None, window_min=45):
+    """Пора ли слать. Воркфлоу дёргается каждые 30 минут, а отчёты нужны
+    два раза в день — поэтому проверяем окно и запоминаем, что уже отправили.
+
+    Возвращает (True, слот) один раз на каждый слот в сутки.
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    tzinfo = ZoneInfo(tz or _cfg("RADAR_TZ", "Europe/Kyiv"))
+    now = datetime.now(tzinfo)
+    for raw in [t.strip() for t in str(times).split(",") if t.strip()]:
+        try:
+            hh, mm = [int(x) for x in raw.split(":")]
+        except ValueError:
+            continue
+        slot = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if abs((now - slot).total_seconds()) > window_min * 60:
+            continue
+        stamp = f"{now:%Y-%m-%d} {raw}"
+        if get_state(f"sent_{key}", "") == stamp:
+            return False, f"{raw} уже отправлен"
+        set_state(f"sent_{key}", stamp)
+        return True, raw
+    return False, "не время"
 
 
 def notify_portfolios(header="Rating Radar — сбор завершён", silent_if_empty=True):
