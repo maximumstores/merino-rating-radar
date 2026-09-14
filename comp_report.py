@@ -10,6 +10,7 @@
 import argparse
 import datetime
 import os
+import warnings
 import re
 import sys
 from zoneinfo import ZoneInfo
@@ -19,6 +20,8 @@ import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
+# psycopg2-соединение вместо SQLAlchemy — предупреждение по делу, но шумит в логах
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 TZ = os.environ.get("RADAR_TZ", "Europe/Kyiv")
 OWN_BRANDS_DEFAULT = "Merino.tech"
@@ -84,24 +87,29 @@ def load_data(days=3):
 
 
 def price_to_num(val):
-    """«86.99 C$», «1.234,56 €», «$1,299.00» → число. Последний разделитель — десятичный."""
-    txt = re.sub(r"[^\d,.]", "", str(val or ""))
-    if not txt or not any(ch.isdigit() for ch in txt):
+    """Цена в число. Берём ПЕРВОЕ число из строки: в поле price у Amazon
+    часто прилипает хвост («86.99 C$5% off»), и склейка всех цифр давала 86995.
+    Разделители: последний — десятичный, предыдущие — разряды."""
+    raw = str(val or "")
+    m = re.search(r"\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?(?![\d])|\d+(?:[.,]\d{1,2})?(?![\d])", raw)
+    if not m:
         return None
+    txt = m.group(0).replace(" ", "").replace("\u00a0", "")
     last_dot, last_com = txt.rfind("."), txt.rfind(",")
     if last_dot == -1 and last_com == -1:
         num = txt
     else:
         sep = "." if last_dot > last_com else ","
         head, _, tail = txt.rpartition(sep)
-        if len(tail) == 3 and (last_dot == -1 or last_com == -1) and head.count(sep) == 0 and len(head) <= 3:
+        if len(tail) == 3:      # три знака после разделителя — это разряды
             num = (head + tail).replace(".", "").replace(",", "")
         else:
             num = head.replace(".", "").replace(",", "") + "." + tail
     try:
-        return float(num)
+        v = float(num)
     except ValueError:
         return None
+    return round(v, 2) if v else None
 
 
 def esc(v):
@@ -294,7 +302,21 @@ if __name__ == "__main__":
     ap.add_argument("--country", default=None, help="только одна страна, например DE")
     ap.add_argument("--days", type=int, default=10, help="за сколько дней брать последний замер")
     ap.add_argument("--dry", action="store_true", help="напечатать, не отправлять")
+    ap.add_argument("--at", default=os.environ.get("COMP_REPORT_TIMES", ""),
+                    help="слоты отправки «09:00,17:00»; пусто — слать всегда")
     args = ap.parse_args()
+
+    # воркфлоу запускается каждые 30 минут, а отчёт нужен пару раз в день
+    if args.at and not args.dry:
+        try:
+            import notifier as _n
+            ok_time, why = _n.due_now("comp_report", args.at)
+            if not ok_time:
+                print(f"пропуск отправки: {why}")
+                sys.exit(0)
+            print(f"слот {why} — отправляю")
+        except Exception as e:
+            print("проверка времени не удалась, шлю как обычно:", e)
 
     text = build_report(args.country, args.days)
     if not text:
@@ -315,10 +337,15 @@ if __name__ == "__main__":
     total_sent = 0
     for mkt, body in text.items():
         ch = notifier.channel_for_country(mkt)
+        if ch == "comp":
+            print(f"{mkt}: своего бота нет — нужен секрет TELEGRAM_BOT_TOKEN_{mkt}, "
+                  "иначе отчёт идёт в общий канал")
         try:
             ok, total = notifier.broadcast(body, channel=ch)
             total_sent += ok
             print(f"{mkt} → канал {ch}: отправлено {ok} из {total}")
+            for err in getattr(notifier, "LAST_SEND_ERRORS", []):
+                print(f"   не доставлено — {err}")
         except Exception as e:
             print(f"{mkt} → канал {ch}: ошибка {e}")
     print("итого отправлено:", total_sent)
