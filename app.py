@@ -282,8 +282,11 @@ def price_to_num(val):
     return round(v, 2) if v else None
 
 
+@st.cache_data(ttl=600, show_spinner="Загружаю историю замеров…", max_entries=8)
 def get_full_history(days=120):
-    """История метрик за период. Без ограничения запрос перебирает всю таблицу."""
+    """История метрик за период. Кэш обязателен: без него запрос на сотни тысяч
+    строк повторялся при каждом клике — отсюда «экран думает» на переключении вкладок.
+    Сбрасывается после сбора через st.cache_data.clear()."""
     if not DATABASE_URL:
         return pd.DataFrame()
     try:
@@ -870,7 +873,7 @@ tracked = list(tracked_kind.keys())
 tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
 asin_market_map = dict(get_asin_markets_map(tuple(tracked)))
 _t_hist = time.time()
-full_df = get_full_history()
+full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
 ensure_dict_table()
 try:
@@ -1096,6 +1099,7 @@ with fc7:
     tz_short = selected_tz_label.split(" ")[0]
 with fc8:
     period_days = st.selectbox("Период истории", options=[7, 14, 30, 60, 90, 365], index=2,
+                               key="period_days_sel",
                                format_func=lambda d: f"{d} дн.")
 with fc9:
     group_field = st.selectbox("Группировать по", options=["Нет"] + list(GROUP_LABELS.values()), index=0,
@@ -2267,9 +2271,16 @@ if nav == "🥊 Конкуренты":
         g3.markdown("<div class='muted' style='margin-top:28px'>Одна пачка = одна группа + одна страна. "
                     "Страна из ссылки перебивает выбор.</div>", unsafe_allow_html=True)
 
-        comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
-                                 placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\nB07NGJLLH4")
-        if comp_text.strip():
+        # форма: без неё Streamlit пересчитывает всю вкладку на каждый символ
+        # форма: иначе Streamlit пересчитывает всю вкладку на каждый введённый символ
+        with st.form("comp_add_form", clear_on_submit=False):
+            comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
+                                     placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\n"
+                                                 "B07NGJLLH4")
+            checked = st.form_submit_button("🔍 Разобрать пачку", type="secondary")
+        if checked or st.session_state.get("comp_parsed"):
+            st.session_state["comp_parsed"] = True
+        if comp_text.strip() and st.session_state.get("comp_parsed"):
             codes, _d, inv_c, mk_map, bd = parse_asin_batch(comp_text, [], comp_market)
             # позиция = ASIN + страна: один товар бывает конкурентом и в DE, и в CA
             pairs = [(a, mk_map.get(a, comp_market)) for a in codes]
@@ -2312,6 +2323,7 @@ if nav == "🥊 Конкуренты":
                     msg = [f"добавлено {len(fresh)}"]
                     if regroup:
                         msg.append(f"перегруппировано {len(regroup)}")
+                    st.session_state["comp_parsed"] = False
                     st.success(" · ".join(msg) + f" → «{comp_group}» / {comp_market}")
                     st.rerun()
                 except Exception as e:
@@ -4460,4 +4472,4 @@ if nav == "ℹ️ Как это работает":
 </div>
 """,
         unsafe_allow_html=True,
-    ) 
+    )
