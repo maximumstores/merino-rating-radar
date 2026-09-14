@@ -10,7 +10,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import psycopg2
+import warnings
+
 import streamlit as st
+
+# psycopg2-соединение вместо SQLAlchemy — предупреждение по делу, но в логе только шумит
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 from dotenv import load_dotenv
 from sklearn.linear_model import LinearRegression
 
@@ -659,7 +664,7 @@ def dispatch_github_run(force=True, workflow="collect.yml", scope="all"):
 
 
 def actions_button(key, label="🚀 Запустить сбор в GitHub Actions", scope="all", ptype="primary"):
-    if st.button(label, key=key, type=ptype, use_container_width=True,
+    if st.button(label, key=key, type=ptype, width="stretch",
                  help="Сбор пойдёт на серверах GitHub в 10 параллельных потоков. "
                       "Вкладку можно закрыть, отчёты придут в Telegram."):
         ok, msg = dispatch_github_run(scope=scope)
@@ -688,7 +693,7 @@ def run_collection(items, label="Прогон"):
     head_l, head_r = st.columns([3, 1])
     head_l.markdown(f"**{label}** — {len(items)} позиций")
     stop_slot = head_r.empty()
-    stop_slot.button("⏹ Стоп", key=f"stop_btn_{run_id}", use_container_width=True,
+    stop_slot.button("⏹ Стоп", key=f"stop_btn_{run_id}", width="stretch",
                      on_click=lambda: st.session_state.update(stop_run=True),
                      help="Остановить прогон — уже собранные позиции сохранятся")
 
@@ -1171,7 +1176,7 @@ def render_portfolio(filtered_df, kind):
             unsafe_allow_html=True)
         rc.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
         if rc.button(f"▶ Прогнать {KIND_LABEL[kind].lower()}ов ({len(kind_asins)})",
-                     key=f"run_kind_{kind}", type="primary", use_container_width=True,
+                     key=f"run_kind_{kind}", type="primary", width="stretch",
                      disabled=not kind_asins,
                      help=f"Собрать только список «{KIND_LABEL[kind]}», не трогая второй портфель"):
             run_collection(kind_asins, f"Прогон ({KIND_LABEL[kind]})")
@@ -1188,7 +1193,7 @@ def render_portfolio(filtered_df, kind):
                 Негатив=("bad_pct", "mean")).reset_index().rename(columns={"_group": group_field})
             gsum = gsum.sort_values("Рейтинг")
             st.dataframe(gsum.style.format({"Рейтинг": "{:.2f}", "Отзывов": "{:,.0f}", "Негатив": "{:.0f}%"}),
-                         use_container_width=True, hide_index=True, height=min(400, 40 + 35 * len(gsum)))
+                         width="stretch", hide_index=True, height=min(400, 40 + 35 * len(gsum)))
             st.markdown("<br>", unsafe_allow_html=True)
 
         if view_mode == "Таблица":
@@ -1206,10 +1211,10 @@ def render_portfolio(filtered_df, kind):
             sa1, sa2, sa3 = st.columns([1.1, 1.1, 4])
             _mark_key = f"mark_all_{kind}"
             if sa1.button(f"☑️ Отметить все ({len(display_tbl)})", key=f"mark_{kind}",
-                          use_container_width=True):
+                          width="stretch"):
                 st.session_state[_mark_key] = True
                 st.rerun()
-            if sa2.button("☐ Снять отметки", key=f"unmark_{kind}", use_container_width=True):
+            if sa2.button("☐ Снять отметки", key=f"unmark_{kind}", width="stretch"):
                 st.session_state[_mark_key] = False
                 st.rerun()
             if st.session_state.get(_mark_key) is not None:
@@ -1244,7 +1249,7 @@ def render_portfolio(filtered_df, kind):
                     "BSR": st.column_config.TextColumn("BSR", width="small", disabled=True),
                     "Комментарий": st.column_config.TextColumn("Комментарий", width="large", disabled=True),
                 },
-                use_container_width=True, hide_index=True, key=f"table_editor_{kind}",
+                width="stretch", hide_index=True, key=f"table_editor_{kind}",
             )
 
             selected_asins = [extract_asin(u) for u in edited_df.loc[edited_df["Выбор"] == True, "ASIN"] if extract_asin(u)]
@@ -1255,11 +1260,11 @@ def render_portfolio(filtered_df, kind):
                 a1.markdown(f"**Выбрано: {len(selected_asins)}** · `{_shown}`")
             else:
                 a1.caption("Отметьте строки галочкой для массовых действий")
-            if a2.button(f"↻ Обновить выбранные ({len(selected_asins)})", use_container_width=True,
+            if a2.button(f"↻ Обновить выбранные ({len(selected_asins)})", width="stretch",
                          disabled=not selected_asins, key=f"upd_{kind}"):
                 # страна берётся из справочника, иначе ушли бы на чужую витрину
                 run_collection(with_market(selected_asins), "Обновление")
-            if a3.button(f"✕ Удалить выбранные ({len(selected_asins)})", use_container_width=True,
+            if a3.button(f"✕ Удалить выбранные ({len(selected_asins)})", width="stretch",
                          disabled=not selected_asins, key=f"del_{kind}"):
                 for a in selected_asins:
                     delete_asin_completely(a)
@@ -1268,7 +1273,7 @@ def render_portfolio(filtered_df, kind):
             csv = filtered_df.drop(columns=["Выбор", "raw_created_at", "Фото", "bad_pct", "five_pct", "margin", "Рейтинг ★"],
                                    errors="ignore") \
                 .to_csv(index=False).encode("utf-8-sig")
-            a4.download_button("⬇ CSV", csv, f"rating_radar_{kind}.csv", "text/csv", use_container_width=True, key=f"csv_{kind}")
+            a4.download_button("⬇ CSV", csv, f"rating_radar_{kind}.csv", "text/csv", width="stretch", key=f"csv_{kind}")
 
         else:
             records = filtered_df.to_dict(orient="records")
@@ -1752,7 +1757,7 @@ if nav == "🥊 Конкуренты":
             _bu, _ = _bot_name(_ch)
             sb1, sb2 = st.columns([1.6, 4])
             if _bu and sb1.button(f"📤 Отправить сводку по {sel_mkt}", key=f"quick_send_{sel_mkt}",
-                                  use_container_width=True,
+                                  width="stretch",
                                   help=f"Посчитает и отправит в @{_bu} прямо сейчас"):
                 with st.spinner("Считаю сводку…"):
                     txt, _df = build_group_report(sel_mkt, use_groups, view)
@@ -2006,11 +2011,11 @@ if nav == "🥊 Конкуренты":
                 format_func=lambda a: f"{a} · {sel_mkt}",
                 placeholder="выбери ASIN — соберём заново и покажем актуальные данные")
             if rf2.button(f"↻ Обновить ({len(pick_now)})", disabled=not pick_now, type="primary",
-                          key=f"comp_quick_btn_{sel_mkt}", use_container_width=True):
+                          key=f"comp_quick_btn_{sel_mkt}", width="stretch"):
                 run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in pick_now],
                                "Конкуренты (точечно)")
             if rf3.button(f"↻ Всё, что видно ({len(asins)})", key=f"comp_quick_all_{sel_mkt}",
-                          use_container_width=True, disabled=not asins,
+                          width="stretch", disabled=not asins,
                           help="Пересобрать все позиции, попавшие в таблицу после фильтров и поиска"):
                 run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins],
                                f"Конкуренты ({sel_mkt})")
@@ -2067,7 +2072,7 @@ if nav == "🥊 Конкуренты":
                                          ascending=[True, False, True, True], na_position="last")
                         .drop(columns=["_b"]))
                 st.dataframe(
-                    flat, use_container_width=True, hide_index=True,
+                    flat, width="stretch", hide_index=True,
                     height=min(760, 40 + 35 * len(flat)),
                     column_config={
                         "Наш": st.column_config.TextColumn("", width="small"),
@@ -2127,7 +2132,7 @@ if nav == "🥊 Конкуренты":
                         "Когда": list(when_col),
                     })
                     edited_pick = st.data_editor(
-                        pick_tbl, use_container_width=True, hide_index=True,
+                        pick_tbl, width="stretch", hide_index=True,
                         height=min(360, 40 + 35 * len(pick_tbl)),
                         key=f"comp_pick_{sel_mkt}_{len(empty_asins)}",
                         column_config={
@@ -2144,10 +2149,10 @@ if nav == "🥊 Конкуренты":
 
                     b1, b2, b3 = st.columns([1.2, 1.2, 3])
                     if b1.button(f"↻ Обновить отмеченные ({len(pick_comp)})", disabled=not pick_comp,
-                                 type="primary", key=f"comp_upd_btn_{sel_mkt}", use_container_width=True):
+                                 type="primary", key=f"comp_upd_btn_{sel_mkt}", width="stretch"):
                         run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in pick_comp], "Конкуренты (точечно)")
                     if b2.button(f"↻ Все в группе ({len(asins)})", key=f"comp_upd_grp_{sel_mkt}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins], f"Конкуренты ({sel_mkt})")
 
                     st.markdown("<div class='muted' style='margin-top:8px'>Колонка «Собрано»: "
@@ -2194,9 +2199,9 @@ if nav == "🥊 Конкуренты":
         r1, r2, r3 = st.columns([3, 1, 1])
         r1.markdown(f"**{sel_mkt}** · групп: {len(use_groups)} · ASIN: {len(asins)}")
         if r2.button(f"▶ Прогнать {sel_mkt} ({len(asins)})", key="comp_run_mkt", type="primary",
-                     use_container_width=True, disabled=not asins):
+                     width="stretch", disabled=not asins):
             run_collection([f"https://www.{MARKET_DOMAINS[sel_mkt]}/dp/{a}" for a in asins], f"Конкуренты ({sel_mkt})")
-        if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", use_container_width=True):
+        if r3.button(f"▶ Всех ({len(comp_df)})", key="comp_run_all", width="stretch"):
             run_collection([f"https://www.{MARKET_DOMAINS.get(m, 'amazon.com')}/dp/{a}" for a, m in zip(comp_df["asin"], comp_df["market"])], "Конкуренты")
 
     with st.expander(f"📥 Добавить конкурентов — сейчас в базе: {len(comp_df)}", expanded=comp_df.empty):
@@ -2245,7 +2250,7 @@ if nav == "🥊 Конкуренты":
                     by_g = (parsed.groupby(["group", "market"]).size()
                             .reset_index(name="ASIN").rename(columns={"group": "Группа", "market": "Страна"}))
                     by_g["Страна"] = by_g["Страна"].replace("", def_mkt + " (по умолч.)")
-                    st.dataframe(by_g, use_container_width=True, hide_index=True,
+                    st.dataframe(by_g, width="stretch", hide_index=True,
                                  height=min(260, 40 + 35 * len(by_g)))
                     if st.button(f"➕ Загрузить {len(parsed)} позиций", type="primary", key="comp_tbl_add"):
                         try:
@@ -2311,7 +2316,7 @@ if nav == "🥊 Конкуренты":
                     st.dataframe(pd.DataFrame(
                         [{"ASIN": a, "Страна": m,
                           "Группа сейчас": str(cmeta.loc[(a, m), "grp"]) or "—"} for a, m in same]),
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                         height=min(300, 40 + 35 * len(same)))
 
             to_save = fresh + regroup
@@ -2351,7 +2356,7 @@ if nav == "🥊 Конкуренты":
                            "замедлять страницу.")
             else:
                 if not rep_df.empty:
-                    st.dataframe(rep_df, use_container_width=True, hide_index=True,
+                    st.dataframe(rep_df, width="stretch", hide_index=True,
                                  height=min(420, 40 + 35 * len(rep_df)))
                 with st.expander("Текст отчёта", expanded=False):
                     st.code(rep_text.replace("<b>", "").replace("</b>", "")
@@ -2458,7 +2463,7 @@ if nav == "🧠 AI-анализ":
             rv_market = f2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="ai_rv_market")
             rv_pages = f3.number_input("Страниц", 1, 5, 2, key="ai_rv_pages")
             f4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-            if f4.button("📥 Собрать", disabled=not rv_asins, key="ai_rv_fetch", use_container_width=True):
+            if f4.button("📥 Собрать", disabled=not rv_asins, key="ai_rv_fetch", width="stretch"):
                 prog = st.progress(0.0)
                 log_box = st.empty()
                 lines, total_saved = [], 0
@@ -2491,7 +2496,7 @@ if nav == "🧠 AI-анализ":
                                   key="ai_an_cat")
             an_limit = a2.number_input("Сколько отзывов", 10, 200, 60, step=10, key="ai_an_limit")
             a3.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-            run_an = a3.button("🧠 Разобрать", type="primary", key="ai_an_btn", use_container_width=True)
+            run_an = a3.button("🧠 Разобрать", type="primary", key="ai_an_btn", width="stretch")
 
             try:
                 preview = ai_insights.get_reviews_for_analysis(
@@ -2505,7 +2510,7 @@ if nav == "🧠 AI-анализ":
             if not preview.empty:
                 with st.expander("Показать тексты", expanded=False):
                     st.dataframe(preview[["asin", "stars", "title", "body", "review_date"]],
-                                 use_container_width=True, hide_index=True, height=260)
+                                 width="stretch", hide_index=True, height=260)
 
             if run_an:
                 with st.spinner("Читаю отзывы…"):
@@ -2544,12 +2549,12 @@ if nav == "🧠 AI-анализ":
                            "rating_only", "rating_only_%"]].copy()
                 show.columns = ["ASIN", "Страна", "Рейтинг", "Оценок всего", "С текстом",
                                 "Без текста", "% без текста"]
-                st.dataframe(show, use_container_width=True, hide_index=True, height=380)
+                st.dataframe(show, width="stretch", hide_index=True, height=380)
                 fig = px.bar(ro.head(20), x="asin", y="rating_only_%", color="rating_only_%",
                              color_continuous_scale=["#1f8a4c", "#c77800", "#d13438"],
                              labels={"asin": "", "rating_only_%": "% оценок без текста"})
                 style_fig(fig, 320, showlegend=False, coloraxis_showscale=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
 # ---------- ДИНАМИКА ПО ДНЯМ (широкая таблица) ----------
 def render_dynamics(filtered_df, hist_df, kind):
@@ -2912,7 +2917,7 @@ def render_dynamics(filtered_df, hist_df, kind):
                         show = ev_df[["ts", "what", "rating", "reviews", "bsr", "Пауза"]].iloc[::-1]
                         show.columns = ["Когда", "Что изменилось", "Рейтинг", "Оценок", "BSR", "Пауза"]
                         show["Когда"] = show["Когда"].dt.strftime("%d.%m %H:%M")
-                        st.dataframe(show, use_container_width=True, hide_index=True,
+                        st.dataframe(show, width="stretch", hide_index=True,
                                      height=min(400, 40 + 35 * len(show)))
 
         with st.expander(f"✏️ Категории — заполнить вручную ({len(order)} ASIN)", expanded=False):
@@ -2969,7 +2974,7 @@ def render_dynamics(filtered_df, hist_df, kind):
 
             cat_tbl = shown
             edited_cat = st.data_editor(
-                cat_tbl, use_container_width=True, hide_index=True,
+                cat_tbl, width="stretch", hide_index=True,
                 height=min(500, 40 + 35 * len(cat_tbl)), key=f"cat_editor_{kind}",
                 column_config={
                     "ASIN": st.column_config.TextColumn("ASIN", width="medium", disabled=True),
@@ -3008,9 +3013,9 @@ def render_dynamics(filtered_df, hist_df, kind):
         u1.markdown("<div class='muted' style='margin-top:8px'>Выбор ASIN и поиск — над таблицей. "
                     "Кнопки пересобирают то, что сейчас показано.</div>", unsafe_allow_html=True)
         if u2.button(f"↻ Обновить выбранные ({len(picked)})", disabled=not picked, type="primary",
-                     key=f"dyn_upd_btn_{kind}", use_container_width=True):
+                     key=f"dyn_upd_btn_{kind}", width="stretch"):
             run_collection(picked, "Обновление")
-        if u3.button(f"↻ Все в таблице ({len(order)})", key=f"dyn_upd_all_{kind}", use_container_width=True,
+        if u3.button(f"↻ Все в таблице ({len(order)})", key=f"dyn_upd_all_{kind}", width="stretch",
                      help="Пересобрать все ASIN, попавшие в таблицу после фильтров"):
             run_collection(list(order), "Обновление")
 
@@ -3051,7 +3056,7 @@ def render_dynamics(filtered_df, hist_df, kind):
 
         e1, e2 = st.columns([1, 5])
         e1.download_button("⬇ CSV", wide.to_csv(index=False).encode("utf-8-sig"), f"rating_dynamics_{kind}.csv", "text/csv",
-                           use_container_width=True, key=f"dyn_csv_{kind}")
+                           width="stretch", key=f"dyn_csv_{kind}")
         try:
             import io
             buf = io.BytesIO()
@@ -3084,7 +3089,7 @@ if nav == "📊 Аналитика":
                          color_discrete_map=STATUS_COLOR)
             fig.update_traces(textinfo="value+percent", textfont_size=12)
             style_fig(fig, 300, showlegend=True, legend=dict(orientation="h", y=-0.12))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         with c2:
             st.markdown("**Динамика портфеля** — средний рейтинг и доля позиций в риске")
@@ -3107,7 +3112,7 @@ if nav == "📊 Аналитика":
                 style_fig(fig, 300, legend=dict(orientation="h", y=-0.2),
                           yaxis=dict(title="Рейтинг", range=[3.5, 5.05]),
                           yaxis2=dict(title="% риск", overlaying="y", side="right", range=[0, 100], showgrid=False))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         if GROUP_DF_COL and filtered_df["_group"].nunique() > 1:
             st.markdown(f"**Разрез по: {group_field}** — средний рейтинг и доля позиций в риске")
@@ -3125,7 +3130,7 @@ if nav == "📊 Аналитика":
             fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
             style_fig(fig, 340, legend=dict(orientation="h", y=-0.3), yaxis=dict(range=[3.0, 5.15]),
                       yaxis2=dict(title="% риск", overlaying="y", side="right", range=[0, 100], showgrid=False))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         # --- ряд 2: scatter + топ негатива ---
         c3, c4 = st.columns([3, 2])
@@ -3143,7 +3148,7 @@ if nav == "📊 Аналитика":
                 fig.add_hline(y=4.5, line_dash="dot", line_color=PALETTE["ok"], annotation_text="4.5")
                 style_fig(fig, 340, legend=dict(orientation="h", y=-0.2),
                           yaxis=dict(range=[min(3.0, sc["Рейтинг"].min() - 0.1), 5.05]))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         with c4:
             st.markdown("**Топ-15 по доле негатива (1–2★)**")
@@ -3156,7 +3161,7 @@ if nav == "📊 Аналитика":
                              labels={"bad_pct": "% 1–2★", "raw_asin": ""})
                 fig.update_traces(texttemplate="%{text}%", textposition="outside")
                 style_fig(fig, 340, showlegend=False, xaxis=dict(range=[0, max(top["bad_pct"].max() * 1.2, 10)]))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         # --- ряд 3: по источникам + запас ---
         c5, c6 = st.columns(2)
@@ -3169,7 +3174,7 @@ if nav == "📊 Аналитика":
                 fig = px.box(bx, x="Источник", y="Рейтинг", points="all", color="Источник",
                              hover_name="raw_asin", color_discrete_sequence=px.colors.qualitative.Set2)
                 style_fig(fig, 320, showlegend=False, yaxis=dict(range=[min(3.0, bx["Рейтинг"].min() - 0.1), 5.05]))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         with c6:
             st.markdown("**Самый тонкий запас до 4.0** — сколько единичных отзывов выдержит")
@@ -3181,7 +3186,7 @@ if nav == "📊 Аналитика":
                              color_discrete_map=STATUS_COLOR, text="margin", labels={"margin": "ед.", "raw_asin": ""})
                 fig.update_traces(textposition="outside")
                 style_fig(fig, 320, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         # --- ряд 4: тепловая карта изменений + прирост отзывов ---
         st.markdown("---")
@@ -3209,7 +3214,7 @@ if nav == "📊 Аналитика":
                         hovertemplate="%{y}<br>%{x}: %{z:+.2f}<extra></extra>"))
                     style_fig(fig, max(300, 18 * len(piv) + 60))
                     fig.update_yaxes(showgrid=False, autorange="reversed")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
         with c8:
             st.markdown("**Прирост отзывов за период**")
@@ -3227,7 +3232,7 @@ if nav == "📊 Аналитика":
                                  color_discrete_map=STATUS_COLOR, text="growth", labels={"growth": "новых отз.", "asin": ""})
                     fig.update_traces(textposition="outside")
                     style_fig(fig, 340, showlegend=False)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
         # --- ряд 5: все линии ---
         st.markdown("**Динамика рейтинга по ASIN**")
@@ -3241,7 +3246,7 @@ if nav == "📊 Аналитика":
             fig.add_hrect(y0=4.2, y1=4.5, fillcolor=PALETTE["warn"], opacity=0.05, line_width=0)
             style_fig(fig, 380, yaxis=dict(range=[min(3.0, hist_df["rating"].min() - 0.1), 5.05]),
                       legend=dict(orientation="h", y=-0.2), showlegend=len(f_asins) <= 25)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 
 # ---------- ДЕТЕКТОР БОТА ВОЗВРАТОВ ----------
@@ -3345,7 +3350,7 @@ if nav == "🤖 Бот возвратов":
             fig.add_vline(x=rl, line_dash="dash", line_color=PALETTE["ink"], annotation_text="бот", annotation_position="top")
             style_fig(fig, 340, barmode="overlay", legend=dict(orientation="h", y=-0.25),
                       yaxis2=dict(title="%", overlaying="y", side="right", range=[0, 100], showgrid=False))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         with gc2:
             st.markdown("**Входящий рейтинг новых оценок и число аномалий**")
             fig = go.Figure()
@@ -3359,7 +3364,7 @@ if nav == "🤖 Бот возвратов":
             style_fig(fig, 340, barmode="overlay", legend=dict(orientation="h", y=-0.25),
                       yaxis=dict(title="★", range=[1, 5.05]),
                       yaxis2=dict(title="шт.", overlaying="y", side="right", showgrid=False, rangemode="tozero"))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         # --- график 2: scatter падение vs прирост ---
         st.markdown("**Карта аномалий** — каждая точка = замер ASIN; красная зона = падение рейтинга при почти нулевом приросте оценок")
@@ -3374,7 +3379,7 @@ if nav == "🤖 Бот возвратов":
         fig.add_hline(y=0, line_color="#c7c7cc")
         style_fig(fig, 340, legend=dict(orientation="h", y=-0.25),
                   yaxis=dict(range=[min(-0.3, sc["d_rating"].min() - 0.05), max(0.3, sc["d_rating"].max() + 0.05)]))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # --- таблица аномалий ---
         st.markdown("**Замеры с аномалией**")
@@ -3391,7 +3396,7 @@ if nav == "🤖 Бот возвратов":
             st.dataframe(show.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
                                             "Входящий ★": "{:.2f}", "Было оценок": "{:.0f}", "Стало оценок": "{:.0f}",
                                             "Новых": "{:.0f}", "Новых 1–2★": "{:.0f}"}),
-                         use_container_width=True, hide_index=True, height=min(420, 40 + 35 * len(show)))
+                         width="stretch", hide_index=True, height=min(420, 40 + 35 * len(show)))
             st.download_button("⬇ CSV аномалий", show.to_csv(index=False).encode("utf-8-sig"), "bot_anomalies.csv", "text/csv")
 
         # --- по группе: до/после ---
@@ -3409,7 +3414,7 @@ if nav == "🤖 Бот возвратов":
                            .replace("anom (", "Аномалий ("))
             st.dataframe(gt.reset_index().rename(columns={"_group": group_field}).style.format(
                 {c: ("{:.0f}%" if "негатива" in c else "{:.0f}") for c in gt.columns}, na_rep="—"),
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
 
         # --- по ASIN: до/после ---
         st.markdown("**По ASIN: доля негатива во входящих оценках до и после**")
@@ -3428,7 +3433,7 @@ if nav == "🤖 Бот возвратов":
             fig.add_trace(go.Bar(x=pv.index, y=pv["после"], name="после", marker_color=PALETTE["risk"]))
             style_fig(fig, 320, barmode="group", yaxis=dict(title="% негатива", range=[0, 100]),
                       legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         st.caption("Оговорка: витринный рейтинг округлён до 0.1, а гистограмма — до 1 %, поэтому на больших базах "
                    "(тысячи оценок) входящий рейтинг и число новых 1–2★ — оценка, не точный счёт. "
@@ -3475,7 +3480,7 @@ if nav == "📈 Прогноз":
             "ASIN для прогноза", options=pool_f, default=pool_f[:1], key="fc_targets",
             format_func=lambda a: asin_label(a, _fm, with_title=False),
             help="Можно выбрать несколько — сверху появится сводная таблица по всем")
-        if sc2.button(f"Взять все ({len(pool_f)})", key="fc_take_all", use_container_width=True):
+        if sc2.button(f"Взять все ({len(pool_f)})", key="fc_take_all", width="stretch"):
             st.session_state["fc_targets"] = pool_f
             st.rerun()
 
@@ -3513,7 +3518,7 @@ if nav == "📈 Прогноз":
                     sm.style.background_gradient(subset=["Δ"], cmap="RdYlGn", vmin=-0.3, vmax=0.3)
                       .format({"Сейчас": "{:.2f}", f"Через {horizon} дн.": "{:.2f}",
                                "Δ": "{:+.2f}", "★/мес": "{:+.3f}"}),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                     height=min(420, 40 + 35 * len(sm)))
                 st.caption("Δ — изменение рейтинга за горизонт по линейному тренду. "
                            "Красные строки — те, что просядут сильнее всего.")
@@ -3581,7 +3586,7 @@ if nav == "📈 Прогноз":
                 style_fig(fig, 360, title=dict(text=f"Рейтинг · {target}", font=dict(size=14)),
                           yaxis=dict(range=[max(1.0, min(cur_r, pr.min()) - 0.4), 5.05]),
                           legend=dict(orientation="h", y=-0.2))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
             with g2:
                 h = parse_hist(ah["histogram_json"].iloc[-1])
@@ -3596,7 +3601,7 @@ if nav == "📈 Прогноз":
                                            marker_color=colors, text=[f"{v}%" for v in vals], textposition="outside"))
                     style_fig(fig, 360, showlegend=False, xaxis=dict(range=[0, max(vals + [10]) * 1.25]))
                     fig.update_yaxes(showgrid=False, autorange="reversed")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
             # отзывы + скорость
             g3, g4 = st.columns(2)
@@ -3607,7 +3612,7 @@ if nav == "📈 Прогноз":
                 fig.add_trace(go.Scatter(x=[last_date] + fx, y=[cur_c] + list(pc), mode="lines", name="Прогноз",
                                          line=dict(color="#5e5ce6", width=2, dash="dash")))
                 style_fig(fig, 300, title=dict(text="Число отзывов", font=dict(size=14)), legend=dict(orientation="h", y=-0.25))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             with g4:
                 vel = ah[["created_at", "review_count", "rating"]].copy()
                 vel["d_reviews"] = vel["review_count"].diff()
@@ -3624,7 +3629,7 @@ if nav == "📈 Прогноз":
                                          marker_color=[PALETTE["risk"] if d < 0 else PALETTE["ok"] for d in vel["d_rating"].fillna(0)]))
                     style_fig(fig, 300, title=dict(text="Скорость отзывов (цвет = знак Δ рейтинга)", font=dict(size=14)),
                               showlegend=False)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
         # --- сводный прогноз по портфелю ---
         st.markdown("---")
@@ -3651,9 +3656,9 @@ if nav == "📈 Прогноз":
                                                for v in pf["Прогноз +30"]]))
             fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
             style_fig(fig, 340, barmode="group", yaxis=dict(range=[3.0, 5.05]), legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.dataframe(pf.style.format({"Сейчас": "{:.2f}", "Прогноз +30": "{:.2f}", "Δ": "{:+.2f}", "Тренд ★/мес": "{:+.3f}"}),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
 def render_asin_manager(kind):
     tracked_k = tracked_by_kind.get(kind, [])
@@ -3811,7 +3816,7 @@ def render_asin_manager(kind):
     elif new_valid and new_code in tracked:
         r2.caption("⚠️ уже отслеживается — будет просто снят старый")
     r4.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-    if r4.button("Заменить", disabled=not (old_asin and new_valid), key=f"repl_btn_{kind}", use_container_width=True):
+    if r4.button("Заменить", disabled=not (old_asin and new_valid), key=f"repl_btn_{kind}", width="stretch"):
         try:
             ensure_schema()
             ensure_dict_table()
@@ -4007,13 +4012,13 @@ if nav == "⚙️ Сбор и управление":
             st.caption(f"Держать вкладку открытой. На списках больше {BROWSER_RUN_LIMIT} позиций "
                        "Streamlit обрывает соединение, поэтому для полного сбора — кнопка выше.")
             if st.button(f"▶ Все ({len(tracked)})", key="run_all",
-                         use_container_width=True, disabled=not tracked):
+                         width="stretch", disabled=not tracked):
                 run_collection(tracked, "Прогон")
             rk1, rk2 = st.columns(2)
-            if rk1.button(f"▶ Чайлды ({n_child})", key="run_child", use_container_width=True,
+            if rk1.button(f"▶ Чайлды ({n_child})", key="run_child", width="stretch",
                           disabled=not n_child):
                 run_collection(tracked_by_kind["child"], "Прогон (Чайлд)")
-            if rk2.button(f"▶ Паренты ({n_parent})", key="run_parent", use_container_width=True,
+            if rk2.button(f"▶ Паренты ({n_parent})", key="run_parent", width="stretch",
                           disabled=not n_parent):
                 run_collection(tracked_by_kind["parent"], "Прогон (Парент)")
 
@@ -4076,7 +4081,7 @@ if nav == "⚙️ Сбор и управление":
         parent_in = k1.text_input("ASIN паренты или чайлда", key="kids_asin", placeholder="B0H8SFPK44 или ссылка")
         kids_market = k2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="kids_market")
         k3.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if k3.button("🔍 Найти", disabled=not parent_in.strip(), key="kids_find", use_container_width=True):
+        if k3.button("🔍 Найти", disabled=not parent_in.strip(), key="kids_find", width="stretch"):
             with st.spinner("Запрашиваю API…"):
                 try:
                     obj = fetch_product_json(parent_in, kids_market, log=lambda m: None)
@@ -4095,12 +4100,12 @@ if nav == "⚙️ Сбор и управление":
                 kdf = pd.DataFrame(kids)
                 kdf["уже в базе"] = kdf["asin"].isin(tracked)
                 st.dataframe(kdf.rename(columns={"asin": "ASIN", "value": "Вариант", "dim": "Измерение"}),
-                             use_container_width=True, hide_index=True, height=260)
+                             width="stretch", hide_index=True, height=260)
                 fresh = [k["asin"] for k in kids if k["asin"] not in tracked]
                 kk1, kk2 = st.columns([1, 1])
                 add_kind = kk1.radio("Добавить как", ["Чайлд", "Парент"], horizontal=True, key="kids_kind")
                 if kk2.button(f"➕ Добавить {len(fresh)} новых", type="primary", disabled=not fresh,
-                              key="kids_add", use_container_width=True):
+                              key="kids_add", width="stretch"):
                     kind_val = "child" if add_kind == "Чайлд" else "parent"
                     try:
                         ensure_schema()
@@ -4164,7 +4169,7 @@ if nav == "⚙️ Сбор и управление":
             st.dataframe(dict_df.rename(columns={"asin": "ASIN", "parent_asin": "Parent", "category": "Категория",
                                                  "subcategory": "Подкатегория", "product_type": "Вид",
                                                  "brand": "Бренд", "market": "Страна"}),
-                         use_container_width=True, hide_index=True, height=260)
+                         width="stretch", hide_index=True, height=260)
             miss = [a for a in tracked if a not in dict_map]
             if miss:
                 st.caption(f"Без записи в справочнике: {len(miss)} ASIN из списка отслеживания")
@@ -4280,14 +4285,14 @@ if nav == "⚙️ Сбор и управление":
                 cc1.metric("Подписчиков", int(csubs["active"].sum()) if not csubs.empty else 0,
                            delta=f"всего {len(csubs)}", delta_color="off")
                 cb1, cb2, cb3 = cc2.columns(3)
-                if cb1.button("🔄 Проверить команды", key="tg_poll_comp", use_container_width=True):
+                if cb1.button("🔄 Проверить команды", key="tg_poll_comp", width="stretch"):
                     try:
                         n = notifier.process_updates(channel="comp")
                         st.success(f"Обработано команд: {n}")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
-                if cb2.button("🩺 Диагностика", key="tg_diag_comp", use_container_width=True):
+                if cb2.button("🩺 Диагностика", key="tg_diag_comp", width="stretch"):
                     d = notifier.diagnose("comp")
                     if d.get("webhook_url"):
                         st.error(f"У бота установлен вебхук: {d['webhook_url']} — из-за него команды "
@@ -4298,7 +4303,7 @@ if nav == "⚙️ Сбор и управление":
                               "вебхук": d.get("webhook_url") or "нет",
                               "необработанных": d.get("pending"), "они": d.get("pending_texts"),
                               "подписчиков": d.get("subscribers")})
-                if cb3.button("🧹 Снять вебхук", key="tg_wh_comp", use_container_width=True,
+                if cb3.button("🧹 Снять вебхук", key="tg_wh_comp", width="stretch",
                               help="Старый бот мог работать через webhook — тогда getUpdates не отдаёт команды"):
                     st.write(notifier.drop_webhook("comp"))
                     st.info("Теперь нажми «Проверить команды» и отправь боту /start ещё раз")
@@ -4306,7 +4311,7 @@ if nav == "⚙️ Сбор и управление":
                     st.dataframe(csubs[["username", "first_name", "active", "created_at"]]
                                  .rename(columns={"username": "Юзернейм", "first_name": "Имя",
                                                   "active": "Активен", "created_at": "Подписан"}),
-                                 use_container_width=True, hide_index=True, height=180)
+                                 width="stretch", hide_index=True, height=180)
                 else:
                     st.caption("Подписчиков нет — открой бота и отправь /start")
 
@@ -4323,7 +4328,7 @@ if nav == "⚙️ Сбор и управление":
                             "created_at": "Подписан", "last_sent_at": "Последняя отправка"}
                 have = [c for c in cols_map if c in show.columns]
                 show = show[have].rename(columns=cols_map)
-                st.dataframe(show, use_container_width=True, hide_index=True, height=220)
+                st.dataframe(show, width="stretch", hide_index=True, height=220)
             else:
                 st.caption("Подписчиков пока нет — открой бота и отправь /start")
 
@@ -4342,12 +4347,12 @@ if nav == "⚙️ Сбор и управление":
             fig.add_trace(go.Bar(x=runs["started_at"], y=runs["asin_count"], name="ASIN", marker_color="#c7c7cc"))
             fig.add_trace(go.Bar(x=runs["started_at"], y=runs["ok_count"], name="Валидных", marker_color=PALETTE["ok"]))
             style_fig(fig, 260, barmode="overlay", legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         with r2:
             show = runs[["started_at", "status", "asin_count", "ok_count", "Успех, %", "Длит., мин"]].copy()
             show["started_at"] = show["started_at"].dt.strftime("%d.%m.%Y %H:%M")
             show.columns = [f"Старт ({tz_short})", "Статус", "ASIN", "Валидных", "Успех, %", "Длит., мин"]
-            st.dataframe(show, use_container_width=True, hide_index=True, height=260)
+            st.dataframe(show, width="stretch", hide_index=True, height=260)
 
 
 # ---------- КАК ЭТО РАБОТАЕТ ----------
