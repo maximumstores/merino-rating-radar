@@ -755,10 +755,14 @@ def run_collection(items, label="Прогон"):
     msg = (f"{label} остановлен: собрано {ok} из {len(items)}."
            if stopped else f"{label} завершён: {ok}/{len(items)} успешно.")
     if not stopped and NOTIFIER_OK and st.session_state.get("tg_notify_on", True):
+        # в прогоне конкурентов портфельных позиций нет — незачем слать пустой отчёт
+        run_codes = {extract_asin(str(i)) for i in items}
+        has_portfolio = bool(run_codes & set(tracked_kind))
         try:
             notifier.process_updates()
-            res = notifier.notify_portfolios(header=f"Rating Radar — {label.lower()} завершён")
-            msg += " Telegram: " + " · ".join(f"{k} {v[0]}/{v[1]}" for k, v in res.items()) + "."
+            if has_portfolio:
+                res = notifier.notify_portfolios(header="Rating Radar — сбор завершён")
+                msg += " Telegram: " + " · ".join(f"{k} {v[0]}/{v[1]}" for k, v in res.items()) + "."
         except Exception as e:
             msg += f" Telegram: ошибка отправки ({e})."
 
