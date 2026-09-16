@@ -223,8 +223,12 @@ def send_message(chat_id, text, disable_preview=True, channel="radar"):
 
 # ---------------------------------------------------------------- расчёт алертов
 MARKET_DOMAINS = {
-    "US": "amazon.com", "BE": "amazon.com.be", "NL": "amazon.nl", "DE": "amazon.de",
-    "UK": "amazon.co.uk", "FR": "amazon.fr", "IT": "amazon.it", "ES": "amazon.es",
+    "US": "amazon.com", "CA": "amazon.ca", "MX": "amazon.com.mx", "BR": "amazon.com.br",
+    "UK": "amazon.co.uk", "DE": "amazon.de", "FR": "amazon.fr", "IT": "amazon.it",
+    "ES": "amazon.es", "NL": "amazon.nl", "BE": "amazon.com.be", "SE": "amazon.se",
+    "PL": "amazon.pl", "IE": "amazon.ie", "TR": "amazon.com.tr", "AE": "amazon.ae",
+    "SA": "amazon.sa", "EG": "amazon.eg", "IN": "amazon.in", "SG": "amazon.sg",
+    "AU": "amazon.com.au",
 }
 
 
@@ -311,7 +315,7 @@ def build_alerts():
             "asin": asin,
             "kind": kind_map.get(asin, "child"),
             "country": market or "—",
-            "category": cat_map.get(asin) or "",
+            "category": ("" if pd.isna(cat_map.get(asin)) else (cat_map.get(asin) or "")),
             "rating": float(rating),
             "prev_rating": float(prev_rating),
             "d_rating": d_rating,
@@ -353,7 +357,8 @@ def format_report(alerts, kind_label=None, header="Rating Radar"):
             return
         lines.append(f"<b>{title} — {len(part)}</b>")
         for _, a in part.head(limit).iterrows():
-            cat = f" · {a['category']}" if a["category"] else ""
+            _c = str(a["category"] or "").strip()
+            cat = f" · {_c}" if _c and _c.lower() != "nan" else ""
             dr = f"{a['prev_rating']:.1f} → {a['rating']:.1f}"
             dc = f", оценок {a['d_reviews']:+d}" if a["d_reviews"] is not None else ""
             st_txt = f" [{a['prev_status']} → {a['status']}]" if a["status_changed"] else ""
