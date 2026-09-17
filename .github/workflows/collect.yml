@@ -77,12 +77,15 @@ jobs:
         run: |
           python - <<'PY'
           import os, notifier
-          ok, why = notifier.due_now("portfolio_report", os.environ["PORTFOLIO_REPORT_TIMES"])
+          ok, why = notifier.due_now("portfolio_report", os.environ["PORTFOLIO_REPORT_TIMES"],
+                                     mark=False)
           if not ok:
               print("пропуск отправки:", why)
           else:
-              print("слот", why, "—", notifier.notify_portfolios(
-                  header="Rating Radar — сбор"))
+              res = notifier.notify_portfolios(header="Rating Radar — сбор")
+              print("слот", why, "—", res)
+              if any(v[0] for v in res.values()):
+                  notifier.mark_sent("portfolio_report", why)
           PY
 
       - name: Сводка по конкурентам
