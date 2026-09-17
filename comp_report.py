@@ -307,13 +307,15 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     # воркфлоу запускается каждые 30 минут, а отчёт нужен пару раз в день
+    slot_now = None
     if args.at and not args.dry:
         try:
-            import notifier as _n
-            ok_time, why = _n.due_now("comp_report", args.at)
+            import notifier as _nt
+            ok_time, why = _nt.due_now("comp_report", args.at, mark=False)
             if not ok_time:
                 print(f"пропуск отправки: {why}")
                 sys.exit(0)
+            slot_now = why
             print(f"слот {why} — отправляю")
         except Exception as e:
             print("проверка времени не удалась, шлю как обычно:", e)
@@ -349,3 +351,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"{mkt} → канал {ch}: ошибка {e}")
     print("итого отправлено:", total_sent)
+    # слот помечаем только после успешной отправки: иначе сбой съедал бы день
+    if slot_now and total_sent:
+        try:
+            notifier.mark_sent("comp_report", slot_now)
+        except Exception as e:
+            print("не удалось пометить слот:", e)
