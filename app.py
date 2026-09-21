@@ -186,8 +186,91 @@ VALID_SOURCES = tuple(MARKET_DOMAINS.keys())
 
 
 # ==================== ДАННЫЕ ====================
+# ---- пул соединений -------------------------------------------------------
+# Раньше каждый _conn() открывал новое соединение: SSL-рукопожатие с удалённым
+# Postgres — 200–500 мс, и таких за один показ страницы набиралось десятки.
+# Пул живёт весь процесс Streamlit (cache_resource), соединения переиспользуются.
+import time as _time
+from psycopg2 import pool as _pgpool
+
+
+@st.cache_resource(show_spinner=False)
+def _pg_pool():
+    return _pgpool.ThreadedConnectionPool(1, int(os.environ.get("DB_POOL_MAX", "8")),
+                                          DATABASE_URL, connect_timeout=15)
+
+
+@st.cache_resource(show_spinner=False)
+def _seen_conns():
+    return set()
+
+
+def _db_stats():
+    """Счётчики на текущий прогон страницы: сколько взято из пула, сколько
+    открыто заново, сколько времени ушло на получение соединения."""
+    return st.session_state.setdefault("_db_stats", {"taken": 0, "opened": 0, "ms": 0.0})
+
+
+class _PooledConn:
+    """Обёртка: код по-старому зовёт conn.close(), а соединение уходит обратно
+    в пул. Ничего в 28 местах вызова переписывать не нужно."""
+
+    def __init__(self, raw, pool_):
+        self._raw, self._pool = raw, pool_
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+    def __enter__(self):
+        return self._raw.__enter__()
+
+    def __exit__(self, *exc):
+        return self._raw.__exit__(*exc)
+
+    def close(self):
+        if self._raw is None:
+            return
+        try:
+            if not self._raw.closed:
+                self._raw.rollback()        # не отдаём в пул незакрытую транзакцию
+            self._pool.putconn(self._raw, close=bool(self._raw.closed))
+        except Exception:
+            pass
+        self._raw = None
+
+
 def _conn():
-    return psycopg2.connect(DATABASE_URL)
+    stats = _db_stats()
+    t0 = _time.perf_counter()
+    try:
+        p = _pg_pool()
+        raw = p.getconn()
+        # Heroku/RDS рубят простаивающие соединения — проверяем перед выдачей
+        if raw.closed:
+            p.putconn(raw, close=True)
+            raw = p.getconn()
+            stats["opened"] += 1
+        else:
+            try:
+                with raw.cursor() as _c:
+                    _c.execute("SELECT 1")
+            except Exception:
+                p.putconn(raw, close=True)
+                raw = p.getconn()
+                stats["opened"] += 1
+        seen = _seen_conns()
+        if id(raw) not in seen:
+            seen.add(id(raw))
+            stats["opened"] += 1
+        stats["taken"] += 1
+        stats["ms"] += (_time.perf_counter() - t0) * 1000
+        return _PooledConn(raw, p)
+    except Exception:
+        # пул недоступен — работаем по-старому, но честно считаем
+        stats["opened"] += 1
+        raw = psycopg2.connect(DATABASE_URL, connect_timeout=15)
+        stats["ms"] += (_time.perf_counter() - t0) * 1000
+        return raw
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -245,6 +328,7 @@ def asin_label(asin, markets=None, meta=None, with_title=True):
     return out
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_asin_markets_map(all_tracked):
     if not DATABASE_URL:
         return {a: "—" for a in all_tracked}
@@ -882,6 +966,10 @@ tracked = list(tracked_kind.keys())
 tracked_by_kind = {k: [a for a, kk in tracked_kind.items() if kk == k] for k in KIND_LABEL}
 asin_market_map = dict(get_asin_markets_map(tuple(tracked)))
 _t_hist = time.time()
+# замер: сколько соединений и времени уходит на один показ страницы
+st.session_state["_db_stats"] = {"taken": 0, "opened": 0, "ms": 0.0}
+st.session_state["_page_t0"] = _time.perf_counter()
+
 full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
 ensure_dict_table()
@@ -2401,11 +2489,13 @@ if nav == "🧠 AI-анализ":
         st.markdown("<div class='muted'>Цифры считаются на нашей стороне, модель их только интерпретирует — "
                     "она ничего не пересчитывает и не выдумывает.</div>", unsafe_allow_html=True)
 
-        sub_digest, sub_reviews, sub_ro = st.tabs(
-            ["📰 Дайджест", "💬 Причины негатива", "🔇 Оценки без текста"])
+        # st.tabs исполняет все три подвкладки на каждом прогоне, включая
+        # тяжёлый разбор отзывов. Радио рисует только выбранную.
+        _ai_sub = st.radio("Раздел", ["📰 Дайджест", "💬 Причины негатива", "🔇 Оценки без текста"],
+                           horizontal=True, key="ai_sub", label_visibility="collapsed")
 
         # ---------- дайджест ----------
-        with sub_digest:
+        if _ai_sub == "📰 Дайджест":
             g1, g2, g3 = st.columns([1, 1, 2])
             dg_days = g1.selectbox("Период", [7, 14, 30], index=0, format_func=lambda d: f"{d} дн.",
                                    key="ai_days")
@@ -2452,7 +2542,7 @@ if nav == "🧠 AI-анализ":
                     st.json(st.session_state["ai_digest_agg"], expanded=False)
 
         # ---------- причины негатива ----------
-        with sub_reviews:
+        if _ai_sub == "💬 Причины негатива":
             st.markdown("**Шаг 1. Собрать тексты отзывов 1–2★**")
             st.markdown("<div class='muted'>Отдельный проход по страницам отзывов — это дополнительные запросы "
                         "к скрейперу, поэтому делается точечно, а не по всему портфелю.</div>",
@@ -2528,7 +2618,7 @@ if nav == "🧠 AI-анализ":
                 st.markdown(st.session_state["ai_causes"])
 
         # ---------- rating-only ----------
-        with sub_ro:
+        if _ai_sub == "🔇 Оценки без текста":
             st.markdown("**Прямая оценка бота: оценки без текста**")
             st.markdown("<div class='muted'>Всего оценок (с витрины) минус отзывы с текстом (со страницы отзывов). "
                         "Разница — оценки без текста, включая те, что оставляет бот возвратов. "
@@ -4482,3 +4572,14 @@ if nav == "ℹ️ Как это работает":
 """,
         unsafe_allow_html=True,
     )
+
+
+# ---- итог замера: видно в сайдбаре на каждом прогоне ----------------------
+try:
+    _st = st.session_state.get("_db_stats", {})
+    _dt = _time.perf_counter() - st.session_state.get("_page_t0", _time.perf_counter())
+    st.sidebar.caption(
+        f"⏱ страница {_dt:.2f} с · БД: соединений взято {_st.get('taken', 0)}, "
+        f"новых {_st.get('opened', 0)}, на подключения {_st.get('ms', 0):.0f} мс")
+except Exception:
+    pass
