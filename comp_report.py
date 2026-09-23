@@ -302,8 +302,11 @@ if __name__ == "__main__":
     ap.add_argument("--country", default=None, help="только одна страна, например DE")
     ap.add_argument("--days", type=int, default=10, help="за сколько дней брать последний замер")
     ap.add_argument("--dry", action="store_true", help="напечатать, не отправлять")
-    ap.add_argument("--at", default=os.environ.get("COMP_REPORT_TIMES", ""),
-                    help="слоты отправки «09:00,17:00»; пусто — слать всегда")
+    # Расписание по умолчанию, а не только при явном --at: иначе старый workflow
+    # без параметра шлёт отчёт при каждом запуске (а cron дёргается каждые 30 мин).
+    # Отключить намеренно: COMP_REPORT_TIMES="" или --at ""
+    ap.add_argument("--at", default=os.environ.get("COMP_REPORT_TIMES", "09:00,17:00"),
+                    help="слоты отправки «09:00,17:00»; пустая строка — слать всегда")
     args = ap.parse_args()
 
     # воркфлоу запускается каждые 30 минут, а отчёт нужен пару раз в день
