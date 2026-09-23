@@ -427,41 +427,73 @@ def notify_all(header="Rating Radar — прогон завершён", silent_i
     return sent, len(subs)
 
 
-def due_now(key, times="09:00,17:00", tz=None, window_min=45):
-    """Пора ли слать. Воркфлоу дёргается каждые 30 минут, а отчёты нужны
-    два раза в день — поэтому проверяем окно и запоминаем, что уже отправили.
+def due_now(key, times="09:00,17:00", tz=None, mark=True):
+    """Пора ли слать. Догоняющая логика: слот считается наступившим, как только
+    время прошло, и держится до конца суток. Окно ±45 минут не годилось —
+    GitHub задерживает cron, и слот мог быть пропущен целиком.
 
-    Возвращает (True, слот) один раз на каждый слот в сутки.
+    mark=False — только проверить, не записывая: пометку тогда ставит
+    mark_sent() после фактической отправки.
     """
-    from datetime import timedelta
     from zoneinfo import ZoneInfo
     tzinfo = ZoneInfo(tz or _cfg("RADAR_TZ", "Europe/Kyiv"))
     now = datetime.now(tzinfo)
+    slots = []
     for raw in [t.strip() for t in str(times).split(",") if t.strip()]:
         try:
             hh, mm = [int(x) for x in raw.split(":")]
         except ValueError:
             continue
-        slot = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if abs((now - slot).total_seconds()) > window_min * 60:
+        slots.append((raw, now.replace(hour=hh, minute=mm, second=0, microsecond=0)))
+
+    last = get_state(f"sent_{key}", "")
+    # от позднего слота к раннему: если проспали оба, шлём за более поздний
+    for raw, slot in sorted(slots, key=lambda x: x[1], reverse=True):
+        if now < slot:
             continue
         stamp = f"{now:%Y-%m-%d} {raw}"
-        if get_state(f"sent_{key}", "") == stamp:
+        if last == stamp:
             return False, f"{raw} уже отправлен"
-        set_state(f"sent_{key}", stamp)
+        if mark:
+            set_state(f"sent_{key}", stamp)
         return True, raw
-    return False, "не время"
+    return False, "сегодняшние слоты ещё не наступили"
 
 
-def notify_portfolios(header="Rating Radar — сбор завершён", silent_if_empty=True):
+def mark_sent(key, slot, tz=None):
+    """Пометить слот отправленным — вызывается после успешной рассылки."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo(tz or _cfg("RADAR_TZ", "Europe/Kyiv")))
+    set_state(f"sent_{key}", f"{now:%Y-%m-%d} {slot}")
+
+
+def notify_portfolios(header="Rating Radar — сбор завершён", silent_if_empty=True,
+                      respect_schedule=False, times=None):
     """Паренты — в основной бот, чайлды — в свой, если он заведён.
-    Возвращает {канал: (отправлено, подписчиков)}."""
+
+    respect_schedule=True — слать не чаще слотов из PORTFOLIO_REPORT_TIMES
+    (по умолчанию 09:00 и 17:00). Нужно для воркфлоу: он запускается каждые
+    полчаса, и без проверки отчёт уходил на каждый запуск.
+    Возвращает {канал: (отправлено, подписчиков)}.
+    """
+    slot = None
+    if respect_schedule:
+        slots = times or _cfg("PORTFOLIO_REPORT_TIMES", "09:00,17:00")
+        if slots:
+            ok_time, why = due_now("portfolio_report", slots, mark=False)
+            if not ok_time:
+                return {"пропуск": (0, 0), "причина": why}
+            slot = why
+
     out = {}
     child_ch = "radar_child" if CHILD_BOT_TOKEN else "radar"
     out["radar"] = notify_all(header=header + " · паренты", silent_if_empty=silent_if_empty,
                               kind="parent", channel="radar")
     out[child_ch] = notify_all(header=header + " · чайлды", silent_if_empty=silent_if_empty,
                                kind="child", channel=child_ch)
+    # слот помечаем после отправки: сбой Telegram не должен съедать день
+    if slot and any(v[0] for v in out.values()):
+        mark_sent("portfolio_report", slot)
     return out
 
 
