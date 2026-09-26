@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import numpy as np
 import psycopg2
 import requests
 from dotenv import load_dotenv
@@ -135,9 +136,8 @@ def collect_aggregates(days=7, rollout_date="2026-08-20"):
     j["status"] = j["rating"].apply(status)
 
     # входящий рейтинг новых оценок
-    with pd.option_context("mode.use_inf_as_na", True):
-        j["in_rating"] = ((j["rating"] * j["review_count"] - j["rating_first"] * j["review_count_first"])
-                          / j["new_ratings"].replace(0, pd.NA)).clip(1, 5)
+    j["in_rating"] = ((j["rating"] * j["review_count"] - j["rating_first"] * j["review_count_first"])
+                      / j["new_ratings"].replace(0, pd.NA)).replace([np.inf, -np.inf], np.nan).clip(1, 5)
 
     total_new = float(j["new_ratings"].sum())
     total_new_neg = float(j["new_neg"].sum())

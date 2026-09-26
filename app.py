@@ -1023,7 +1023,7 @@ def build_calc_df(df):
     for _, r in latest.iterrows():
         rating = float(r["rating"]) if pd.notnull(r["rating"]) else None
         cnt = int(r["review_count"]) if pd.notnull(r["review_count"]) else None
-        source = str(r["source"]) if pd.notnull(r["source"]) else "none"
+        source = str(r["source"]) if pd.notnull(r["source"]) and str(r["source"]) != "none" else "—"
         h = parse_hist(r["histogram_json"])
         bad_pct = (h.get("1", 0) + h.get("2", 0)) if h else 0
         five_pct = h.get("5", 0) if h else None
@@ -1033,7 +1033,7 @@ def build_calc_df(df):
             margin = max(0, int((cnt * (rating - 4.0)) / 3.0))
 
         # Логика Amazon: ≥4.5 зелёный · 4.3–4.4 жёлтый · ≤4.2 красный
-        if source == "none" or rating is None:
+        if source == "—" or rating is None:
             status = "Нет данных"
         elif rating <= 4.24:
             status = "Риск"
@@ -1284,7 +1284,8 @@ def render_portfolio(filtered_df, kind):
                 ОК=("Статус", lambda x: int(x.str.endswith("ОК").sum())),
                 Негатив=("bad_pct", "mean")).reset_index().rename(columns={"_group": group_field})
             gsum = gsum.sort_values("Рейтинг")
-            st.dataframe(gsum.style.format({"Рейтинг": "{:.2f}", "Отзывов": "{:,.0f}", "Негатив": "{:.0f}%"}),
+            st.dataframe(gsum.style.format({"Рейтинг": "{:.2f}", "Отзывов": "{:,.0f}", "Негатив": "{:.0f}%"},
+                                           na_rep="—"),
                          width="stretch", hide_index=True, height=min(400, 40 + 35 * len(gsum)))
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1377,7 +1378,7 @@ def render_portfolio(filtered_df, kind):
                             f"<span class='card-asin'><a href='{item['ASIN']}' target='_blank'>{item['raw_asin']}</a></span>"
                             f"&nbsp;&nbsp;{badge(item['Статус'])}", unsafe_allow_html=True)
                         ic, tc = st.columns([1, 2])
-                        if item["Фото"]:
+                        if pd.notnull(item["Фото"]):
                             try:
                                 ic.image(item["Фото"])
                             except Exception:
@@ -1390,9 +1391,11 @@ def render_portfolio(filtered_df, kind):
                         d_c = f" (+{int(item['Δ Отзывы'])})" if pd.notnull(item["Δ Отзывы"]) and item["Δ Отзывы"] > 0 else ""
                         tc.markdown(f"**{r_val}★**{d_r} · {cnt} отз.{d_c}")
                         tc.markdown(f"Страна `{item['Источник']}` · BSR `{item['BSR']}`")
-                        if item.get("Категория", "—") != "—":
-                            tc.markdown(f"<span class='muted'>{item['Категория']}"
-                                        f"{' · ' + item['Parent'] if item['Parent'] else ''}</span>", unsafe_allow_html=True)
+                        _cat = item.get("Категория")
+                        _par = item.get("Parent")
+                        if pd.notnull(_cat) and str(_cat).strip() not in ("", "—"):
+                            _par_txt = f" · {_par}" if pd.notnull(_par) and str(_par).strip() else ""
+                            tc.markdown(f"<span class='muted'>{_cat}{_par_txt}</span>", unsafe_allow_html=True)
                         tc.markdown(f"Негатив 1–2★: **{item['1–2★ %']}** {item['Тренд']}")
                         tc.markdown(f"Запас до 4.0: **{item['Запас (до 4.0)']}**")
                         st.caption(f"Обновлено: {item['Время сбора']}")
@@ -3487,9 +3490,11 @@ if nav == "🤖 Бот возвратов":
             show["after"] = show["after"].map({True: "после", False: "до"})
             show.columns = ["ASIN", "Страна", "Период", "Было ★", "Стало ★", "Δ★", "Было оценок", "Стало оценок",
                             "Новых", "Входящий ★", "Новых 1–2★", "Бот"]
+            show["Страна"] = show["Страна"].replace("none", "—")
             st.dataframe(show.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
                                             "Входящий ★": "{:.2f}", "Было оценок": "{:.0f}", "Стало оценок": "{:.0f}",
-                                            "Новых": "{:.0f}", "Новых 1–2★": "{:.0f}"}),
+                                            "Новых": "{:.0f}", "Новых 1–2★": "{:.0f}"},
+                                           na_rep="—"),
                          width="stretch", hide_index=True, height=min(420, 40 + 35 * len(show)))
             st.download_button("⬇ CSV аномалий", show.to_csv(index=False).encode("utf-8-sig"), "bot_anomalies.csv", "text/csv")
 
@@ -3611,7 +3616,7 @@ if nav == "📈 Прогноз":
                 st.dataframe(
                     sm.style.background_gradient(subset=["Δ"], cmap="RdYlGn", vmin=-0.3, vmax=0.3)
                       .format({"Сейчас": "{:.2f}", f"Через {horizon} дн.": "{:.2f}",
-                               "Δ": "{:+.2f}", "★/мес": "{:+.3f}"}),
+                               "Δ": "{:+.2f}", "★/мес": "{:+.3f}"}, na_rep="—"),
                     width="stretch", hide_index=True,
                     height=min(420, 40 + 35 * len(sm)))
                 st.caption("Δ — изменение рейтинга за горизонт по линейному тренду. "
@@ -3751,7 +3756,8 @@ if nav == "📈 Прогноз":
             fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
             style_fig(fig, 340, barmode="group", yaxis=dict(range=[3.0, 5.05]), legend=dict(orientation="h", y=-0.3))
             st.plotly_chart(fig, width="stretch")
-            st.dataframe(pf.style.format({"Сейчас": "{:.2f}", "Прогноз +30": "{:.2f}", "Δ": "{:+.2f}", "Тренд ★/мес": "{:+.3f}"}),
+            st.dataframe(pf.style.format({"Сейчас": "{:.2f}", "Прогноз +30": "{:.2f}", "Δ": "{:+.2f}", "Тренд ★/мес": "{:+.3f}"},
+                                           na_rep="—"),
                          width="stretch", hide_index=True)
 
 def render_asin_manager(kind):
