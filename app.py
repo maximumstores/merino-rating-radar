@@ -1012,11 +1012,26 @@ def with_market(asin_list):
     return out
 
 # ==================== РАСЧЁТ ТЕКУЩИХ МЕТРИК ====================
+# NOTE: старый путь (build_calc_df) делает groupby("asin").last(), а last()
+# в pandas берёт последнее НЕ-NULL значение КАЖДОЙ колонки по отдельности —
+# т.е. витрина "протягивает" последнее удачное значение сквозь битые замеры.
+# Повторяем это в SQL через FIRST_VALUE с сортировкой (col IS NULL):
+# не-null строки идут первыми, среди них — самая свежая.
+# prev_* — буквально предпоследняя строка (nth(-2) null'ы не пропускает),
+# поэтому там обычный LAG.
 CALC_LATEST_SQL = """
 SELECT * FROM (
     SELECT DISTINCT ON (asin)
-        asin, source, rating, review_count, histogram_json, image_url,
-        bsr, note, created_at, ctid AS _ctid,
+        asin,
+        FIRST_VALUE(source) OVER (PARTITION BY asin ORDER BY (source IS NULL), created_at DESC, ctid DESC) AS source,
+        FIRST_VALUE(rating) OVER (PARTITION BY asin ORDER BY (rating IS NULL), created_at DESC, ctid DESC) AS rating,
+        FIRST_VALUE(review_count) OVER (PARTITION BY asin ORDER BY (review_count IS NULL), created_at DESC, ctid DESC) AS review_count,
+        FIRST_VALUE(histogram_json) OVER (PARTITION BY asin ORDER BY (histogram_json IS NULL), created_at DESC, ctid DESC) AS histogram_json,
+        FIRST_VALUE(image_url) OVER (PARTITION BY asin ORDER BY (image_url IS NULL), created_at DESC, ctid DESC) AS image_url,
+        FIRST_VALUE(bsr) OVER (PARTITION BY asin ORDER BY (bsr IS NULL), created_at DESC, ctid DESC) AS bsr,
+        FIRST_VALUE(note) OVER (PARTITION BY asin ORDER BY (note IS NULL), created_at DESC, ctid DESC) AS note,
+        MAX(created_at) OVER (PARTITION BY asin) AS created_at,
+        FIRST_VALUE(ctid) OVER (PARTITION BY asin ORDER BY created_at DESC, ctid DESC) AS _ctid,
         LAG(rating) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_rating,
         LAG(review_count) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_reviews
     FROM asin_metrics
@@ -1032,9 +1047,9 @@ def get_calc_latest_sql(days=120):
     """Агрегация в Postgres: последний + предыдущий замер по каждому ASIN.
 
     Один ряд на ASIN вместо сотен тысяч сырых строк. Семантика — как старый
-    путь (groupby.last / nth(-2) в build_calc_df); тай-брейкер при равных
-    created_at — ctid (в pandas порядок при тай-брейке неустойчив, колонки id
-    в проде нет).
+    путь: groupby.last() берёт последнее НЕ-NULL значение каждой колонки
+    (повторено через FIRST_VALUE), prev — буквально предпоследняя строка
+    (nth(-2), повторён через LAG). Тай-брейкер — ctid (колонки id в проде нет).
     Сверка путей — verify_calc_sql."""
     if not DATABASE_URL:
         return pd.DataFrame()
@@ -1343,18 +1358,24 @@ with fc1:
     st.session_state["_t_mkmap_done"] = _time.perf_counter()
     sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN",
                                format_func=lambda a: asin_label(a, _mk_all, with_title=False))
+    st.session_state["_t_w_asin"] = _time.perf_counter()
 with fc2:
     sel_cats = st.multiselect("Категория", options=all_cats, default=[], placeholder="Все")
+    st.session_state["_t_w_cats"] = _time.perf_counter()
 with fc3:
     sel_parents = st.multiselect("Parent", options=all_parents, default=[], placeholder="Все")
+    st.session_state["_t_w_parents"] = _time.perf_counter()
 with fc4:
     sel_sources = st.multiselect("Страна", options=all_sources, default=[], placeholder="Все")
+    st.session_state["_t_w_sources"] = _time.perf_counter()
 with fc5:
     sel_status = st.multiselect("Статус", options=["🟢 ОК", "🟡 Внимание", "🔴 Риск", "⚪ Нет данных"], default=[],
                                 placeholder="Все")
+    st.session_state["_t_w_status"] = _time.perf_counter()
 with fc6:
     st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
     only_us = st.toggle("🇺🇸 Только США", value=False)
+    st.session_state["_t_w_toggle"] = _time.perf_counter()
 
 fc7, fc8, fc9 = st.columns([1.6, 1.2, 3])
 with fc7:
@@ -4867,14 +4888,23 @@ try:
     _t_calc = st.session_state.get("_t_calc_done", _t_hist)
     _t_kpi = st.session_state.get("_t_kpi_done", _t_calc)
     _t_mkmap = st.session_state.get("_t_mkmap_done", _t_kpi)
-    _t_widgets = st.session_state.get("_t_widgets_done", _t_mkmap)
+    _t_w_asin = st.session_state.get("_t_w_asin", _t_mkmap)
+    _t_w_cats = st.session_state.get("_t_w_cats", _t_w_asin)
+    _t_w_parents = st.session_state.get("_t_w_parents", _t_w_cats)
+    _t_w_sources = st.session_state.get("_t_w_sources", _t_w_parents)
+    _t_w_status = st.session_state.get("_t_w_status", _t_w_sources)
+    _t_w_toggle = st.session_state.get("_t_w_toggle", _t_w_status)
+    _t_widgets = st.session_state.get("_t_widgets_done", _t_w_toggle)
     _t_pre = st.session_state.get("_t_pre_tab", _t_widgets)
     _now = _time.perf_counter()
     _dt = _now - _t0
     st.sidebar.caption(
         f"⏱ страница {_dt:.2f} с (история {_t_hist - _t0:.1f} · calc {_t_calc - _t_hist:.1f} · "
         f"kpi {_t_kpi - _t_calc:.1f} · mkmap {_t_mkmap - _t_kpi:.1f} · "
-        f"виджеты {_t_widgets - _t_mkmap:.1f} · проч {_t_pre - _t_widgets:.1f} · "
+        f"w_asin {_t_w_asin - _t_mkmap:.1f} · w_cat {_t_w_cats - _t_w_asin:.1f} · "
+        f"w_par {_t_w_parents - _t_w_cats:.1f} · w_src {_t_w_sources - _t_w_parents:.1f} · "
+        f"w_st {_t_w_status - _t_w_sources:.1f} · w_tg {_t_w_toggle - _t_w_status:.1f} · "
+        f"w_grp {_t_widgets - _t_w_toggle:.1f} · проч {_t_pre - _t_widgets:.1f} · "
         f"вкладка {_now - _t_pre:.1f}) · "
         f"БД: соединений взято {_st.get('taken', 0)}, "
         f"новых {_st.get('opened', 0)}, на подключения {_st.get('ms', 0):.0f} мс")
