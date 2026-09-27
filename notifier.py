@@ -11,6 +11,7 @@
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -209,8 +210,12 @@ def tg_call(method, channel="radar", **payload):
     token = channel_token(channel)
     if not token:
         return {"ok": False, "description": f"Токен для канала «{channel}» не задан"}
+    # Интерактивные вызовы (страница ждёт ответа) — короткий таймаут:
+    # зависший Telegram не должен держать рендер. Отправка — 30 с.
+    timeout = 5 if method in ("getMe", "getUpdates", "getWebhookInfo",
+                              "deleteWebhook") else 30
     try:
-        r = requests.post(API.format(token=token, method=method), json=payload, timeout=30)
+        r = requests.post(API.format(token=token, method=method), json=payload, timeout=timeout)
         return r.json()
     except Exception as e:
         return {"ok": False, "description": str(e)}
@@ -497,24 +502,27 @@ def notify_portfolios(header="Rating Radar — сбор завершён", silen
     return out
 
 
-_USERNAME_CACHE = {}
+_USERNAME_CACHE = {}  # channel -> (username|None, err|None, ts): успех живёт час, неуспех — минуту
 
 
 def bot_username(channel="radar", with_error=False):
-    """Юзернейм бота через getMe. Кэшируем только успех — иначе разовый сбой залипал бы."""
-    if _USERNAME_CACHE.get(channel):
-        return (_USERNAME_CACHE[channel], None) if with_error else _USERNAME_CACHE[channel]
+    """Юзернейм бота через getMe. Успех кэшируем на час; неуспех — на минуту,
+    чтобы недоступный Telegram не дёргался на каждом клике, но и не залипал."""
+    now = time.time()
+    hit = _USERNAME_CACHE.get(channel)
+    if hit is not None:
+        name, err, ts = hit
+        if now - ts < (3600 if name else 60):
+            return (name, err) if with_error else name
     token = channel_token(channel)
     if not token:
         err = f"токен канала «{channel}» не задан"
         return (None, err) if with_error else None
     me = tg_call("getMe", channel=channel)
     name = (me.get("result") or {}).get("username") if me.get("ok") else None
-    if name:
-        _USERNAME_CACHE[channel] = name
-        return (name, None) if with_error else name
-    err = me.get("description") or str(me)[:200]
-    return (None, err) if with_error else None
+    err = None if name else (me.get("description") or str(me)[:200])
+    _USERNAME_CACHE[channel] = (name, err, now)
+    return (name, err) if with_error else name
 
 
 def bot_link(channel="radar"):

@@ -954,17 +954,9 @@ def get_tracked_with_kind():
 
 
 KIND_LABEL = {"child": "Чайлд", "parent": "Парент", "competitor": "Конкурент"}
-# разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера.
-# Дроссель: опрашиваем Telegram не чаще раза в 5 минут, а не на каждый ререн
-# (переключение вкладок). Логика не меняется — команды всё так же разбираются.
-if NOTIFIER_OK and notifier.BOT_TOKEN:
-    _tg_now = time.time()
-    if _tg_now - st.session_state.get("_tg_poll_ts", 0) >= 300:
-        st.session_state["_tg_poll_ts"] = _tg_now
-        try:
-            notifier.process_all_channels()
-        except Exception:
-            pass
+# Команды ботов опрашивает bot.yml каждые 10 минут — из пути отрисовки убрано,
+# чтобы зависший Telegram не держал страницу. Ручной опрос — кнопка
+# «Проверить команды ботов» в разделе «Сбор и управление» → Telegram.
 
 tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
@@ -4399,6 +4391,17 @@ if nav == "⚙️ Сбор и управление":
                     st.success(" · ".join(f"{k}: {v[0]} из {v[1]}" for k, v in res.items()))
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
+            if b2.button("📥 Проверить команды ботов", key="tg_poll_now",
+                         help="Разобрать /start и другие команды вручную. "
+                              "Автоопрос — bot.yml каждые 10 минут."):
+                with st.spinner("Опрашиваю Telegram…"):
+                    try:
+                        res = notifier.process_all_channels()
+                        total = sum(res.values())
+                        st.success(f"Готово: команд {total} — " +
+                                   ", ".join(f"{k}: {v}" for k, v in res.items()))
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
             with st.expander("🩺 Диагностика бота", expanded=False):
                 if st.button("Проверить связь", key="tg_diag"):
                     d = notifier.diagnose()
