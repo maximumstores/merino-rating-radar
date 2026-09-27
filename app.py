@@ -969,6 +969,7 @@ st.session_state["_page_t0"] = _time.perf_counter()
 
 full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
+st.session_state["_t_hist_done"] = _time.perf_counter()
 if not st.session_state.get("_schema_ok"):
     ensure_dict_table()
     try:
@@ -1125,6 +1126,7 @@ calc_df = build_calc_df_cached(
     int(st.session_state.get("period_days_sel", 120)),
     full_df,
 ) if not full_df.empty else pd.DataFrame()
+st.session_state["_t_calc_done"] = _time.perf_counter()
 if not calc_df.empty:
     for c in ["Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "margin"]:
         calc_df[c] = pd.to_numeric(calc_df[c], errors="coerce")
@@ -1448,6 +1450,7 @@ def render_portfolio(filtered_df, kind):
 
 
 
+st.session_state["_t_pre_tab"] = _time.perf_counter()
 if nav == "📋 Портфель (Чайлд)":
     render_portfolio(filtered_df, "child")
 
@@ -4678,9 +4681,16 @@ if nav == "ℹ️ Как это работает":
 # ---- итог замера: видно в сайдбаре на каждом прогоне ----------------------
 try:
     _st = st.session_state.get("_db_stats", {})
-    _dt = _time.perf_counter() - st.session_state.get("_page_t0", _time.perf_counter())
+    _t0 = st.session_state.get("_page_t0", _time.perf_counter())
+    _t_hist = st.session_state.get("_t_hist_done", _t0)
+    _t_calc = st.session_state.get("_t_calc_done", _t_hist)
+    _t_pre = st.session_state.get("_t_pre_tab", _t_calc)
+    _now = _time.perf_counter()
+    _dt = _now - _t0
     st.sidebar.caption(
-        f"⏱ страница {_dt:.2f} с · БД: соединений взято {_st.get('taken', 0)}, "
+        f"⏱ страница {_dt:.2f} с (история {_t_hist - _t0:.1f} · calc {_t_calc - _t_hist:.1f} · "
+        f"фильтры {_t_pre - _t_calc:.1f} · вкладка {_now - _t_pre:.1f}) · "
+        f"БД: соединений взято {_st.get('taken', 0)}, "
         f"новых {_st.get('opened', 0)}, на подключения {_st.get('ms', 0):.0f} мс")
 except Exception:
     pass
