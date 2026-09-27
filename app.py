@@ -1227,29 +1227,7 @@ with fc9:
     GROUP_DF_COL = {"category": "Категория", "subcategory": "Подкатегория", "product_type": "Вид",
                     "parent_asin": "Parent", "brand": "Бренд", "market": "Источник"}.get(group_col)
 
-if not calc_df.empty:
-    src_ok = ["US"] if only_us else (sel_sources if sel_sources else all_sources)
-    filtered_df = calc_df[
-        calc_df["raw_asin"].isin(sel_asins if sel_asins else all_asins)
-        & (calc_df["Категория"].astype(str).isin(sel_cats) if sel_cats else True)
-        & (calc_df["Parent"].isin(sel_parents) if sel_parents else True)
-        & calc_df["Источник"].isin(src_ok)
-        & (calc_df["Статус"].isin(sel_status) if sel_status else True)
-    ].copy()
-    if GROUP_DF_COL:
-        filtered_df["_group"] = filtered_df[GROUP_DF_COL].replace("", "—")
-    filtered_df["Время сбора"] = filtered_df["raw_created_at"].apply(
-        lambda dt: pd.to_datetime(dt).tz_convert(ZoneInfo(selected_tz)).strftime("%d.%m.%Y %H:%M")
-        if pd.notnull(dt) else "—")
-    f_asins = filtered_df["raw_asin"].tolist()
-
-    hist_df = full_df[full_df["asin"].isin(f_asins)].copy()
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
-    hist_df = hist_df[hist_df["created_at"] >= cutoff]
-    hist_df["created_local"] = hist_df["created_at"].dt.tz_convert(ZoneInfo(selected_tz))
-else:
-    filtered_df = pd.DataFrame()
-    hist_df = pd.DataFrame()
+# Ленивая сборка filtered_df/hist_df перенесена ниже — после выбора раздела nav.
 
 # ==================== ВКЛАДКИ ====================
 # Навигация вместо st.tabs: Streamlit рисует ВСЕ вкладки при каждом клике,
@@ -1267,6 +1245,50 @@ else:
     nav = st.radio("Раздел", SECTIONS, horizontal=True,
                    label_visibility="collapsed", key="nav_section")
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+# ==================== ЛЕНИВАЯ СБОРКА ТАБЛИЦ ====================
+# filtered_df/hist_df строим только для разделов, которым они нужны.
+# "Время сбора" (построчный apply) — только для Портфеля, hist_df — только
+# для Динамики и Аналитики. Разделы "Сбор и управление" и "Как это работает"
+# больше не тратят время на фильтрацию при каждом переключении вкладок.
+_NEEDS_TABLE = {"📋 Портфель (Чайлд)", "📋 Портфель (Парент)",
+                "🥊 Конкуренты", "🧠 AI-анализ",
+                "📅 Динамика по дням (Чайлд)",
+                "📅 Динамика по дням (Парент)", "📊 Аналитика",
+                "🤖 Бот возвратов", "📈 Прогноз"}
+_NEEDS_HIST = {"📅 Динамика по дням (Чайлд)",
+               "📅 Динамика по дням (Парент)", "📊 Аналитика"}
+_NEEDS_COLLECTED = {"📋 Портфель (Чайлд)", "📋 Портфель (Парент)"}
+
+if nav in _NEEDS_TABLE and not calc_df.empty:
+    src_ok = ["US"] if only_us else (sel_sources if sel_sources else all_sources)
+    filtered_df = calc_df[
+        calc_df["raw_asin"].isin(sel_asins if sel_asins else all_asins)
+        & (calc_df["Категория"].astype(str).isin(sel_cats) if sel_cats else True)
+        & (calc_df["Parent"].isin(sel_parents) if sel_parents else True)
+        & calc_df["Источник"].isin(src_ok)
+        & (calc_df["Статус"].isin(sel_status) if sel_status else True)
+    ].copy()
+    if GROUP_DF_COL:
+        filtered_df["_group"] = filtered_df[GROUP_DF_COL].replace("", "—")
+    if nav in _NEEDS_COLLECTED:
+        filtered_df["Время сбора"] = filtered_df["raw_created_at"].apply(
+            lambda dt: pd.to_datetime(dt).tz_convert(ZoneInfo(selected_tz)).strftime(
+                "%d.%m.%Y %H:%M")
+            if pd.notnull(dt) else "—")
+    f_asins = filtered_df["raw_asin"].tolist()
+    if nav in _NEEDS_HIST:
+        hist_df = full_df[full_df["asin"].isin(f_asins)].copy()
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
+        hist_df = hist_df[hist_df["created_at"] >= cutoff]
+        hist_df["created_local"] = hist_df["created_at"].dt.tz_convert(
+            ZoneInfo(selected_tz))
+    else:
+        hist_df = pd.DataFrame()
+else:
+    filtered_df = pd.DataFrame()
+    hist_df = pd.DataFrame()
+    f_asins = []
 
 # ---------- ПОРТФЕЛЬ ----------
 @st.fragment
