@@ -954,12 +954,17 @@ def get_tracked_with_kind():
 
 
 KIND_LABEL = {"child": "Чайлд", "parent": "Парент", "competitor": "Конкурент"}
-# разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера
+# разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера.
+# Дроссель: опрашиваем Telegram не чаще раза в 5 минут, а не на каждый ререн
+# (переключение вкладок). Логика не меняется — команды всё так же разбираются.
 if NOTIFIER_OK and notifier.BOT_TOKEN:
-    try:
-        notifier.process_all_channels()
-    except Exception:
-        pass
+    _tg_now = time.time()
+    if _tg_now - st.session_state.get("_tg_poll_ts", 0) >= 300:
+        st.session_state["_tg_poll_ts"] = _tg_now
+        try:
+            notifier.process_all_channels()
+        except Exception:
+            pass
 
 tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
@@ -972,13 +977,16 @@ st.session_state["_page_t0"] = _time.perf_counter()
 
 full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
-ensure_dict_table()
-try:
-    ensure_schema()              # схема + индексы (без них выборки медленные)
-    ensure_reviews_schema()      # таблицы отзывов — до первого сбора
-    ensure_competitor_schema()   # comp_group / title в справочнике
-except Exception:
-    pass
+if not st.session_state.get("_schema_ok"):
+    ensure_dict_table()
+    try:
+        ensure_schema()              # схема + индексы (без них выборки медленные)
+        ensure_reviews_schema()      # таблицы отзывов — до первого сбора
+        ensure_competitor_schema()   # comp_group / title в справочнике
+    except Exception:
+        pass
+    else:
+        st.session_state["_schema_ok"] = True
 dict_df = get_dictionary()
 dict_map = dict_df.set_index("asin").to_dict("index") if not dict_df.empty else {}
 # страна из справочника имеет приоритет над каскадом
