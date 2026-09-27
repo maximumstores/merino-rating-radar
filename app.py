@@ -1226,10 +1226,15 @@ all_cats = _uniq_str(calc_df, "Категория")
 all_parents = _uniq_str(calc_df, "Parent")
 
 @st.fragment
-def _asin_filter_frag(_all_asins):
+def _asin_filter_frag():
     """ASIN-мультиселект (1207 опций) во фрагменте: пересоздаётся только при
     изменении самого фильтра, а не при каждом переключении вкладок (там было
-    +23 с на рендер). Выбор хранится в session_state["sel_asins"]."""
+    +23 с на рендер). Выбор хранится в session_state["sel_asins"].
+    Данные берутся из session_state["_frag_all_asins"] — аргументы не
+    используются, чтобы фрагмент не перезапускался на каждый рендер."""
+    _all_asins = st.session_state.get("_frag_all_asins", [])
+    if not _all_asins:
+        return
     _mk_all = get_asin_markets_map(_all_asins)
     _asin_labels = {a: asin_label(a, _mk_all, with_title=False) for a in _all_asins}
     _label_to_asin = {lbl: a for a, lbl in _asin_labels.items()}
@@ -1246,7 +1251,10 @@ def _asin_filter_frag(_all_asins):
 
 fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
-    _asin_filter_frag(all_asins)
+    # Данные для фрагмента: обновляем только если список ASIN изменился
+    if st.session_state.get("_frag_all_asins") != all_asins:
+        st.session_state["_frag_all_asins"] = all_asins
+    _asin_filter_frag()
     sel_asins = st.session_state.get("sel_asins", [])
     st.session_state["_t_w_asin"] = _time.perf_counter()
 with fc2:
