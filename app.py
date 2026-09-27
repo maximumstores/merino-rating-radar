@@ -1016,7 +1016,7 @@ CALC_LATEST_SQL = """
 SELECT * FROM (
     SELECT DISTINCT ON (asin)
         asin, source, rating, review_count, histogram_json, image_url,
-        bsr, note, created_at,
+        bsr, note, created_at, ctid AS _ctid,
         LAG(rating) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_rating,
         LAG(review_count) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_reviews
     FROM asin_metrics
@@ -1024,7 +1024,7 @@ SELECT * FROM (
       AND created_at >= NOW() - (%s || ' days')::interval
     ORDER BY asin, created_at DESC, ctid DESC
 ) t
-ORDER BY created_at DESC, ctid DESC;
+ORDER BY created_at DESC, _ctid DESC;
 """
 
 
@@ -1321,6 +1321,7 @@ if not calc_df.empty:
         f"{badge('Риск')} ≤ 4.2★ &nbsp; {badge('Нет данных')} данные не собраны</div>",
         unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
+st.session_state["_t_kpi_done"] = _time.perf_counter()
 
 # ==================== ГЛОБАЛЬНЫЕ ФИЛЬТРЫ ====================
 all_asins = calc_df["raw_asin"].tolist() if not calc_df.empty else []
@@ -1339,6 +1340,7 @@ all_parents = _uniq_str(calc_df, "Parent")
 fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
     _mk_all = get_asin_markets_map(all_asins)
+    st.session_state["_t_mkmap_done"] = _time.perf_counter()
     sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN",
                                format_func=lambda a: asin_label(a, _mk_all, with_title=False))
 with fc2:
@@ -1369,6 +1371,7 @@ with fc9:
     group_col = {v: k for k, v in GROUP_LABELS.items()}.get(group_field)
     GROUP_DF_COL = {"category": "Категория", "subcategory": "Подкатегория", "product_type": "Вид",
                     "parent_asin": "Parent", "brand": "Бренд", "market": "Источник"}.get(group_col)
+st.session_state["_t_widgets_done"] = _time.perf_counter()
 
 # Ленивая сборка filtered_df/hist_df перенесена ниже — после выбора раздела nav.
 
@@ -4862,12 +4865,17 @@ try:
     _t0 = st.session_state.get("_page_t0", _time.perf_counter())
     _t_hist = st.session_state.get("_t_hist_done", _t0)
     _t_calc = st.session_state.get("_t_calc_done", _t_hist)
-    _t_pre = st.session_state.get("_t_pre_tab", _t_calc)
+    _t_kpi = st.session_state.get("_t_kpi_done", _t_calc)
+    _t_mkmap = st.session_state.get("_t_mkmap_done", _t_kpi)
+    _t_widgets = st.session_state.get("_t_widgets_done", _t_mkmap)
+    _t_pre = st.session_state.get("_t_pre_tab", _t_widgets)
     _now = _time.perf_counter()
     _dt = _now - _t0
     st.sidebar.caption(
         f"⏱ страница {_dt:.2f} с (история {_t_hist - _t0:.1f} · calc {_t_calc - _t_hist:.1f} · "
-        f"фильтры {_t_pre - _t_calc:.1f} · вкладка {_now - _t_pre:.1f}) · "
+        f"kpi {_t_kpi - _t_calc:.1f} · mkmap {_t_mkmap - _t_kpi:.1f} · "
+        f"виджеты {_t_widgets - _t_mkmap:.1f} · проч {_t_pre - _t_widgets:.1f} · "
+        f"вкладка {_now - _t_pre:.1f}) · "
         f"БД: соединений взято {_st.get('taken', 0)}, "
         f"новых {_st.get('opened', 0)}, на подключения {_st.get('ms', 0):.0f} мс")
 except Exception:
