@@ -328,8 +328,12 @@ def asin_label(asin, markets=None, meta=None, with_title=True):
     return out
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_asin_markets_map(all_tracked):
+    """Карта ASIN → страна последнего сбора (для подписей в фильтре).
+    TTL 3600: запрос идёт по всей таблице (DISTINCT ON) и стоил ~20 с на
+    каждый чих при ttl=180 — он висел прямо в пути рендера. Данные меняются
+    только сбором, а после сбора кэш сбрасывается через st.cache_data.clear()."""
     if not DATABASE_URL:
         return {a: "—" for a in all_tracked}
     try:
@@ -1013,14 +1017,14 @@ SELECT * FROM (
     SELECT DISTINCT ON (asin)
         asin, source, rating, review_count, histogram_json, image_url,
         bsr, note, created_at,
-        LAG(rating) OVER (PARTITION BY asin ORDER BY created_at, id) AS prev_rating,
-        LAG(review_count) OVER (PARTITION BY asin ORDER BY created_at, id) AS prev_reviews
+        LAG(rating) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_rating,
+        LAG(review_count) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_reviews
     FROM asin_metrics
     WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
       AND created_at >= NOW() - (%s || ' days')::interval
-    ORDER BY asin, created_at DESC, id DESC
+    ORDER BY asin, created_at DESC, ctid DESC
 ) t
-ORDER BY created_at DESC, id DESC;
+ORDER BY created_at DESC, ctid DESC;
 """
 
 
@@ -1029,7 +1033,8 @@ def get_calc_latest_sql(days=120):
 
     Один ряд на ASIN вместо сотен тысяч сырых строк. Семантика — как старый
     путь (groupby.last / nth(-2) в build_calc_df); тай-брейкер при равных
-    created_at — id DESC (в pandas порядок при тай-брейке неустойчив).
+    created_at — ctid (в pandas порядок при тай-брейке неустойчив, колонки id
+    в проде нет).
     Сверка путей — verify_calc_sql."""
     if not DATABASE_URL:
         return pd.DataFrame()
