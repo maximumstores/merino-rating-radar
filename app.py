@@ -1356,8 +1356,13 @@ fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
 with fc1:
     _mk_all = get_asin_markets_map(all_asins)
     st.session_state["_t_mkmap_done"] = _time.perf_counter()
-    sel_asins = st.multiselect("Фильтр ASIN", options=all_asins, default=[], placeholder="Все ASIN",
-                               format_func=lambda a: asin_label(a, _mk_all, with_title=False))
+    # Подписи предрасчитаны: format_func на 1207 опциях давал +20 с на создание
+    # виджета при каждом рендере. UX тот же, выбор маппится обратно в ASIN.
+    _asin_labels = {a: asin_label(a, _mk_all, with_title=False) for a in all_asins}
+    _label_to_asin = {lbl: a for a, lbl in _asin_labels.items()}
+    _sel_labels = st.multiselect("Фильтр ASIN", options=list(_asin_labels.values()),
+                                 default=[], placeholder="Все ASIN")
+    sel_asins = [_label_to_asin[lbl] for lbl in _sel_labels]
     st.session_state["_t_w_asin"] = _time.perf_counter()
 with fc2:
     sel_cats = st.multiselect("Категория", options=all_cats, default=[], placeholder="Все")
