@@ -1225,17 +1225,29 @@ def _uniq_str(df, col):
 all_cats = _uniq_str(calc_df, "Категория")
 all_parents = _uniq_str(calc_df, "Parent")
 
-fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
-with fc1:
-    _mk_all = get_asin_markets_map(all_asins)
-    st.session_state["_t_mkmap_done"] = _time.perf_counter()
-    # Подписи предрасчитаны: format_func на 1207 опциях давал +20 с на создание
-    # виджета при каждом рендере. UX тот же, выбор маппится обратно в ASIN.
-    _asin_labels = {a: asin_label(a, _mk_all, with_title=False) for a in all_asins}
+@st.fragment
+def _asin_filter_frag(_all_asins):
+    """ASIN-мультиселект (1207 опций) во фрагменте: пересоздаётся только при
+    изменении самого фильтра, а не при каждом переключении вкладок (там было
+    +23 с на рендер). Выбор хранится в session_state["sel_asins"]."""
+    _mk_all = get_asin_markets_map(_all_asins)
+    _asin_labels = {a: asin_label(a, _mk_all, with_title=False) for a in _all_asins}
     _label_to_asin = {lbl: a for a, lbl in _asin_labels.items()}
     _sel_labels = st.multiselect("Фильтр ASIN", options=list(_asin_labels.values()),
-                                 default=[], placeholder="Все ASIN")
-    sel_asins = [_label_to_asin[lbl] for lbl in _sel_labels]
+                                 default=[], placeholder="Все ASIN",
+                                 key="_asin_filter_labels")
+    _new_asins = [_label_to_asin[lbl] for lbl in _sel_labels if lbl in _label_to_asin]
+    _old_asins = st.session_state.get("sel_asins", [])
+    st.session_state["sel_asins"] = _new_asins
+    # Значение изменилось — нужен полный ререндер, чтобы вкладки применили фильтр
+    if "_asin_filter_init" in st.session_state and _new_asins != _old_asins:
+        st.rerun()
+    st.session_state["_asin_filter_init"] = True
+
+fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.8, 1.5, 1.5, 1.3, 1.4, 1.1])
+with fc1:
+    _asin_filter_frag(all_asins)
+    sel_asins = st.session_state.get("sel_asins", [])
     st.session_state["_t_w_asin"] = _time.perf_counter()
 with fc2:
     sel_cats = st.multiselect("Категория", options=all_cats, default=[], placeholder="Все")
