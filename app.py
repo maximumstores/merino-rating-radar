@@ -3811,17 +3811,24 @@ if nav == "📈 Прогноз":
         # --- сводный прогноз по портфелю ---
         st.markdown("---")
         st.markdown("**Прогноз по всему портфелю (+30 дн.)** — кто пробьёт 4.2 вниз")
-        rows = []
-        for a, grp in full_df[full_df["asin"].isin(f_asins)].groupby("asin"):
-            grp = grp.sort_values("created_at").dropna(subset=["rating"])
-            if len(grp) < 2:
-                continue
-            xs = (grp["created_at"].astype(np.int64) // 10**9).values.reshape(-1, 1)
-            m = LinearRegression().fit(xs, grp["rating"].values)
-            cur = float(grp["rating"].iloc[-1])
-            p30 = float(np.clip(m.predict([[xs[-1][0] + 30 * 86400]])[0], 1, 5))
-            rows.append({"ASIN": a, "Сейчас": cur, "Прогноз +30": p30, "Δ": p30 - cur,
-                         "Тренд ★/мес": m.coef_[0] * 86400 * 30, "Замеров": len(grp)})
+        # Мемоизация: ~1200 LinearRegression.fit на каждый рендер — главный тормоз
+        # вкладки. Логика не меняется: пересчёт только когда сменились данные/фильтр.
+        _pf_key = (len(full_df), str(full_df["created_at"].max()), tuple(sorted(f_asins)))
+        if st.session_state.get("_pf_key") != _pf_key:
+            _rows = []
+            for a, grp in full_df[full_df["asin"].isin(f_asins)].groupby("asin"):
+                grp = grp.sort_values("created_at").dropna(subset=["rating"])
+                if len(grp) < 2:
+                    continue
+                xs = (grp["created_at"].astype(np.int64) // 10**9).values.reshape(-1, 1)
+                m = LinearRegression().fit(xs, grp["rating"].values)
+                cur = float(grp["rating"].iloc[-1])
+                p30 = float(np.clip(m.predict([[xs[-1][0] + 30 * 86400]])[0], 1, 5))
+                _rows.append({"ASIN": a, "Сейчас": cur, "Прогноз +30": p30, "Δ": p30 - cur,
+                              "Тренд ★/мес": m.coef_[0] * 86400 * 30, "Замеров": len(grp)})
+            st.session_state["_pf_rows"] = _rows
+            st.session_state["_pf_key"] = _pf_key
+        rows = st.session_state["_pf_rows"]
         if not rows:
             st.caption("Нужно ≥2 замера хотя бы на одном ASIN")
         else:
