@@ -1019,54 +1019,6 @@ def with_market(asin_list):
 # не-null строки идут первыми, среди них — самая свежая.
 # prev_* — буквально предпоследняя строка (nth(-2) null'ы не пропускает),
 # поэтому там обычный LAG.
-CALC_LATEST_SQL = """
-SELECT * FROM (
-    SELECT DISTINCT ON (asin)
-        asin,
-        FIRST_VALUE(source) OVER (PARTITION BY asin ORDER BY (source IS NULL), created_at DESC, ctid DESC) AS source,
-        FIRST_VALUE(rating) OVER (PARTITION BY asin ORDER BY (rating IS NULL), created_at DESC, ctid DESC) AS rating,
-        FIRST_VALUE(review_count) OVER (PARTITION BY asin ORDER BY (review_count IS NULL), created_at DESC, ctid DESC) AS review_count,
-        FIRST_VALUE(histogram_json) OVER (PARTITION BY asin ORDER BY (histogram_json IS NULL), created_at DESC, ctid DESC) AS histogram_json,
-        FIRST_VALUE(image_url) OVER (PARTITION BY asin ORDER BY (image_url IS NULL), created_at DESC, ctid DESC) AS image_url,
-        FIRST_VALUE(bsr) OVER (PARTITION BY asin ORDER BY (bsr IS NULL), created_at DESC, ctid DESC) AS bsr,
-        FIRST_VALUE(note) OVER (PARTITION BY asin ORDER BY (note IS NULL), created_at DESC, ctid DESC) AS note,
-        MAX(created_at) OVER (PARTITION BY asin) AS created_at,
-        FIRST_VALUE(ctid) OVER (PARTITION BY asin ORDER BY created_at DESC, ctid DESC) AS _ctid,
-        LAG(rating) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_rating,
-        LAG(review_count) OVER (PARTITION BY asin ORDER BY created_at, ctid) AS prev_reviews
-    FROM asin_metrics
-    WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
-      AND created_at >= NOW() - (%s || ' days')::interval
-    ORDER BY asin, created_at DESC, ctid DESC
-) t
-ORDER BY created_at DESC, _ctid DESC;
-"""
-
-
-def get_calc_latest_sql(days=120):
-    """Агрегация в Postgres: последний + предыдущий замер по каждому ASIN.
-
-    Один ряд на ASIN вместо сотен тысяч сырых строк. Семантика — как старый
-    путь: groupby.last() берёт последнее НЕ-NULL значение каждой колонки
-    (повторено через FIRST_VALUE), prev — буквально предпоследняя строка
-    (nth(-2), повторён через LAG). Тай-брейкер — ctid (колонки id в проде нет).
-    Сверка путей — verify_calc_sql."""
-    if not DATABASE_URL:
-        return pd.DataFrame()
-    conn = _conn()
-    try:
-        df = pd.read_sql(CALC_LATEST_SQL, conn, params=(str(int(days)),))
-    finally:
-        conn.close()
-    # те же приведения, что в get_full_history, — построчные значения 1:1
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
-    df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
-    df["prev_rating"] = pd.to_numeric(df["prev_rating"], errors="coerce")
-    df["prev_reviews"] = pd.to_numeric(df["prev_reviews"], errors="coerce")
-    return df
-
-
 def get_calc_freshness(days=120):
     """Дешёвый SELECT MAX(created_at) — ключ инвалидации кэша витрины."""
     if not DATABASE_URL:
@@ -1086,17 +1038,8 @@ def get_calc_freshness(days=120):
         return "error"
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def build_calc_df_sql_cached(max_created_at, period_days):
-    """Витрина через SQL-агрегацию. Ключ — max(created_at) + период: данные
-    обновились — ключ сменился — пересчёт; плюс общий сброс после сбора."""
-    return build_calc_rows(get_calc_latest_sql(period_days))
-
-
 def build_calc_rows(latest):
-    """Построчный расчёт витрины из готового latest+prev (один ряд на ASIN).
-    Общий для старого (pandas groupby) и нового (SQL) путей — логика ниже
-    не менялась, меняется только источник агрегации."""
+    """Построчный расчёт витрины из готового latest+prev (один ряд на ASIN)."""
     if latest.empty:
         return pd.DataFrame()
     rows = []
@@ -1170,8 +1113,7 @@ def build_calc_rows(latest):
 
 
 def build_calc_df(df):
-    """Старый путь: агрегация groupby в pandas. Оставлен для сверки с SQL
-    (verify_calc_sql); после успешной сверки будет удалён."""
+    """Агрегация groupby в pandas: последний + предыдущий замер по ASIN."""
     if df.empty:
         return pd.DataFrame()
     latest = df.sort_values("created_at").groupby("asin").last().reset_index()
@@ -1192,75 +1134,6 @@ def build_calc_df_cached(n_rows, max_created_at, period_days, _df):
     (параметр с подчёркиванием). Сброс — общим st.cache_data.clear() после сбора
     в run_collection (чистит весь cache_data)."""
     return build_calc_df(_df)
-
-
-def verify_calc_sql(days=120):
-    """Сверка старого (pandas groupby) и нового (SQL-агрегация) путей витрины
-    на реальных данных. Временная диагностика: удалить после переключения."""
-    rep = {"ok": False}
-    t0 = _time.perf_counter()
-    full_df = get_full_history(int(days))
-    rep["rows_before"] = int(len(full_df))
-    rep["t_full_read"] = round(_time.perf_counter() - t0, 2)
-    t0 = _time.perf_counter()
-    old = build_calc_df(full_df)
-    rep["t_old_build"] = round(_time.perf_counter() - t0, 2)
-    t0 = _time.perf_counter()
-    latest_sql = get_calc_latest_sql(int(days))
-    rep["rows_after"] = int(len(latest_sql))
-    rep["t_sql_agg"] = round(_time.perf_counter() - t0, 2)
-    t0 = _time.perf_counter()
-    new = build_calc_rows(latest_sql)
-    rep["t_new_build"] = round(_time.perf_counter() - t0, 2)
-
-    # ASIN с дублями created_at: там порядок в pandas неустойчив (риск расхождений)
-    try:
-        dup = full_df.groupby("asin")["created_at"].apply(lambda s: s.duplicated(keep=False).any()).sum()
-        rep["asins_with_created_at_ties"] = int(dup)
-    except Exception:
-        rep["asins_with_created_at_ties"] = -1
-
-    rep["cols_old"] = list(old.columns)
-    rep["cols_new"] = list(new.columns)
-    rep["cols_equal"] = rep["cols_old"] == rep["cols_new"]
-    if not rep["cols_equal"]:
-        return rep
-    o = old.sort_values("raw_asin").reset_index(drop=True)
-    n = new.sort_values("raw_asin").reset_index(drop=True)
-    so, sn = set(o["raw_asin"]), set(n["raw_asin"])
-    rep["asins_only_old"] = sorted(so - sn)[:10]
-    rep["asins_only_new"] = sorted(sn - so)[:10]
-    common = sorted(so & sn)
-    rep["n_common"] = len(common)
-    o = o[o["raw_asin"].isin(common)].reset_index(drop=True)
-    n = n[n["raw_asin"].isin(common)].reset_index(drop=True)
-
-    def _eq(a, b):
-        if pd.isna(a) and pd.isna(b):
-            return True
-        try:
-            return bool(a == b)
-        except Exception:
-            return False
-
-    col_rep, diffs, all_ok = [], [], True
-    for c in o.columns:
-        mism, ex = 0, []
-        for i in range(len(o)):
-            if not _eq(o.at[i, c], n.at[i, c]):
-                mism += 1
-                if len(ex) < 3:
-                    ex.append((o.at[i, "raw_asin"], repr(o.at[i, c]), repr(n.at[i, c])))
-        col_rep.append({"col": c, "mismatch": mism,
-                        "dtype_old": str(o[c].dtype), "dtype_new": str(n[c].dtype)})
-        if mism:
-            all_ok = False
-            diffs.append({"col": c, "examples": ex})
-    rep["per_column"] = col_rep
-    rep["diffs"] = diffs
-    rep["ok"] = bool(all_ok and not rep["asins_only_old"]
-                     and not rep["asins_only_new"] and rep["cols_equal"])
-    return rep
 
 
 def rating_color(v):
@@ -4320,34 +4193,6 @@ def render_asin_manager(kind):
 # ---------- СБОР И УПРАВЛЕНИЕ ----------
 if nav == "⚙️ Сбор и управление":
     # ВРЕМЕННО: сверка SQL-агрегации — удалить после переключения на новый путь
-    with st.expander("🔬 Сверка SQL-агрегации (временная диагностика)", expanded=False):
-        st.caption("Прогоняет старый (pandas groupby) и новый (Postgres DISTINCT ON + LAG) "
-                   "пути на живых данных и сравнивает все колонки витрины.")
-        if st.button("▶ Запустить сверку", key="verify_calc_sql_btn"):
-            with st.spinner("Сверяю пути на реальных данных…"):
-                rep = verify_calc_sql(int(st.session_state.get("period_days_sel", 120)))
-            st.write(f"Строк: было **{rep['rows_before']}** → стало **{rep['rows_after']}** "
-                     f"(чтение истории {rep['t_full_read']} с · старый расчёт {rep['t_old_build']} с · "
-                     f"SQL-агрегация {rep['t_sql_agg']} с · новый расчёт {rep['t_new_build']} с)")
-            st.write(f"ASIN с дублями created_at: {rep.get('asins_with_created_at_ties')}")
-            if rep["ok"]:
-                st.success(f"✅ Все колонки совпали ({rep['n_common']} ASIN, "
-                           f"{len(rep['per_column'])} колонок) — можно переключать.")
-            else:
-                st.error("❌ Расхождения найдены — смотреть ниже.")
-                if not rep["cols_equal"]:
-                    st.write("Колонки различаются:", rep["cols_old"], rep["cols_new"])
-                if rep["asins_only_old"]:
-                    st.write("Только в старом:", rep["asins_only_old"])
-                if rep["asins_only_new"]:
-                    st.write("Только в новом:", rep["asins_only_new"])
-                for d in rep["diffs"]:
-                    st.write(f"Колонка **{d['col']}**:")
-                    for asin, ov, nv in d["examples"]:
-                        st.write(f"  {asin}: было {ov} → стало {nv}")
-            with st.expander("По-колоночная таблица", expanded=False):
-                st.dataframe(pd.DataFrame(rep["per_column"]), width="stretch", hide_index=True)
-
     o1, o2 = st.columns(2)
     if st.button("🔄 Обновить данные из базы", key="clear_cache",
                  help="Дашборд кэширует запросы к базе на 3 минуты, чтобы не тормозить при кликах"):
