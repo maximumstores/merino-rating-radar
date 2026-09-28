@@ -375,6 +375,26 @@ def price_to_num(val):
     return round(v, 2) if v else None
 
 
+HISTORY_TTL = 600
+
+
+def get_history_for_session(days=120):
+    """История через session-кэш: при переключении вкладок возвращает тот же
+    DataFrame из памяти (микросекунды) вместо десериализации из st.cache_data
+    (1–3 с). Падение на диск-кэш — при ребуте/редеплое или истечении TTL."""
+    now = time.time()
+    cached = st.session_state.get("_history_cache")
+
+    if cached:
+        cached_days, cached_at, cached_df = cached
+        if cached_days == days and now - cached_at < HISTORY_TTL:
+            return cached_df
+
+    df = get_full_history(days)
+    st.session_state["_history_cache"] = (days, now, df)
+    return df
+
+
 @st.cache_data(ttl=600, show_spinner="Загружаю историю замеров…", max_entries=8)
 def get_full_history(days=120):
     """История метрик за период. Кэш обязателен: без него запрос на сотни тысяч
@@ -837,6 +857,7 @@ def run_collection(items, label="Прогон"):
     stop_slot.empty()
     cur_slot.empty()
     st.cache_data.clear()      # свежие данные вместо кэша
+    st.session_state.pop("_history_cache", None)   # сброс session-кэша истории
     finish_run(run_id, ok, "stopped" if stopped else "done")
     st.session_state["last_auto_run"] = time.time()
     st.session_state["stop_run"] = False
@@ -971,7 +992,9 @@ _t_hist = time.time()
 st.session_state["_db_stats"] = {"taken": 0, "opened": 0, "ms": 0.0}
 st.session_state["_page_t0"] = _time.perf_counter()
 
-full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
+full_df = get_history_for_session(
+    int(st.session_state.get("period_days_sel", 120))
+)
 st.session_state["full_df_sec"] = time.time() - _t_hist
 st.session_state["_t_hist_done"] = _time.perf_counter()
 if not st.session_state.get("_schema_ok"):
