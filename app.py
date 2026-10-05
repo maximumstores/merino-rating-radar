@@ -4629,7 +4629,8 @@ def _activity_data(days=60):
     они создаются при первом входе, тогда отдаём пустые кадры."""
     out = {"logins": pd.DataFrame(columns=["email", "logged_in_at"]),
            "views": pd.DataFrame(columns=["email", "section", "viewed_at"]),
-           "actions": pd.DataFrame(columns=["email", "action", "item_count", "created_at"])}
+           "actions": pd.DataFrame(columns=["email", "action", "item_count", "created_at"]),
+           "ever": set()}
     if not DATABASE_URL:
         return out
     try:
@@ -4644,6 +4645,14 @@ def _activity_data(days=60):
         ):
             try:
                 out[key] = pd.read_sql(sql, conn, params=(str(int(days)),))
+            except Exception:
+                conn.rollback()
+        # команда = все, кто хоть раз заходил, за всё время
+        for tbl in ("login_log", "page_views"):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT DISTINCT lower(email) FROM {tbl}")
+                    out["ever"] |= {r[0] for r in cur.fetchall() if r[0]}
             except Exception:
                 conn.rollback()
         conn.close()
@@ -4675,8 +4684,13 @@ def render_activity():
         vw.rename(columns={"viewed_at": "ts"})[["email", "ts"]] if not vw.empty else None,
     ]) if not (lg.empty and vw.empty) else pd.DataFrame(columns=["email", "ts"])
 
+    # Команда собирается сама: все, кто хоть раз заходил. Вручную — только
+    # добавить тех, кто ещё не заходил, или исключить тестовые аккаунты.
     team_raw = get_setting("team_emails", "") or ""
-    team_set = {e.strip().lower() for e in team_raw.split(",") if e.strip()}
+    excl_raw = get_setting("team_exclude", "") or ""
+    team_extra = {e.strip().lower() for e in team_raw.split(",") if e.strip()}
+    team_excl = {e.strip().lower() for e in excl_raw.split(",") if e.strip()}
+    team_set = (set(data.get("ever", set())) | team_extra) - team_excl
 
     if touch.empty:
         st.info("Пока никто не заходил под Google-входом. Данные начнут копиться после "
@@ -4685,6 +4699,7 @@ def render_activity():
         touch["ts"] = pd.to_datetime(touch["ts"], utc=True).dt.tz_convert(tz)
         touch["day"] = touch["ts"].dt.normalize()
         touch["email"] = touch["email"].str.lower()
+        touch = touch[~touch["email"].isin(team_excl)]
         team = sorted(team_set | set(touch["email"]))
         n_team = max(1, len(team))
 
@@ -4714,7 +4729,9 @@ def render_activity():
         st.caption(f"7 дней до этого — {prv_pct:.0f}% ({prv_users} из {n_team} заходили). "
                    "% = рабочие дни со входом у всей команды ÷ (рабочих дней × размер команды). "
                    "100% — каждый заходил каждый рабочий день. "
-                   + ("" if team_set else "Список команды не задан — считаются все, кто заходил."))
+                   + f"Команда — {n_team} чел.: все, кто хоть раз заходил"
+                   + (f", плюс {len(team_extra)} добавлено вручную" if team_extra else "")
+                   + (f", без {len(team_excl)} исключённых" if team_excl else "") + ".")
 
         period = st.radio("Период", [7, 14, 30, 60], index=1, horizontal=True,
                           format_func=lambda d: f"{d} дн.", key="act_period")
@@ -4841,14 +4858,21 @@ def render_activity():
                            xaxis_title=None, yaxis_title=None, plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig3, width="stretch")
 
-    with st.expander("⚙️ Состав команды", expanded=not team_set):
-        st.caption("Почты через запятую. Кто в списке и не заходил — тянет процент вниз: "
-                   "так видно, что человек дашбордом не пользуется.")
-        new_team = st.text_area("Команда", value=team_raw, height=80, key="team_emails_input",
-                                label_visibility="collapsed",
-                                placeholder="v.tereshyn@maximumstores.online, ...")
-        if st.button("Сохранить состав", key="team_save"):
+    with st.expander("⚙️ Команда — настраивать необязательно", expanded=False):
+        st.caption("Команда собирается автоматически: все, кто хоть раз входил. "
+                   "Трогать это нужно только в двух случаях.")
+        tc1, tc2 = st.columns(2)
+        new_team = tc1.text_area(
+            "Добавить тех, кто ещё не заходил", value=team_raw, height=80, key="team_emails_input",
+            placeholder="olena@maximumstores.online, ...",
+            help="Чтобы процент показал, что человек дашбордом не пользуется")
+        new_excl = tc2.text_area(
+            "Не учитывать", value=excl_raw, height=80, key="team_excl_input",
+            placeholder="тестовый аккаунт, разработчик…",
+            help="Например, свой аккаунт разработчика — чтобы не завышать регулярность")
+        if st.button("Сохранить", key="team_save"):
             set_setting("team_emails", new_team.strip())
+            set_setting("team_exclude", new_excl.strip())
             st.cache_data.clear()
             st.success("Сохранено")
             st.rerun()
@@ -4980,4 +5004,4 @@ if nav == "ℹ️ Как это работает":
         unsafe_allow_html=True,
     )
 
-_perf_snapshot() 
+_perf_snapshot()
