@@ -135,6 +135,34 @@ def _login_gate():
         _log_login(email)
 
 
+def _log_action(action, count=1, details=""):
+    """Что человек сохраняет: правки списков, категорий, стран, запуски сбора.
+    Просмотр без правок — «посмотрел», правка — «работает с данными»."""
+    email = st.session_state.get("auth_email", "")
+    if not email or email == "local" or not DATABASE_URL:
+        return
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_actions (
+                    id BIGSERIAL PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    item_count INTEGER NOT NULL DEFAULT 1,
+                    details TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+            cur.execute("INSERT INTO user_actions (email, action, item_count, details) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (email, action, int(count or 0), str(details or "")[:200]))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _log_login(email):
     """Кто и когда заходил. Ошибку глушим: журнал не должен ронять вход."""
     if not DATABASE_URL:
@@ -628,6 +656,7 @@ def parse_asin_batch(text, existing, default_market=None):
 
 def set_markets_bulk(pairs):
     """{asin: страна} — перезаписывает страну в справочнике, в отличие от save_markets."""
+    _log_action("Смена страны", len(pairs or {}))
     if not pairs:
         return 0
     from psycopg2 import extras as _ex
@@ -801,6 +830,7 @@ BROWSER_RUN_LIMIT = int(os.environ.get("BROWSER_RUN_LIMIT", "80"))
 
 def dispatch_github_run(force=True, workflow="collect.yml", scope="all"):
     """Запускает сбор в GitHub Actions. Возвращает (ok, сообщение)."""
+    _log_action("Запуск сбора (GitHub)", 1, scope)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         return False, "Не задан GITHUB_TOKEN — добавь personal access token с правом actions:write в Secrets"
@@ -836,6 +866,7 @@ def actions_button(key, label="🚀 Запустить сбор в GitHub Action
 
 
 def run_collection(items, label="Прогон"):
+    _log_action("Запуск сбора (браузер)", len(items or []), label)
     items = with_market(items)
     use_api = st.session_state.get("use_api_mode", True)
     ensure_schema()
@@ -1336,7 +1367,7 @@ else:
 # Здесь рендерится только выбранный раздел.
 SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
             "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)", "📊 Аналитика", "🤖 Бот возвратов",
-            "📈 Прогноз", "⚙️ Сбор и управление", "ℹ️ Как это работает"]
+            "📈 Прогноз", "⚙️ Сбор и управление", "👥 Активность дашборда", "ℹ️ Как это работает"]
 
 # Нативный переключатель: выглядит как вкладки, но выполняется только выбранный раздел.
 if hasattr(st, "segmented_control"):
@@ -1346,6 +1377,38 @@ else:
     nav = st.radio("Раздел", SECTIONS, horizontal=True,
                    label_visibility="collapsed", key="nav_section")
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+
+def _log_view(section):
+    """Какие разделы открывают. Один и тот же раздел в одной сессии пишем
+    не чаще раза в 10 минут — иначе каждый клик по фильтру даст новую строку."""
+    email = st.session_state.get("auth_email", "")
+    if not email or email == "local" or not DATABASE_URL:
+        return
+    seen = st.session_state.setdefault("_views_logged", {})
+    now = _time.time()
+    if now - seen.get(section, 0) < 600:
+        return
+    seen[section] = now
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS page_views (
+                    id BIGSERIAL PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    viewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+            cur.execute("INSERT INTO page_views (email, section) VALUES (%s, %s)", (email, section))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+_log_view(nav)
 
 # ---------- ПОРТФЕЛЬ ----------
 def render_portfolio(filtered_df, kind):
@@ -1536,6 +1599,7 @@ def get_competitors():
 
 def save_competitors(pairs, group):
     """pairs: [(asin, market), …] — одна позиция на страну."""
+    _log_action("Конкуренты: добавление", len(pairs or []), group)
     from psycopg2 import extras as _ex
     ensure_competitor_schema()
     conn = _conn()
@@ -1556,6 +1620,7 @@ def save_competitors(pairs, group):
 
 def save_categories(pairs):
     """pairs: {asin: категория}. Ручная категория, API её не перезаписывает."""
+    _log_action("Категории", len(pairs or {}))
     if not pairs:
         return 0
     from psycopg2 import extras as _ex
@@ -1695,6 +1760,7 @@ if nav == "🥊 Конкуренты":
 
 
     def save_competitors_table(df, default_market):
+        _log_action("Конкуренты: загрузка таблицей", len(df))
         from psycopg2 import extras as _ex
         ensure_competitor_schema()
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -3939,6 +4005,7 @@ def render_asin_manager(kind):
                 conn.commit()
                 conn.close()
                 save_markets({c: m for c, m in mk_map.items() if c in new_c})
+                _log_action(f"Список {KIND_LABEL[kind]}: добавление", len(fresh) + len(moving))
                 msg = []
                 if fresh:
                     msg.append(f"добавлено {len(fresh)}")
@@ -4099,6 +4166,7 @@ def render_asin_manager(kind):
                           label_visibility="collapsed")
     b1, b2, b3 = st.columns([1.2, 1.2, 3])
     if b1.button("💾 Пересохранить список", key=f"resave_btn_{kind}"):
+        _log_action(f"Список {KIND_LABEL[kind]}: пересохранение")
         clean, dup_c, inv_c, markets, bd = parse_asin_batch(edited, [], None)
         if sel_market:
             for code in clean:
@@ -4142,6 +4210,7 @@ def render_asin_manager(kind):
             conn.commit()
             conn.close()
             st.cache_data.clear()      # иначе на экране останется прежний список из кэша
+            _log_action(f"Список {KIND_LABEL[kind]}: очистка", gone)
             st.success(f"Список «{KIND_LABEL[kind]}» очищен: удалено {gone}. "
                        "Замеры и справочник не тронуты.")
             st.rerun()
@@ -4553,6 +4622,241 @@ if nav == "⚙️ Сбор и управление":
 
 
 # ---------- КАК ЭТО РАБОТАЕТ ----------
+# ---------- АКТИВНОСТЬ ----------
+@st.cache_data(ttl=300, show_spinner=False)
+def _activity_data(days=60):
+    """Входы и открытия разделов за период. Таблиц может ещё не быть —
+    они создаются при первом входе, тогда отдаём пустые кадры."""
+    out = {"logins": pd.DataFrame(columns=["email", "logged_in_at"]),
+           "views": pd.DataFrame(columns=["email", "section", "viewed_at"]),
+           "actions": pd.DataFrame(columns=["email", "action", "item_count", "created_at"])}
+    if not DATABASE_URL:
+        return out
+    try:
+        conn = _conn()
+        for key, sql in (
+            ("logins", "SELECT email, logged_in_at FROM login_log "
+                       "WHERE logged_in_at >= NOW() - (%s || ' days')::interval"),
+            ("views", "SELECT email, section, viewed_at FROM page_views "
+                      "WHERE viewed_at >= NOW() - (%s || ' days')::interval"),
+            ("actions", "SELECT email, action, item_count, created_at FROM user_actions "
+                        "WHERE created_at >= NOW() - (%s || ' days')::interval"),
+        ):
+            try:
+                out[key] = pd.read_sql(sql, conn, params=(str(int(days)),))
+            except Exception:
+                conn.rollback()
+        conn.close()
+    except Exception:
+        pass
+    return out
+
+
+def render_activity():
+    h1, h2 = st.columns([5, 1])
+    h1.markdown("### Активность дашборда")
+    if h2.button("🔄 Обновить", key="act_refresh", width="stretch",
+                 help="Иначе вкладка подтягивает свежее раз в 5 минут"):
+        _activity_data.clear()
+        st.rerun()
+    tz = ZoneInfo("Europe/Kyiv")
+    data = _activity_data(60)
+    lg, vw, ac = data["logins"].copy(), data["views"].copy(), data["actions"].copy()
+    if not ac.empty:
+        ac["created_at"] = pd.to_datetime(ac["created_at"], utc=True).dt.tz_convert(tz)
+        ac["email"] = ac["email"].str.lower()
+    if not vw.empty:
+        vw["email"] = vw["email"].str.lower()
+
+    # вход = любое касание: и логин, и открытие раздела. Сессия Google живёт
+    # долго, и человек может месяц не логиниться, но заходить каждый день.
+    touch = pd.concat([
+        lg.rename(columns={"logged_in_at": "ts"})[["email", "ts"]] if not lg.empty else None,
+        vw.rename(columns={"viewed_at": "ts"})[["email", "ts"]] if not vw.empty else None,
+    ]) if not (lg.empty and vw.empty) else pd.DataFrame(columns=["email", "ts"])
+
+    team_raw = get_setting("team_emails", "") or ""
+    team_set = {e.strip().lower() for e in team_raw.split(",") if e.strip()}
+
+    if touch.empty:
+        st.info("Пока никто не заходил под Google-входом. Данные начнут копиться после "
+                "первых входов — вкладка заполнится сама.")
+    else:
+        touch["ts"] = pd.to_datetime(touch["ts"], utc=True).dt.tz_convert(tz)
+        touch["day"] = touch["ts"].dt.normalize()
+        touch["email"] = touch["email"].str.lower()
+        team = sorted(team_set | set(touch["email"]))
+        n_team = max(1, len(team))
+
+        today = pd.Timestamp.now(tz=tz).normalize()
+
+        def _workdays(start, end):
+            return [d for d in pd.date_range(start, end, freq="D") if d.weekday() < 5]
+
+        def _score(start, end):
+            """рабочие дни со входом у всей команды ÷ (рабочих дней × размер команды)"""
+            wd = set(_workdays(start, end))
+            hit = touch[touch["day"].isin(wd)].groupby("email")["day"].nunique()
+            denom = len(wd) * n_team
+            return (100 * hit.sum() / denom if denom else 0.0), int((hit > 0).sum()), len(wd)
+
+        cur_pct, cur_users, cur_wd = _score(today - pd.Timedelta(days=6), today)
+        prv_pct, prv_users, _ = _score(today - pd.Timedelta(days=13), today - pd.Timedelta(days=7))
+
+        st.markdown("#### % для Scorecard — последние 7 дней")
+        c1, c2, c3 = st.columns([1.2, 1.4, 1.4])
+        c1.metric("Регулярность", f"{cur_pct:.0f}%", f"{cur_pct - prv_pct:+.0f} п.п. к прошлой неделе")
+        c2.metric("Зашли", f"{cur_users} из {n_team}",
+                  help=f"{(today - pd.Timedelta(days=6)):%d.%m} – {today:%d.%m}")
+        avg_days = (touch[touch["day"] >= today - pd.Timedelta(days=6)]
+                    .groupby("email")["day"].nunique().reindex(team, fill_value=0).mean())
+        c3.metric("В среднем дней", f"{avg_days:.1f} из {cur_wd}")
+        st.caption(f"7 дней до этого — {prv_pct:.0f}% ({prv_users} из {n_team} заходили). "
+                   "% = рабочие дни со входом у всей команды ÷ (рабочих дней × размер команды). "
+                   "100% — каждый заходил каждый рабочий день. "
+                   + ("" if team_set else "Список команды не задан — считаются все, кто заходил."))
+
+        period = st.radio("Период", [7, 14, 30, 60], index=1, horizontal=True,
+                          format_func=lambda d: f"{d} дн.", key="act_period")
+        cut = today - pd.Timedelta(days=period - 1)
+        t_per = touch[touch["day"] >= cut]
+
+        st.markdown("#### Кто пользуется")
+        if t_per.empty:
+            st.caption("За период входов не было.")
+        else:
+            by = t_per.groupby("email").agg(
+                входов=("ts", "count"), дней=("day", "nunique"), последний=("ts", "max"))
+            by = by.reindex(team).fillna({"входов": 0, "дней": 0})
+            _vw_p = vw.copy()
+            if not _vw_p.empty:
+                _vw_p["viewed_at"] = pd.to_datetime(_vw_p["viewed_at"], utc=True).dt.tz_convert(tz)
+                _vw_p = _vw_p[_vw_p["viewed_at"] >= cut]
+            by["разделов"] = (_vw_p.groupby("email").size().reindex(by.index, fill_value=0)
+                              if not _vw_p.empty else 0)
+            _ac_p = ac[ac["created_at"] >= cut] if not ac.empty else ac
+            by["правок"] = (_ac_p.groupby("email").size().reindex(by.index, fill_value=0)
+                            if not _ac_p.empty else 0)
+            by["Доля входов"] = (100 * by["входов"] / max(1, by["входов"].sum())).round(0)
+            by["Активность"] = (100 * by["дней"] / period).round(0)
+            by["Последний вход"] = by["последний"].apply(
+                lambda t: t.strftime("%d.%m %H:%M") if pd.notnull(t) else "—")
+            show = by.reset_index().rename(columns={"index": "Сотрудник", "email": "Сотрудник"})
+            show = show[["Сотрудник", "входов", "дней", "Доля входов", "Активность",
+                         "разделов", "правок", "Последний вход"]]
+            show.columns = ["Сотрудник", "Входов", "Дней", "Доля входов, %", "Активность, %",
+                            "Открыл разделов", "Правок", "Последний вход"]
+            st.dataframe(show.sort_values("Входов", ascending=False), hide_index=True,
+                         width="stretch")
+            st.caption(f"За {period} дн., время киевское. «Доля входов» — какой процент всех "
+                       "входов пришёлся на человека. «Активность» — в какой доле дней периода "
+                       "он заходил хотя бы раз.")
+
+        st.markdown("#### Какие разделы открывают")
+        v_per = vw.copy()
+        if not v_per.empty:
+            v_per["viewed_at"] = pd.to_datetime(v_per["viewed_at"], utc=True).dt.tz_convert(tz)
+            v_per = v_per[v_per["viewed_at"] >= cut]
+        if v_per.empty:
+            st.caption("Открытий разделов за период нет.")
+        else:
+            sec = (v_per.groupby("section").agg(открытий=("email", "count"),
+                                                людей=("email", "nunique"),
+                                                последний=("viewed_at", "max"))
+                   .sort_values("открытий", ascending=False))
+            fig = px.bar(sec.reset_index(), x="открытий", y="section", orientation="h",
+                         text="открытий", color_discrete_sequence=[PALETTE["accent"]])
+            fig.update_layout(height=max(220, 34 * len(sec)), margin=dict(l=10, r=10, t=10, b=10),
+                              yaxis=dict(categoryorder="total ascending", title=None),
+                              xaxis_title=None, plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, width="stretch")
+            st.dataframe(sec.reset_index().assign(
+                последний=lambda d: d["последний"].dt.strftime("%d.%m %H:%M"))
+                .rename(columns={"section": "Раздел", "открытий": "Открытий",
+                                 "людей": "Людей", "последний": "Последний раз"}),
+                hide_index=True, width="stretch")
+        never = [x for x in SECTIONS if x not in set(v_per.get("section", []))
+                 and x != "👥 Активность дашборда"]
+        if never:
+            st.caption("Ни разу не открывали за период — кандидаты на упрощение: "
+                       + ", ".join(never))
+
+        st.markdown("#### Кто вносит правки")
+        if ac.empty or ac[ac["created_at"] >= cut].empty:
+            st.caption(f"За {period} дн. правок не было. Просмотр без правок — «посмотрел», "
+                       "правка — «работает с данными».")
+        else:
+            a_per = ac[ac["created_at"] >= cut]
+            ed = (a_per.groupby(["email", "action"])
+                  .agg(раз=("action", "count"), позиций=("item_count", "sum"),
+                       последняя=("created_at", "max"))
+                  .reset_index().sort_values(["email", "раз"], ascending=[True, False]))
+            ed["последняя"] = ed["последняя"].dt.strftime("%d.%m %H:%M")
+            ed.columns = ["Сотрудник", "Действие", "Раз", "Позиций", "Последний раз"]
+            st.dataframe(ed, hide_index=True, width="stretch")
+            st.caption("Действия: добавление и удаление позиций, смена страны, категории, "
+                       "загрузка конкурентов, запуски сбора.")
+
+        st.markdown("#### Регулярность по неделям")
+        weeks = []
+        for k in range(7, -1, -1):
+            w_end = today - pd.Timedelta(days=today.weekday()) - pd.Timedelta(weeks=k) + pd.Timedelta(days=6)
+            w_start = w_end - pd.Timedelta(days=6)
+            w_end_eff = min(w_end, today)
+            if w_end_eff < w_start:
+                continue
+            pct, users, wdn = _score(w_start, w_end_eff)
+            if wdn:
+                _wd = {d for d in pd.date_range(w_start, w_end_eff, freq="D") if d.weekday() < 5}
+                hit_days = int(touch[touch["day"].isin(_wd)].groupby("email")["day"].nunique().sum())
+                weeks.append({"Неделя": f"{w_start:%d.%m}–{(w_start + pd.Timedelta(days=6)):%d.%m}",
+                              "%": round(pct), "Зашли": users,
+                              "Дней со входом": hit_days, "Рабочих дней": wdn})
+        if weeks:
+            wdf = pd.DataFrame(weeks)
+            fig2 = px.bar(wdf, x="Неделя", y="%", text="%",
+                          color_discrete_sequence=[PALETTE["ok"]])
+            fig2.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10),
+                               yaxis=dict(range=[0, 105], title=None), xaxis_title=None,
+                               plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig2, width="stretch")
+            st.caption(f"Неделя — с понедельника, считаются рабочие дни. Команда — {n_team} чел. "
+                       "Текущая неделя — по прошедшим рабочим дням.")
+            st.markdown("#### % для Scorecard по неделям")
+            wt = pd.DataFrame(weeks)
+            st.dataframe(wt.iloc[::-1].rename(columns={"%": "% для Scorecard",
+                                                       "Зашли": "Людей зашло"}),
+                         hide_index=True, width="stretch")
+
+        st.markdown("#### Входы по дням, 14 дней")
+        d14 = touch[touch["day"] >= today - pd.Timedelta(days=13)]
+        daily = (d14.groupby("day")["email"].nunique()
+                 .reindex(pd.date_range(today - pd.Timedelta(days=13), today, freq="D", tz=tz),
+                          fill_value=0))
+        ddf = pd.DataFrame({"День": [d.strftime("%d.%m %a") for d in daily.index],
+                            "Людей": daily.values})
+        fig3 = px.bar(ddf, x="День", y="Людей", text="Людей",
+                      color_discrete_sequence=[PALETTE["accent"]])
+        fig3.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                           xaxis_title=None, yaxis_title=None, plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig3, width="stretch")
+
+    with st.expander("⚙️ Состав команды", expanded=not team_set):
+        st.caption("Почты через запятую. Кто в списке и не заходил — тянет процент вниз: "
+                   "так видно, что человек дашбордом не пользуется.")
+        new_team = st.text_area("Команда", value=team_raw, height=80, key="team_emails_input",
+                                label_visibility="collapsed",
+                                placeholder="v.tereshyn@maximumstores.online, ...")
+        if st.button("Сохранить состав", key="team_save"):
+            set_setting("team_emails", new_team.strip())
+            st.cache_data.clear()
+            st.success("Сохранено")
+            st.rerun()
+
+
+if nav == "👥 Активность дашборда":
+    render_activity()
+
 if nav == "ℹ️ Как это работает":
     st.markdown(
         """
@@ -4676,4 +4980,4 @@ if nav == "ℹ️ Как это работает":
         unsafe_allow_html=True,
     )
 
-_perf_snapshot()
+_perf_snapshot() 
