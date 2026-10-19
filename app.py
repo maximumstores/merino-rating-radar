@@ -1618,6 +1618,22 @@ def save_competitors(pairs, group):
     st.cache_data.clear()
 
 
+def delete_competitors(pairs):
+    """pairs: [(asin, market), …] — убирает позиции из списка конкурентов."""
+    _log_action("Конкуренты: удаление", len(pairs or []))
+    if not pairs:
+        return 0
+    ensure_competitor_schema()
+    conn = _conn()
+    with conn.cursor() as cur:
+        for a, m in pairs:
+            cur.execute("DELETE FROM competitors WHERE asin = %s AND market = %s;", (a, m))
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+    return len(pairs)
+
+
 def save_categories(pairs):
     """pairs: {asin: категория}. Ручная категория, API её не перезаписывает."""
     _log_action("Категории", len(pairs or {}))
@@ -2535,16 +2551,31 @@ if nav == "🥊 Конкуренты":
         g3.markdown("<div class='muted' style='margin-top:28px'>Одна пачка = одна группа + одна страна. "
                     "Страна из ссылки перебивает выбор.</div>", unsafe_allow_html=True)
 
-        # форма: без неё Streamlit пересчитывает всю вкладку на каждый символ
-        # форма: иначе Streamlit пересчитывает всю вкладку на каждый введённый символ
+        # что уже лежит в базе для выбранной группы + страны — показываем прямо в поле
+        grp_clean = (comp_group or "").strip()
+        cur_pairs = []
+        if grp_clean and not comp_df.empty:
+            _m = comp_df[(comp_df["grp"].astype(str) == grp_clean) & (comp_df["market"] == comp_market)]
+            cur_pairs = [(a, comp_market) for a in _m["asin"].tolist()]
+        cur_set = set(cur_pairs)
+
+        # nonce меняется после сохранения: поле перечитывает актуальный список из базы
+        nonce = st.session_state.setdefault("comp_nonce", 0)
+        st.caption(f"В базе по «{grp_clean or '—'}» / {comp_market}: **{len(cur_pairs)}** — они подставлены "
+                   "в поле ниже. Дописывай новые ASIN или ссылки, лишние строки удаляй.")
+
+        # форма: без неё Streamlit пересчитывает всю вкладку на каждый введённый символ
         with st.form("comp_add_form", clear_on_submit=False):
-            comp_text = st.text_area("ASIN или ссылки конкурентов", height=110, key="comp_text",
-                                     placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\n"
-                                                 "B07NGJLLH4")
+            comp_text = st.text_area(
+                "ASIN или ссылки конкурентов", value="\n".join(a for a, _m2 in cur_pairs),
+                height=max(110, min(420, 40 + 24 * len(cur_pairs))),
+                key=f"comp_text_{grp_clean}_{comp_market}_{nonce}",
+                placeholder="B08DG72NWJ\nhttps://www.amazon.de/dp/B09X77F1X1\n"
+                            "B07NGJLLH4")
             checked = st.form_submit_button("🔍 Разобрать пачку", type="secondary")
         if checked or st.session_state.get("comp_parsed"):
             st.session_state["comp_parsed"] = True
-        if comp_text.strip() and st.session_state.get("comp_parsed"):
+        if (comp_text.strip() or cur_pairs) and st.session_state.get("comp_parsed"):
             codes, _d, inv_c, mk_map, bd = parse_asin_batch(comp_text, [], comp_market)
             # позиция = ASIN + страна: один товар бывает конкурентом и в DE, и в CA
             pairs = [(a, mk_map.get(a, comp_market)) for a in codes]
@@ -2554,41 +2585,66 @@ if nav == "🥊 Конкуренты":
             fresh = [(a, m) for a, m in pairs if (a, m) not in have]
             same = [(a, m) for a, m in pairs if (a, m) in have]
             regroup = [(a, m) for a, m in same
-                       if str(cmeta.loc[(a, m), "grp"]) != (comp_group or "").strip()]
+                       if str(cmeta.loc[(a, m), "grp"]) != grp_clean]
+            unchanged = [p for p in same if p not in set(regroup)]
+            removed = [p for p in cur_pairs if p not in set(pairs)]
             other_country = [a for a, m in fresh
                              if not comp_df.empty and a in set(comp_df["asin"])]
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.markdown(f"🟢 **Новых: {len(fresh)}**"
                         + (f"<br><span class='muted'>тот же ASIN уже есть в другой стране: "
                            f"{len(other_country)} — это отдельные позиции, "
                            f"старые не тронутся</span>" if other_country else ""),
                         unsafe_allow_html=True)
-            c2.markdown(f"🟡 **Уже в {comp_market}: {len(same)}**"
-                        + (f"<br><span class='muted'>сменят группу на «{comp_group}»: "
+            c2.markdown(f"⚪ **Без изменений: {len(unchanged)}**"
+                        + (f"<br><span class='muted'>перенесутся из другой группы в «{grp_clean}»: "
                            f"{len(regroup)}</span>" if regroup else ""), unsafe_allow_html=True)
-            c3.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
+            c3.markdown(f"🟠 **Убрано из поля: {len(removed)}**"
+                        + ("<br><span class='muted'>из базы удалятся только с галочкой ниже</span>"
+                           if removed else ""), unsafe_allow_html=True)
+            c4.markdown(f"🔴 **Нераспознано: {len(inv_c)}**"
                         + (f" · повторов в пачке: {len(bd)}" if bd else ""))
 
-            if same:
-                with st.expander(f"Уже в базе по {comp_market}: {len(same)}", expanded=False):
-                    st.dataframe(pd.DataFrame(
-                        [{"ASIN": a, "Страна": m,
-                          "Группа сейчас": str(cmeta.loc[(a, m), "grp"]) or "—"} for a, m in same]),
-                        width="stretch", hide_index=True,
-                        height=min(300, 40 + 35 * len(same)))
+            if inv_c:
+                st.caption("Не распознано: " + ", ".join(inv_c[:15]) + (" …" if len(inv_c) > 15 else ""))
+
+            do_delete = False
+            if removed:
+                do_delete = st.checkbox(
+                    f"Удалить из базы {len(removed)} ASIN, которых нет в поле: "
+                    + ", ".join(a for a, _m3 in removed[:8]) + (" …" if len(removed) > 8 else ""),
+                    key="comp_confirm_delete")
 
             to_save = fresh + regroup
-            btn = f"➕ {len(fresh)} новых" + (f" · сменить группу у {len(regroup)}" if regroup else "")
-            if st.button(f"{btn} → «{comp_group or '—'}» / {comp_market}",
-                         type="primary", disabled=not (to_save and comp_group), key="comp_add"):
+            to_delete = removed if do_delete else []
+            parts = []
+            if fresh:
+                parts.append(f"➕ {len(fresh)} новых")
+            if regroup:
+                parts.append(f"перенести {len(regroup)}")
+            if to_delete:
+                parts.append(f"🗑 удалить {len(to_delete)}")
+            btn = " · ".join(parts) if parts else "Нечего менять"
+            if st.button(f"{btn} → «{grp_clean or '—'}» / {comp_market}",
+                         type="primary", disabled=not ((to_save or to_delete) and grp_clean),
+                         key="comp_add"):
                 try:
-                    save_competitors(to_save, comp_group.strip())
-                    msg = [f"добавлено {len(fresh)}"]
+                    if to_save:
+                        save_competitors(to_save, grp_clean)
+                    if to_delete:
+                        delete_competitors(to_delete)
+                    msg = []
+                    if fresh:
+                        msg.append(f"добавлено {len(fresh)}")
                     if regroup:
                         msg.append(f"перегруппировано {len(regroup)}")
+                    if to_delete:
+                        msg.append(f"удалено {len(to_delete)}")
                     st.session_state["comp_parsed"] = False
-                    st.success(" · ".join(msg) + f" → «{comp_group}» / {comp_market}")
+                    st.session_state["comp_nonce"] = nonce + 1
+                    st.session_state.pop("comp_confirm_delete", None)
+                    st.success(" · ".join(msg) + f" → «{grp_clean}» / {comp_market}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
