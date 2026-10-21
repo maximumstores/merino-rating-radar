@@ -1,4 +1,3 @@
-fig · TOML
 [client]
 toolbarMode = "minimal"
 showErrorDetails = true
