@@ -1094,12 +1094,24 @@ if _who and _who != "local":
 
 _prev = st.session_state.get("_db_last")
 if _prev and st.session_state.get("perf_show", True):
+    _stg = _prev.get("stages") or {}
+    _stg_txt = (" · этапы: " + ", ".join(f"{k} {v:.2f}" for k, v in _stg.items())) if _stg else ""
     st.caption(f"⏱ прошлый показ {_prev['sec']:.2f} с · БД: соединений взято "
                f"{_prev['taken']}, новых {_prev['opened']}, "
-               f"на подключения {_prev['ms']:.0f} мс")
+               f"на подключения {_prev['ms']:.0f} мс{_stg_txt}")
 
 st.session_state["_db_stats"] = {"taken": 0, "opened": 0, "ms": 0.0}
 st.session_state["_page_t0"] = _time.perf_counter()
+_STAGES = {}          # секунды по этапам текущего прогона — для строки «⏱» на следующем
+_stage_t = _time.perf_counter()
+
+
+def _stage(name):
+    """Фиксирует, сколько прошло с прошлой отметки."""
+    global _stage_t
+    now = _time.perf_counter()
+    _STAGES[name] = now - _stage_t
+    _stage_t = now
 
 
 def _perf_snapshot():
@@ -1107,11 +1119,13 @@ def _perf_snapshot():
     d = st.session_state.get("_db_stats", {})
     st.session_state["_db_last"] = {
         "sec": _time.perf_counter() - st.session_state.get("_page_t0", _time.perf_counter()),
-        "taken": d.get("taken", 0), "opened": d.get("opened", 0), "ms": d.get("ms", 0.0)}
+        "taken": d.get("taken", 0), "opened": d.get("opened", 0), "ms": d.get("ms", 0.0),
+        "stages": dict(_STAGES)}
 
 
 full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
+_stage("история")
 ensure_dict_table()
 try:
     ensure_schema()              # схема + индексы (без них выборки медленные)
@@ -1250,7 +1264,9 @@ def rating_emoji(r):
     return "🔴"
 
 
+_stage("справочник")
 calc_df = build_calc_df(full_df)
+_stage("calc_df")
 if not calc_df.empty:
     for c in ["Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "margin"]:
         calc_df[c] = pd.to_numeric(calc_df[c], errors="coerce")
@@ -1356,18 +1372,17 @@ if not calc_df.empty:
     ].copy()
     if GROUP_DF_COL:
         filtered_df["_group"] = filtered_df[GROUP_DF_COL].replace("", "—")
-    filtered_df["Время сбора"] = filtered_df["raw_created_at"].apply(
-        lambda dt: pd.to_datetime(dt).tz_convert(ZoneInfo(selected_tz)).strftime("%d.%m.%Y %H:%M")
-        if pd.notnull(dt) else "—")
+    filtered_df["Время сбора"] = (
+        pd.to_datetime(filtered_df["raw_created_at"], utc=True)
+        .dt.tz_convert(ZoneInfo(selected_tz)).dt.strftime("%d.%m.%Y %H:%M").fillna("—"))
     f_asins = filtered_df["raw_asin"].tolist()
-
-    hist_df = full_df[full_df["asin"].isin(f_asins)].copy()
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
-    hist_df = hist_df[hist_df["created_at"] >= cutoff]
-    hist_df["created_local"] = hist_df["created_at"].dt.tz_convert(ZoneInfo(selected_tz))
 else:
     filtered_df = pd.DataFrame()
-    hist_df = pd.DataFrame()
+    f_asins = []
+# hist_df тяжёлый (копия всей истории + пояс) и нужен только двум группам разделов —
+# строим его ниже, после выбора раздела, и только для них.
+hist_df = pd.DataFrame()
+_stage("фильтры")
 
 # ==================== ВКЛАДКИ ====================
 # Навигация вместо st.tabs: Streamlit рисует ВСЕ вкладки при каждом клике,
@@ -1385,6 +1400,13 @@ else:
     nav = st.radio("Раздел", SECTIONS, horizontal=True,
                    label_visibility="collapsed", key="nav_section")
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+_HIST_SECTIONS = {"📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)", "📊 Аналитика"}
+if nav in _HIST_SECTIONS and f_asins:
+    hist_df = full_df[full_df["asin"].isin(f_asins)]
+    hist_df = hist_df[hist_df["created_at"] >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)].copy()
+    hist_df["created_local"] = hist_df["created_at"].dt.tz_convert(ZoneInfo(selected_tz))
+    _stage("hist_df")
 
 
 def _log_view(section):
