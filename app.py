@@ -225,6 +225,14 @@ st.markdown(
              font-weight:600; color:#fff; }
     .card-asin { font-family: ui-monospace, Menlo, monospace; font-weight:600; font-size:14px; }
     .muted { color:#6e6e73; font-size:13px; }
+
+    /* --- страховка от тёмной темы: белые карточки => тёмный текст --- */
+    :root { color-scheme: light; }
+    .stApp, .stApp p, .stApp label, .stApp li, .stApp span,
+    div[data-testid="stMarkdownContainer"], div[data-testid="stWidgetLabel"] * { color: #1d1d1f; }
+    div[data-testid="stExpander"] summary, div[data-testid="stExpander"] summary * { color: #1d1d1f !important; }
+    div[data-testid="stCaptionContainer"], div[data-testid="stCaptionContainer"] * { color: #6e6e73 !important; }
+    .stApp .badge, .stApp button[kind="primary"], .stApp button[kind="primary"] * { color: #fff !important; }
 </style>
 """,
     unsafe_allow_html=True,
