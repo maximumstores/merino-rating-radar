@@ -32,14 +32,15 @@ import pandas as pd
 RISK = 4.2          # красная зона по логике Amazon
 WARN = 4.5
 MIN_DAYS = 5        # минимум дней с данными для прогноза
-MIN_SPAN_DAYS = 7   # минимум календарного охвата
+MIN_SPAN_DAYS = 14  # минимум календарного охвата: на 7–8 днях наклон — случайность
 MAX_WINDOW_DAYS = 60
+MAX_BAND = 1.0      # если 95% интервал шире 1★ — прогноз ненадёжен, число не показываем
 # рейтинг по горстке оценок — шум, а не тренд; константа та же, что в старом forecast.py (25)
 MIN_REVIEWS = int(os.environ.get("FORECAST_MIN_REVIEWS", "25"))
 DEFAULT_HORIZON = int(os.environ.get("FORECAST_HORIZON", "14"))
 
 STATUS_ORDER = {"уже в риске": 0, "пробьёт 4.2": 1, "возможен риск": 2, "падает": 3,
-                "стабильно": 4, "растёт": 5, "мало данных": 6, "мало отзывов": 7}
+                "стабильно": 4, "растёт": 5, "мало данных": 6, "мало отзывов": 7, "ряд шумный": 8}
 
 
 # ---------------------------------------------------------------- расчёт
@@ -104,15 +105,19 @@ def _fit_one(g: pd.DataFrame, horizon: int, now_day: pd.Timestamp) -> dict:
     lo, hi = pred - 1.96 * se, pred + 1.96 * se
     clip = lambda v: float(np.clip(v, 1.0, 5.0))
 
-    out.update(slope_30d=float(slope * 30), horizon_used=h, forecast=clip(pred),
-               forecast_lo=clip(lo), forecast_hi=clip(hi))
-    if slope < 0 and cur > RISK:
+    out.update(slope_30d=float(slope * 30), horizon_used=h)
+    reliable = (hi - lo) <= MAX_BAND
+    if reliable:
+        out.update(forecast=clip(pred), forecast_lo=clip(lo), forecast_hi=clip(hi))
+    if reliable and slope < 0 and cur > RISK:
         d_risk = float((cur - RISK) / -slope)
         if d_risk <= 120:  # дальше 4 месяцев — не информативно
             out["days_to_risk"] = d_risk
 
     if cur <= RISK:
         out["status"] = "уже в риске"
+    elif not reliable:
+        out["status"] = "ряд шумный"   # рейтинг скачет, интервал шире 1★ — прогноза нет
     elif pred <= RISK:
         out["status"] = "пробьёт 4.2"
     elif lo <= RISK and slope < 0:
@@ -257,10 +262,15 @@ def main():
         if args.csv:
             pf.to_csv(args.csv, index=False, encoding="utf-8-sig")
             print("CSV:", args.csv)
-        risky = pf[pf["status"].isin(["уже в риске", "пробьёт 4.2", "возможен риск"])]
+        soon = pf[pf["status"].isin(["пробьёт 4.2", "возможен риск", "падает"])]
+        cols0 = ["asin", "source", "rating_now", "reviews", "forecast", "forecast_lo", "forecast_hi",
+                 "slope_30d", "days_to_risk", "days_with_data", "status"]
+        print("\nЕщё НЕ красные, но идут к 4.2 (ради этого прогноз):")
+        print(soon[cols0].head(30).round(3).to_string(index=False) if not soon.empty else "  нет")
+        risky = pf[pf["status"].isin(["уже в риске"])]
         cols = ["asin", "source", "rating_now", "reviews", "forecast", "forecast_lo", "forecast_hi",
                 "slope_30d", "days_to_risk", "days_with_data", "status"]
-        print("\nТоп-20 по риску:")
+        print("\nУже красные (рейтинг ≤ 4.2 сейчас), топ-20:")
         print(risky[cols].head(20).round(3).to_string(index=False))
     finally:
         conn.close()
