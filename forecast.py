@@ -34,10 +34,12 @@ WARN = 4.5
 MIN_DAYS = 5        # минимум дней с данными для прогноза
 MIN_SPAN_DAYS = 7   # минимум календарного охвата
 MAX_WINDOW_DAYS = 60
+# рейтинг по горстке оценок — шум, а не тренд; константа та же, что в старом forecast.py (25)
+MIN_REVIEWS = int(os.environ.get("FORECAST_MIN_REVIEWS", "25"))
 DEFAULT_HORIZON = int(os.environ.get("FORECAST_HORIZON", "14"))
 
 STATUS_ORDER = {"уже в риске": 0, "пробьёт 4.2": 1, "возможен риск": 2, "падает": 3,
-                "стабильно": 4, "растёт": 5, "мало данных": 6}
+                "стабильно": 4, "растёт": 5, "мало данных": 6, "мало отзывов": 7}
 
 
 # ---------------------------------------------------------------- расчёт
@@ -57,12 +59,17 @@ def _fit_one(g: pd.DataFrame, horizon: int, now_day: pd.Timestamp) -> dict:
     n = len(g)
     span = int((g["day"].max() - g["day"].min()).days)
     cur = float(g["rating"].iloc[-1])
+    rev = None
+    if "review_count" in g.columns:
+        rc = pd.to_numeric(g["review_count"], errors="coerce").dropna()
+        rev = int(rc.iloc[-1]) if len(rc) else None
     out = {
         "asin": g["asin"].iloc[0],
         "source": g["source"].iloc[-1] if "source" in g.columns else None,
         "days_with_data": n,
         "span_days": span,
         "rating_now": cur,
+        "reviews": rev,
         "last_day": g["day"].max().date(),
         "stale_days": int((now_day - g["day"].max()).days),
         "slope_30d": np.nan,
@@ -75,6 +82,10 @@ def _fit_one(g: pd.DataFrame, horizon: int, now_day: pd.Timestamp) -> dict:
     }
     if n < MIN_DAYS or span < MIN_SPAN_DAYS:
         out["status"] = "мало данных"
+        return out
+    if rev is not None and rev < MIN_REVIEWS:
+        # 1–3 оценки дают рейтинги 1.0 / 3.5 и скачки на ±1★ от одной оценки — прогнозировать нечего
+        out["status"] = "мало отзывов"
         return out
 
     x = (g["day"] - g["day"].min()).dt.total_seconds().values / 86400.0
@@ -144,6 +155,7 @@ def ensure_table(conn) -> None:
                 source         TEXT,
                 computed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
                 rating_now     REAL,
+                reviews        INTEGER,
                 forecast       REAL,
                 forecast_lo    REAL,
                 forecast_hi    REAL,
@@ -154,6 +166,7 @@ def ensure_table(conn) -> None:
                 span_days      INTEGER,
                 status         TEXT
             )""")
+        cur.execute("ALTER TABLE asin_forecast ADD COLUMN IF NOT EXISTS reviews INTEGER")
     conn.commit()
 
 
@@ -186,7 +199,7 @@ def save_forecast(conn, pf: pd.DataFrame) -> int:
     from psycopg2.extras import execute_values
 
     ensure_table(conn)
-    cols = ["asin", "source", "rating_now", "forecast", "forecast_lo", "forecast_hi",
+    cols = ["asin", "source", "rating_now", "reviews", "forecast", "forecast_lo", "forecast_hi",
             "slope_30d", "days_to_risk", "horizon_used", "days_with_data", "span_days", "status"]
     rows = []
     for r in pf[cols].itertuples(index=False):
@@ -245,7 +258,7 @@ def main():
             pf.to_csv(args.csv, index=False, encoding="utf-8-sig")
             print("CSV:", args.csv)
         risky = pf[pf["status"].isin(["уже в риске", "пробьёт 4.2", "возможен риск"])]
-        cols = ["asin", "source", "rating_now", "forecast", "forecast_lo", "forecast_hi",
+        cols = ["asin", "source", "rating_now", "reviews", "forecast", "forecast_lo", "forecast_hi",
                 "slope_30d", "days_to_risk", "days_with_data", "status"]
         print("\nТоп-20 по риску:")
         print(risky[cols].head(20).round(3).to_string(index=False))
