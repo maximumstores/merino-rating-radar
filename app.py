@@ -482,6 +482,20 @@ def price_to_num(val):
     return round(v, 2) if v else None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_forecast_df():
+    """Готовый прогноз из asin_forecast (считается в GitHub Actions после сбора, см. forecast.py)."""
+    try:
+        import forecast as _fc
+        conn = _conn()
+        try:
+            return _fc.load_forecast(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=600, show_spinner="Загружаю историю замеров…", max_entries=8)
 def get_full_history(days=120):
     """История метрик за период. Кэш обязателен: без него запрос на сотни тысяч
@@ -1266,6 +1280,16 @@ def rating_emoji(r):
 
 _stage("справочник")
 calc_df = build_calc_df(full_df)
+# готовый прогноз по ASIN (считает forecast.py после сбора): значение на горизонте + статус
+_fc_df = get_forecast_df()
+if not calc_df.empty:
+    if not _fc_df.empty:
+        _fc_map = _fc_df.set_index("asin")
+        calc_df["Прогноз"] = calc_df["raw_asin"].map(_fc_map["forecast"])
+        calc_df["Прогноз статус"] = calc_df["raw_asin"].map(_fc_map["status"]).fillna("")
+    else:
+        calc_df["Прогноз"] = np.nan
+        calc_df["Прогноз статус"] = ""
 _stage("calc_df")
 if not calc_df.empty:
     for c in ["Рейтинг", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "margin"]:
@@ -1484,7 +1508,7 @@ def render_portfolio(filtered_df, kind):
 
         if view_mode == "Таблица":
             cols_order = ["Выбор", "Статус", "Время сбора", "ASIN", "Фото", "Источник", "Категория", "Parent",
-                          "Рейтинг ★", "Δ Рейтинг", "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR",
+                          "Рейтинг ★", "Δ Рейтинг", "Прогноз", "Отзывы", "Δ Отзывы", "1–2★ %", "Тренд", "Запас (до 4.0)", "BSR",
                           "Комментарий"]
             if GROUP_DF_COL:
                 cols_order = [GROUP_DF_COL] + [c for c in cols_order if c != GROUP_DF_COL]
@@ -1527,6 +1551,10 @@ def render_portfolio(filtered_df, kind):
                         help="Категория из API — только для справки, в фильтры не идёт"),
                     "Рейтинг ★": st.column_config.TextColumn("Рейтинг", width="small", disabled=True),
                     "Δ Рейтинг": st.column_config.NumberColumn("Δ★", format="%+.2f", width="small", disabled=True),
+                    "Прогноз": st.column_config.NumberColumn(
+                        "Прогноз", format="%.2f", width="small", disabled=True,
+                        help="Рейтинг через ~2 недели по линейному тренду истории (считается после каждого сбора). "
+                             "Пусто — меньше 5 дней данных. ≤4.2 — красная зона."),
                     "Отзывы": st.column_config.NumberColumn("Отзывы", width="small", disabled=True),
                     "Δ Отзывы": st.column_config.NumberColumn("Δ отз.", format="%+d", width="small", disabled=True),
                     "1–2★ %": st.column_config.TextColumn("1–2★", width="small", disabled=True),
@@ -3980,33 +4008,48 @@ if nav == "📈 Прогноз":
                               showlegend=False)
                     st.plotly_chart(fig, width="stretch")
 
-        # --- сводный прогноз по портфелю ---
+        # --- сводный прогноз по портфелю (готовая таблица из forecast.py) ---
         st.markdown("---")
-        st.markdown("**Прогноз по всему портфелю (+30 дн.)** — кто пробьёт 4.2 вниз")
-        rows = []
-        for a, grp in full_df[full_df["asin"].isin(f_asins)].groupby("asin"):
-            grp = grp.sort_values("created_at").dropna(subset=["rating"])
-            if len(grp) < 2:
-                continue
-            xs = (grp["created_at"].astype(np.int64) // 10**9).values.reshape(-1, 1)
-            m = LinearRegression().fit(xs, grp["rating"].values)
-            cur = float(grp["rating"].iloc[-1])
-            p30 = float(np.clip(m.predict([[xs[-1][0] + 30 * 86400]])[0], 1, 5))
-            rows.append({"ASIN": a, "Сейчас": cur, "Прогноз +30": p30, "Δ": p30 - cur,
-                         "Тренд ★/мес": m.coef_[0] * 86400 * 30, "Замеров": len(grp)})
-        if not rows:
-            st.caption("Нужно ≥2 замера хотя бы на одном ASIN")
+        st.markdown("**Прогноз по всему портфелю** — кто пробьёт 4.2 вниз")
+        _pf = get_forecast_df()
+        if _pf.empty:
+            st.caption("Прогноз по портфелю ещё не посчитан — появится после ближайшего сбора "
+                       "(или запусти `python forecast.py --save`).")
         else:
-            pf = pd.DataFrame(rows).sort_values("Прогноз +30")
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=pf["ASIN"], y=pf["Сейчас"], name="Сейчас", marker_color="#c7c7cc"))
-            fig.add_trace(go.Bar(x=pf["ASIN"], y=pf["Прогноз +30"], name="Прогноз +30",
-                                 marker_color=[PALETTE["risk"] if v <= 4.2 else (PALETTE["warn"] if v < 4.5 else PALETTE["ok"])
-                                               for v in pf["Прогноз +30"]]))
-            fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
-            style_fig(fig, 340, barmode="group", yaxis=dict(range=[3.0, 5.05]), legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig, width="stretch")
-            st.dataframe(pf.style.format({"Сейчас": "{:.2f}", "Прогноз +30": "{:.2f}", "Δ": "{:+.2f}", "Тренд ★/мес": "{:+.3f}"}),
+            _pf = _pf[_pf["asin"].isin(f_asins or all_asins)].copy()
+            _calc_at = pd.to_datetime(_pf["computed_at"], utc=True).max().tz_convert(ZoneInfo(selected_tz))
+            st.caption(f"Посчитано: {_calc_at:%d.%m.%Y %H:%M} ({tz_short}) · линейный тренд по дневным замерам, "
+                       f"горизонт до {int(_pf['horizon_used'].max()) if _pf['horizon_used'].notna().any() else '—'} дн. "
+                       f"(не дальше половины истории ASIN)")
+            _cnt = _pf["status"].value_counts()
+            _k = st.columns(5)
+            for _col, (_lbl, _key) in zip(_k, [("Уже в риске", "уже в риске"), ("Пробьёт 4.2", "пробьёт 4.2"),
+                                               ("Возможен риск", "возможен риск"), ("Падает", "падает"),
+                                               ("Мало данных", "мало данных")]):
+                _col.metric(_lbl, int(_cnt.get(_key, 0)))
+
+            _risky = _pf[_pf["status"].isin(["пробьёт 4.2", "возможен риск", "падает"])].dropna(subset=["forecast"])
+            _risky = _risky.sort_values("forecast").head(40)
+            if not _risky.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=_risky["asin"], y=_risky["rating_now"], name="Сейчас", marker_color="#c7c7cc"))
+                fig.add_trace(go.Bar(x=_risky["asin"], y=_risky["forecast"], name="Прогноз",
+                                     marker_color=[PALETTE["risk"] if v <= 4.2 else (PALETTE["warn"] if v < 4.5 else PALETTE["ok"])
+                                                   for v in _risky["forecast"]]))
+                fig.add_hline(y=4.2, line_dash="dot", line_color=PALETTE["risk"])
+                style_fig(fig, 340, barmode="group", yaxis=dict(range=[3.0, 5.05]), legend=dict(orientation="h", y=-0.3))
+                st.plotly_chart(fig, width="stretch")
+                st.caption("Показаны до 40 позиций с самым низким прогнозом среди «пробьёт 4.2 / возможен риск / падает».")
+
+            _show = _pf.rename(columns={"asin": "ASIN", "source": "Рынок", "rating_now": "Сейчас", "forecast": "Прогноз",
+                                        "forecast_lo": "Мин (95%)", "forecast_hi": "Макс (95%)",
+                                        "slope_30d": "Тренд ★/мес", "days_to_risk": "Дней до 4.2",
+                                        "days_with_data": "Дней данных", "status": "Статус"})
+            _show = _show[["Статус", "ASIN", "Рынок", "Сейчас", "Прогноз", "Мин (95%)", "Макс (95%)",
+                           "Тренд ★/мес", "Дней до 4.2", "Дней данных"]]
+            st.dataframe(_show.style.format({"Сейчас": "{:.2f}", "Прогноз": "{:.2f}", "Мин (95%)": "{:.2f}",
+                                             "Макс (95%)": "{:.2f}", "Тренд ★/мес": "{:+.3f}", "Дней до 4.2": "{:.0f}"},
+                                            na_rep="—"),
                          width="stretch", hide_index=True)
 
 def render_asin_manager(kind):
