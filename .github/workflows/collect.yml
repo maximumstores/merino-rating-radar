@@ -67,6 +67,14 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Прогноз рейтинга
+        # считает только если после прошлого расчёта появились новые замеры —
+        # то есть раз за каждый сбор, а не каждые 30 минут
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORECAST_HORIZON: "14"
+        run: python forecast.py --save --if-new-data
+
       - name: Алерты по портфелям
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
