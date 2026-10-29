@@ -213,6 +213,11 @@ st.markdown(
     .block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1480px; }
     h1, h2, h3 { font-weight: 650 !important; letter-spacing: -0.02em !important; color: #1d1d1f !important; }
     h3 { margin-top: 0.4rem !important; }
+
+    /* --- чипы в multiselect (красный фон): белый текст и крестик --- */
+    [data-baseweb="tag"] { background-color: #d13438 !important; }
+    [data-baseweb="tag"], [data-baseweb="tag"] span, [data-baseweb="tag"] p,
+    [data-baseweb="tag"] svg { color: #ffffff !important; fill: #ffffff !important; }
     div[data-testid="stForm"], div[data-testid="stExpander"] {
         border: 1px solid #e5e5ea !important; border-radius: 12px !important; background: #fff !important; }
     div[data-testid="stTabs"] button { font-weight: 600; font-size: 15px; }
