@@ -1428,7 +1428,7 @@ _stage("фильтры")
 # Навигация вместо st.tabs: Streamlit рисует ВСЕ вкладки при каждом клике,
 # поэтому тяжёлые таблицы и графики тормозили даже при переключении фильтра.
 # Здесь рендерится только выбранный раздел.
-SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "🥊 Конкуренты", "🧠 AI-анализ",
+SECTIONS = ["📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "⭐ Рейтинги", "🥊 Конкуренты", "🧠 AI-анализ",
             "📅 Динамика по дням (Чайлд)", "📅 Динамика по дням (Парент)", "📊 Аналитика", "🤖 Бот возвратов",
             "📈 Прогноз", "⚙️ Сбор и управление", "👥 Активность дашборда", "ℹ️ Как это работает"]
 
@@ -1643,6 +1643,91 @@ if nav == "📋 Портфель (Чайлд)":
 if nav == "📋 Портфель (Парент)":
     render_portfolio(filtered_df, "parent")
 
+
+
+# ---------- РЕЙТИНГИ: все наши ASIN по странам ----------
+def render_ratings_by_country(filtered_df):
+    st.markdown("### Рейтинги — все наши ASIN по странам")
+    st.markdown("<div class='muted'>Последний замер по каждому ASIN (чайлды и паренты). "
+                "Верхние фильтры страницы работают и здесь. Цвет — по логике Amazon: "
+                "≥4.5 зелёный · 4.3–4.4 жёлтый · ≤4.2 красный.</div>", unsafe_allow_html=True)
+    if filtered_df.empty:
+        st.warning("В базе нет сохранённых метрик под текущие фильтры")
+        return
+    own = filtered_df[filtered_df["kind"].isin(["child", "parent"])].copy()
+    if own.empty:
+        st.info("Нет наших ASIN под текущие фильтры")
+        return
+
+    own["Страна"] = own["Источник"].replace({"none": "—"})
+    own["Тип"] = own["kind"].map({"child": "Чайлд", "parent": "Парент"})
+
+    # --- сводка по странам ---
+    def _cnt(sr, lo, hi):
+        return int(((sr >= lo) & (sr < hi)).sum())
+    summ = []
+    for c, g in own.groupby("Страна"):
+        r = g["Рейтинг"].dropna()
+        summ.append({
+            "Страна": c, "ASIN": len(g),
+            "Ср. рейтинг": round(float(r.mean()), 2) if len(r) else None,
+            "🟢 ≥4.5": _cnt(r, 4.45, 6), "🟡 4.3–4.4": _cnt(r, 4.25, 4.45), "🔴 ≤4.2": _cnt(r, 0, 4.25),
+            "⚪ нет данных": int(g["Рейтинг"].isna().sum()),
+            "Последний замер": pd.to_datetime(g["raw_created_at"]).max().tz_convert(ZoneInfo(selected_tz)).strftime("%d.%m %H:%M"),
+        })
+    summ = pd.DataFrame(summ).sort_values("ASIN", ascending=False)
+    st.dataframe(summ, width="stretch", hide_index=True,
+                 height=min(420, 40 + 35 * len(summ)),
+                 column_config={"Ср. рейтинг": st.column_config.NumberColumn("Ср. рейтинг", format="%.2f")})
+
+    # --- таблица по ASIN ---
+    f1, f2, f3 = st.columns([2.2, 1.2, 1.4])
+    countries = sorted(own["Страна"].unique())
+    pick_c = f1.multiselect("Страна", countries, default=[], placeholder="Все страны", key="rt_countries")
+    pick_t = f2.radio("Тип", ["Все", "Чайлд", "Парент"], horizontal=True, key="rt_kind")
+    only_bad = f3.toggle("Только 🔴 и 🟡", value=False, key="rt_only_bad")
+
+    view = own
+    if pick_c:
+        view = view[view["Страна"].isin(pick_c)]
+    if pick_t != "Все":
+        view = view[view["Тип"] == pick_t]
+    if only_bad:
+        view = view[view["Рейтинг"] < 4.45]
+    if view.empty:
+        st.info("Под выбранные условия ничего нет")
+        return
+
+    tz = ZoneInfo(selected_tz)
+    view = view.sort_values(["Страна", "Рейтинг"], na_position="last")
+    tbl = pd.DataFrame({
+        "Страна": view["Страна"].values,
+        "ASIN": view["ASIN"].values,
+        "Тип": view["Тип"].values,
+        "Рейтинг": view["Рейтинг"].values,
+        "Δ": view["Δ Рейтинг"].values,
+        "Отзывы": view["Отзывы"].values,
+        "Δ отз.": view["Δ Отзывы"].values,
+        "Статус": view["Статус"].values,
+        "Замер": [pd.to_datetime(t).tz_convert(tz).strftime("%d.%m %H:%M") if pd.notnull(t) else "—"
+                  for t in view["raw_created_at"]],
+        "Parent": view["Parent"].values,
+        "Категория": view["Категория"].values,
+    })
+    _sty = tbl.style
+    styled = (_sty.map(rating_color, subset=["Рейтинг"]) if hasattr(_sty, "map")
+              else _sty.applymap(rating_color, subset=["Рейтинг"]))
+    styled = styled.format({"Рейтинг": "{:.2f}", "Δ": "{:+.2f}", "Отзывы": "{:,.0f}", "Δ отз.": "{:+.0f}"}, na_rep="—")
+    st.caption(f"Позиций: {len(tbl)}")
+    st.dataframe(styled, width="stretch", hide_index=True, height=min(760, 40 + 35 * len(tbl)),
+                 column_config={"ASIN": asin_link_config(),
+                                "Замер": st.column_config.TextColumn("Замер", help="Когда сняли последние данные по ASIN")})
+    csv = tbl.assign(ASIN=view["raw_asin"].values).to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⬇ CSV", csv, "ratings_by_country.csv", "text/csv", key="rt_csv")
+
+
+if nav == "⭐ Рейтинги":
+    render_ratings_by_country(filtered_df)
 
 
 # ---------- КОНКУРЕНТЫ ----------
