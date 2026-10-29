@@ -1099,11 +1099,21 @@ def get_tracked_with_kind():
 
 KIND_LABEL = {"child": "Чайлд", "parent": "Парент", "competitor": "Конкурент"}
 # разбираем накопившиеся команды бота (/start и др.) — работает без отдельного воркера
+@st.cache_resource(show_spinner=False)
+def _bot_poll_state():
+    return {"t": 0.0}
+
+
 if NOTIFIER_OK and notifier.BOT_TOKEN:
-    try:
-        notifier.process_all_channels()
-    except Exception:
-        pass
+    # до 10 запросов к Telegram на каждый клик по разделу тормозили переключение;
+    # команды ботов к тому же разбирает bot.yml раз в 10 минут, так что здесь хватает редкого опроса
+    _bp = _bot_poll_state()
+    if time.time() - _bp["t"] > 120:
+        _bp["t"] = time.time()
+        try:
+            notifier.process_all_channels()
+        except Exception:
+            pass
 
 tracked_kind = get_tracked_with_kind()
 tracked = list(tracked_kind.keys())
@@ -1157,12 +1167,21 @@ full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
 st.session_state["full_df_sec"] = time.time() - _t_hist
 _stage("история")
 ensure_dict_table()
-try:
-    ensure_schema()              # схема + индексы (без них выборки медленные)
-    ensure_reviews_schema()      # таблицы отзывов — до первого сбора
-    ensure_competitor_schema()   # comp_group / title в справочнике
-except Exception:
-    pass
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_all_schemas():
+    """CREATE TABLE/INDEX IF NOT EXISTS — один раз на процесс, а не на каждый клик."""
+    try:
+        ensure_schema()              # схема + индексы (без них выборки медленные)
+        ensure_reviews_schema()      # таблицы отзывов — до первого сбора
+        ensure_competitor_schema()   # comp_group / title в справочнике
+    except Exception:
+        return False
+    return True
+
+
+_ensure_all_schemas()
 dict_df = get_dictionary()
 dict_map = dict_df.set_index("asin").to_dict("index") if not dict_df.empty else {}
 # страна из справочника имеет приоритет над каскадом
@@ -1295,7 +1314,23 @@ def rating_emoji(r):
 
 
 _stage("справочник")
-calc_df = build_calc_df(full_df)
+def _calc_key():
+    try:
+        dh = int(pd.util.hash_pandas_object(dict_df.astype(str), index=False).sum()) if not dict_df.empty else 0
+        return (len(full_df), str(full_df["created_at"].max()) if not full_df.empty else "",
+                dh, hash(frozenset(tracked_kind.items())))
+    except Exception:
+        return None
+
+
+_ck = _calc_key()
+_memo = st.session_state.get("_calc_memo")
+if _ck is not None and _memo and _memo[0] == _ck:
+    calc_df = _memo[1].copy()
+else:
+    calc_df = build_calc_df(full_df)
+    if _ck is not None:
+        st.session_state["_calc_memo"] = (_ck, calc_df.copy())
 # готовый прогноз по ASIN (считает forecast.py после сбора): значение на горизонте + статус
 _fc_df = get_forecast_df()
 if not calc_df.empty:
