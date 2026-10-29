@@ -1659,7 +1659,19 @@ def render_ratings_by_country(filtered_df):
         st.info("Нет наших ASIN под текущие фильтры")
         return
 
-    own["Страна"] = own["Источник"].replace({"none": "—"})
+    # страна: из замера, а если её там нет (none / пусто) — из справочника
+    def _country(row):
+        src = str(row["Источник"] or "").upper()
+        if src in MARKET_DOMAINS:
+            return src, ""
+        dm = str((dict_map.get(row["raw_asin"]) or {}).get("market") or "").upper()
+        if dm in MARKET_DOMAINS:
+            return dm, "страна из справочника"
+        return "—", "нет страны в справочнике"
+
+    _res = own.apply(_country, axis=1)
+    own["Страна"] = [c for c, _ in _res]
+    own["_why"] = [w for _, w in _res]
     own["Тип"] = own["kind"].map({"child": "Чайлд", "parent": "Парент"})
 
     # --- сводка по странам ---
@@ -1702,7 +1714,7 @@ def render_ratings_by_country(filtered_df):
     view = view.sort_values(["Страна", "Рейтинг"], na_position="last")
     tbl = pd.DataFrame({
         "Страна": view["Страна"].values,
-        "ASIN": view["ASIN"].values,
+        "ASIN": [asin_url(a, c) for a, c in zip(view["raw_asin"], view["Страна"])],
         "Тип": view["Тип"].values,
         "Рейтинг": view["Рейтинг"].values,
         "Δ": view["Δ Рейтинг"].values,
@@ -1713,6 +1725,10 @@ def render_ratings_by_country(filtered_df):
                   for t in view["raw_created_at"]],
         "Parent": view["Parent"].values,
         "Категория": view["Категория"].values,
+        "Причина": [
+            ("последний замер пустой" if pd.isna(r) and not w else
+             (w + (" · замер пустой" if pd.isna(r) else "")) if w else "")
+            for r, w in zip(view["Рейтинг"], view["_why"])],
     })
     _sty = tbl.style
     styled = (_sty.map(rating_color, subset=["Рейтинг"]) if hasattr(_sty, "map")
