@@ -298,6 +298,17 @@ MARKET_DOMAINS = {
     "AE": "amazon.ae", "SA": "amazon.sa", "EG": "amazon.eg", "IN": "amazon.in",
     "SG": "amazon.sg", "AU": "amazon.com.au",
 }
+
+
+def asin_url(asin, market=None):
+    """Ссылка на карточку для LinkColumn; витрина по коду страны (как в остальных таблицах)."""
+    dom = MARKET_DOMAINS.get(str(market or "").upper(), "amazon.com.be")
+    return f"https://www.{dom}/dp/{asin}"
+
+
+def asin_link_config(label="ASIN"):
+    """Колонка-ссылка: в ячейке виден сам ASIN, клик открывает Amazon в новой вкладке."""
+    return st.column_config.LinkColumn(label, width="medium", display_text=r"/dp/([A-Z0-9]{10})")
 VALID_SOURCES = tuple(MARKET_DOMAINS.keys())
 
 
@@ -2929,7 +2940,9 @@ if nav == "🧠 AI-анализ":
                            "rating_only", "rating_only_%"]].copy()
                 show.columns = ["ASIN", "Страна", "Рейтинг", "Оценок всего", "С текстом",
                                 "Без текста", "% без текста"]
-                st.dataframe(show, width="stretch", hide_index=True, height=380)
+                show["ASIN"] = [asin_url(a, m) for a, m in zip(show["ASIN"], show["Страна"])]
+                st.dataframe(show, width="stretch", hide_index=True, height=380,
+                             column_config={"ASIN": asin_link_config()})
                 fig = px.bar(ro.head(20), x="asin", y="rating_only_%", color="rating_only_%",
                              color_continuous_scale=["#1f8a4c", "#c77800", "#d13438"],
                              labels={"asin": "", "rating_only_%": "% оценок без текста"})
@@ -3773,10 +3786,13 @@ if nav == "🤖 Бот возвратов":
             show["after"] = show["after"].map({True: "после", False: "до"})
             show.columns = ["ASIN", "Страна", "Период", "Было ★", "Стало ★", "Δ★", "Было оценок", "Стало оценок",
                             "Новых", "Входящий ★", "Новых 1–2★", "Бот"]
-            st.dataframe(show.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
+            show_view = show.copy()
+            show_view["ASIN"] = [asin_url(a, m) for a, m in zip(show_view["ASIN"], show_view["Страна"])]
+            st.dataframe(show_view.style.format({"Было ★": "{:.1f}", "Стало ★": "{:.1f}", "Δ★": "{:+.2f}",
                                             "Входящий ★": "{:.2f}", "Было оценок": "{:.0f}", "Стало оценок": "{:.0f}",
                                             "Новых": "{:.0f}", "Новых 1–2★": "{:.0f}"}),
-                         width="stretch", hide_index=True, height=min(420, 40 + 35 * len(show)))
+                         width="stretch", hide_index=True, height=min(420, 40 + 35 * len(show)),
+                         column_config={"ASIN": asin_link_config()})
             st.download_button("⬇ CSV аномалий", show.to_csv(index=False).encode("utf-8-sig"), "bot_anomalies.csv", "text/csv")
 
         # --- по группе: до/после ---
@@ -3857,13 +3873,22 @@ if nav == "📈 Прогноз":
             st.stop()
 
         sc1, sc2 = st.columns([3, 1])
+        # начальное значение кладём в session_state до создания виджета (вместе с default Streamlit ругается),
+        # заодно выкидываем выбранное, чего уже нет в списке после смены фильтров
+        if "fc_targets" not in st.session_state:
+            st.session_state["fc_targets"] = pool_f[:1]
+        else:
+            st.session_state["fc_targets"] = [a for a in st.session_state["fc_targets"] if a in pool_f]
         targets = sc1.multiselect(
-            "ASIN для прогноза", options=pool_f, default=pool_f[:1], key="fc_targets",
+            "ASIN для прогноза", options=pool_f, key="fc_targets",
             format_func=lambda a: asin_label(a, _fm, with_title=False),
             help="Можно выбрать несколько — сверху появится сводная таблица по всем")
-        if sc2.button(f"Взять все ({len(pool_f)})", key="fc_take_all", width="stretch"):
-            st.session_state["fc_targets"] = pool_f
-            st.rerun()
+        def _fc_take_all(vals):
+            # callback выполняется до отрисовки виджета, поэтому ключ multiselect можно менять
+            st.session_state["fc_targets"] = list(vals)
+
+        sc2.button(f"Взять все ({len(pool_f)})", key="fc_take_all", width="stretch",
+                   on_click=_fc_take_all, args=(pool_f,))
 
         if not targets:
             st.info("Выбери хотя бы один ASIN")
@@ -3895,12 +3920,14 @@ if nav == "📈 Прогноз":
                     "Замеров": len(hh)})
             if rows_f:
                 sm = pd.DataFrame(rows_f).sort_values("Δ")
+                sm["ASIN"] = [asin_url(a, m) for a, m in zip(sm["ASIN"], sm["Страна"])]
                 st.markdown(f"**Сводный прогноз — {len(sm)} позиций**")
                 st.dataframe(
                     sm.style.background_gradient(subset=["Δ"], cmap="RdYlGn", vmin=-0.3, vmax=0.3)
                       .format({"Сейчас": "{:.2f}", f"Через {horizon} дн.": "{:.2f}",
                                "Δ": "{:+.2f}", "★/мес": "{:+.3f}"}),
                     width="stretch", hide_index=True,
+                    column_config={"ASIN": asin_link_config()},
                     height=min(420, 40 + 35 * len(sm)))
                 st.caption("Δ — изменение рейтинга за горизонт по линейному тренду. "
                            "Красные строки — те, что просядут сильнее всего.")
@@ -4054,10 +4081,12 @@ if nav == "📈 Прогноз":
                                         "days_with_data": "Дней данных", "status": "Статус"})
             _show = _show[["Статус", "ASIN", "Рынок", "Сейчас", "Отзывов", "Прогноз", "Мин (95%)", "Макс (95%)",
                            "Тренд ★/мес", "Дней до 4.2", "Дней данных"]]
+            _show["ASIN"] = [asin_url(a, m) for a, m in zip(_show["ASIN"], _show["Рынок"])]
             st.dataframe(_show.style.format({"Сейчас": "{:.2f}", "Прогноз": "{:.2f}", "Мин (95%)": "{:.2f}",
                                              "Макс (95%)": "{:.2f}", "Тренд ★/мес": "{:+.3f}", "Дней до 4.2": "{:.0f}"},
                                             na_rep="—"),
-                         width="stretch", hide_index=True)
+                         width="stretch", hide_index=True,
+                         column_config={"ASIN": asin_link_config()})
 
 def render_asin_manager(kind):
     tracked_k = tracked_by_kind.get(kind, [])
@@ -4568,10 +4597,12 @@ if nav == "⚙️ Сбор и управление":
             except Exception as e:
                 st.error(f"Ошибка загрузки: {e}")
         if not dict_df.empty:
-            st.dataframe(dict_df.rename(columns={"asin": "ASIN", "parent_asin": "Parent", "category": "Категория",
+            _dict_view = dict_df.rename(columns={"asin": "ASIN", "parent_asin": "Parent", "category": "Категория",
                                                  "subcategory": "Подкатегория", "product_type": "Вид",
-                                                 "brand": "Бренд", "market": "Страна"}),
-                         width="stretch", hide_index=True, height=260)
+                                                 "brand": "Бренд", "market": "Страна"})
+            _dict_view["ASIN"] = [asin_url(a, m) for a, m in zip(_dict_view["ASIN"], _dict_view["Страна"])]
+            st.dataframe(_dict_view, width="stretch", hide_index=True, height=260,
+                         column_config={"ASIN": asin_link_config()})
             miss = [a for a in tracked if a not in dict_map]
             if miss:
                 st.caption(f"Без записи в справочнике: {len(miss)} ASIN из списка отслеживания")
