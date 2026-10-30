@@ -512,37 +512,105 @@ def get_forecast_df():
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=600, show_spinner="Загружаю историю замеров…", max_entries=8)
-def get_full_history(days=120):
-    """История метрик за период. Кэш обязателен: без него запрос на сотни тысяч
-    строк повторялся при каждом клике — отсюда «экран думает» на переключении вкладок.
-    Сбрасывается после сбора через st.cache_data.clear()."""
+_HISTORY_COLS = """asin, source, rating, review_count, histogram_json, image_url,
+                   bsr, bsr_num, price, note, COALESCE(coupon, FALSE) AS coupon,
+                   COALESCE(prime_excl, FALSE) AS prime_excl,
+                   COALESCE(list_price, '') AS list_price, COALESCE(discount, '') AS discount,
+                   COALESCE(deal_info, '') AS deal_info, created_at"""
+
+
+def _finish_history(df):
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
+    df["bsr_num"] = pd.to_numeric(df.get("bsr_num"), errors="coerce")
+    df["price_num"] = df.get("price", pd.Series(dtype=str)).map(price_to_num)
+    return df
+
+
+def _load_history(days):
+    """Вся история за период (нужна разделам с графиками и динамикой)."""
     if not DATABASE_URL:
         return pd.DataFrame()
     try:
         conn = _conn()
         df = pd.read_sql(
-            """
-            SELECT asin, source, rating, review_count, histogram_json, image_url,
-                   bsr, bsr_num, price, note, COALESCE(coupon, FALSE) AS coupon,
-                   COALESCE(prime_excl, FALSE) AS prime_excl,
-                   COALESCE(list_price, '') AS list_price, COALESCE(discount, '') AS discount,
-                   COALESCE(deal_info, '') AS deal_info, created_at
+            f"""
+            SELECT {_HISTORY_COLS}
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
             ORDER BY created_at ASC;
             """, conn, params=(str(int(days)),))
         conn.close()
-        df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-        df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
-        df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
-        df["bsr_num"] = pd.to_numeric(df.get("bsr_num"), errors="coerce")
-        df["price_num"] = df.get("price", pd.Series(dtype=str)).map(price_to_num)
-        return df
+        return _finish_history(df)
     except Exception as e:
         st.error(f"Не читается история метрик: {e}")
         return pd.DataFrame()
+
+
+# колонки, которые groupby().last() в build_calc_df берёт как «последнее НЕпустое значение»
+_SNAP_NULLABLE = ["source", "rating", "review_count", "histogram_json", "image_url",
+                  "bsr", "bsr_num", "price", "note"]
+_SNAP_ALWAYS = ["coupon", "prime_excl", "list_price", "discount", "deal_info"]   # уже без NULL (COALESCE)
+
+
+def _load_latest_snapshot(days):
+    """Срез «как для build_calc_df», но без выкачки всей истории: по два ряда на ASIN.
+    1) последний ряд с последним НЕпустым значением по каждой колонке — ровно как groupby().last();
+    2) предыдущий ряд с рейтингом/отзывами «как есть» — ровно как groupby().nth(-2).
+    Возвращает None при любой ошибке — вызывающий откатится на полную историю."""
+    if not DATABASE_URL:
+        return pd.DataFrame()
+    try:
+        agg = ",\n".join(
+            [f"(array_agg({c} ORDER BY created_at DESC) FILTER (WHERE {c} IS NOT NULL))[1] AS {c}"
+             for c in _SNAP_NULLABLE]
+            + [f"(array_agg({c} ORDER BY created_at DESC))[1] AS {c}" for c in _SNAP_ALWAYS])
+        sql = f"""
+            WITH b AS (
+                SELECT {_HISTORY_COLS},
+                       ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
+                FROM asin_metrics
+                WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
+                  AND created_at >= NOW() - (%s || ' days')::interval
+            )
+            SELECT l.*, p.rating AS prev_rating, p.review_count AS prev_review_count
+            FROM (SELECT asin, {agg}, MAX(created_at) AS created_at FROM b GROUP BY asin) l
+            LEFT JOIN (SELECT asin, rating, review_count FROM b WHERE rn = 2) p USING (asin)
+            ORDER BY l.created_at ASC;"""
+        conn = _conn()
+        raw = pd.read_sql(sql, conn, params=(str(int(days)),))
+        conn.close()
+        if raw.empty:
+            return pd.DataFrame(columns=["asin", "created_at"] + _SNAP_NULLABLE + _SNAP_ALWAYS)
+        last = raw.drop(columns=["prev_rating", "prev_review_count"])
+        prev = pd.DataFrame({
+            "asin": raw["asin"], "rating": raw["prev_rating"], "review_count": raw["prev_review_count"],
+            "created_at": pd.to_datetime(raw["created_at"], utc=True) - pd.Timedelta(seconds=1)})
+        for c in last.columns:
+            if c not in prev.columns:
+                prev[c] = None
+        df = pd.concat([prev[last.columns], last], ignore_index=True).sort_values("created_at", kind="stable")
+        return _finish_history(df.reset_index(drop=True))
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600, show_spinner="Загружаю историю замеров…", max_entries=8)
+def get_full_history(days=120):
+    """История метрик за период. Кэш обязателен: без него запрос на сотни тысяч
+    строк повторялся при каждом клике — отсюда «экран думает» на переключении вкладок.
+    Сбрасывается после сбора через st.cache_data.clear()."""
+    return _load_history(days)
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=8)
+def get_latest_two(days=120):
+    """Лёгкая версия истории для разделов без графиков: по два ряда на ASIN.
+    Если лёгкий запрос не сработал — берём полную историю, как раньше."""
+    df = _load_latest_snapshot(days)
+    return df if df is not None else get_full_history(days)
 
 
 DICT_COLS = ["asin", "parent_asin", "category", "subcategory", "product_type", "brand", "market"]
@@ -1163,7 +1231,17 @@ def _perf_snapshot():
         "stages": dict(_STAGES)}
 
 
-full_df = get_full_history(int(st.session_state.get("period_days_sel", 120)))
+# Разделы, которым нужен только последний замер по каждому ASIN. Для них не грузим всю историю
+# (иначе каждый клик ждёт сотни тысяч строк, а прогон с добавлением ASIN легко прервать повторным кликом).
+# Полная история — только в разделах с графиками/динамикой/прогнозом/конкурентами; для неизвестного раздела — тоже полная.
+_LIGHT_SECTIONS = {"📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "⭐ Рейтинги", "🧠 AI-анализ",
+                   "⚙️ Сбор и управление", "👥 Активность дашборда", "ℹ️ Как это работает"}
+_nav_early = st.session_state.get("nav_section") or "📋 Портфель (Чайлд)"
+_period_days = int(st.session_state.get("period_days_sel", 120))
+if _nav_early in _LIGHT_SECTIONS:
+    full_df = get_latest_two(_period_days)
+else:
+    full_df = get_full_history(_period_days)
 st.session_state["full_df_sec"] = time.time() - _t_hist
 _stage("история")
 ensure_dict_table()
@@ -1317,7 +1395,7 @@ _stage("справочник")
 def _calc_key():
     try:
         dh = int(pd.util.hash_pandas_object(dict_df.astype(str), index=False).sum()) if not dict_df.empty else 0
-        return (len(full_df), str(full_df["created_at"].max()) if not full_df.empty else "",
+        return (_period_days, str(full_df["created_at"].max()) if not full_df.empty else "",
                 dh, hash(frozenset(tracked_kind.items())))
     except Exception:
         return None
