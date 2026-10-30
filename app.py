@@ -44,6 +44,7 @@ from collector import (
     ensure_competitor_schema,
     clean_db_trash,
     delete_asin_completely,
+    refresh_latest as _refresh_latest_snapshot,
     ensure_reviews_schema,
     extract_asin,
     extract_children,
@@ -555,13 +556,71 @@ _SNAP_NULLABLE = ["source", "rating", "review_count", "histogram_json", "image_u
 _SNAP_ALWAYS = ["coupon", "prime_excl", "list_price", "discount", "deal_info"]   # уже без NULL (COALESCE)
 
 
+def _snapshot_to_frame(raw):
+    """Две строки на ASIN в форме, которую ждёт build_calc_df: предыдущий ряд (рейтинг/отзывы «как есть»)
+    и последний (последние непустые значения)."""
+    last = raw.drop(columns=["prev_rating", "prev_review_count"])
+    prev = pd.DataFrame({
+        "asin": raw["asin"], "rating": raw["prev_rating"], "review_count": raw["prev_review_count"],
+        "created_at": pd.to_datetime(raw["created_at"], utc=True) - pd.Timedelta(seconds=1)})
+    for c in last.columns:
+        if c not in prev.columns:
+            prev[c] = None
+    df = pd.concat([prev[last.columns], last], ignore_index=True).sort_values("created_at", kind="stable")
+    return _finish_history(df.reset_index(drop=True))
+
+
+def _read_latest_table(days):
+    """Готовая таблица asin_latest (обновляется при записи замеров). None — таблицы нет или ошибка.
+    Значения старше выбранного периода обнуляем: расчёт по сырой истории видел только окно периода,
+    поэтому рейтинг месячной давности при периоде 7 дней не должен попадать в таблицу."""
+    try:
+        cut = "NOW() - (%(d)s || ' days')::interval"
+        cols = (["asin"]
+                + [f"CASE WHEN ts_{c} >= {cut} THEN {c} END AS {c}" for c in _SNAP_NULLABLE]
+                + _SNAP_ALWAYS + ["created_at"]
+                + [f"CASE WHEN prev_created_at >= {cut} THEN prev_rating END AS prev_rating",
+                   f"CASE WHEN prev_created_at >= {cut} THEN prev_review_count END AS prev_review_count"])
+        conn = _conn()
+        raw = pd.read_sql(f"SELECT {', '.join(cols)} FROM asin_latest WHERE created_at >= {cut} "
+                          "ORDER BY created_at ASC;", conn, params={"d": str(int(days))})
+        conn.close()
+        return raw
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _snapshot_backfill_state():
+    return {"done": False}
+
+
 def _load_latest_snapshot(days):
-    """Срез «как для build_calc_df», но без выкачки всей истории: по два ряда на ASIN.
-    1) последний ряд с последним НЕпустым значением по каждой колонке — ровно как groupby().last();
-    2) предыдущий ряд с рейтингом/отзывами «как есть» — ровно как groupby().nth(-2).
-    Возвращает None при любой ошибке — вызывающий откатится на полную историю."""
+    """Срез «как для build_calc_df» без выкачки всей истории.
+    1) читаем готовую asin_latest; если её нет/пуста — один раз за процесс заполняем целиком;
+    2) если и это не вышло — считаем тем же агрегатом на лету по asin_metrics;
+    None при любой ошибке — вызывающий откатится на полную историю."""
     if not DATABASE_URL:
         return pd.DataFrame()
+    try:
+        raw = _read_latest_table(days)
+        if (raw is None or raw.empty):
+            st_ = _snapshot_backfill_state()
+            if not st_["done"]:
+                st_["done"] = True
+                _refresh_latest_snapshot()          # полный пересчёт (один раз, потом поддерживается записью)
+                raw = _read_latest_table(days)
+        if raw is not None and not raw.empty:
+            return _snapshot_to_frame(raw)
+        if raw is not None and raw.empty:
+            return pd.DataFrame(columns=["asin", "created_at"] + _SNAP_NULLABLE + _SNAP_ALWAYS)
+    except Exception:
+        pass
+    return _load_latest_live(days)
+
+
+def _load_latest_live(days):
+    """Тот же срез, но агрегатом по asin_metrics (запасной путь)."""
     try:
         agg = ",\n".join(
             [f"(array_agg({c} ORDER BY created_at DESC) FILTER (WHERE {c} IS NOT NULL))[1] AS {c}"
@@ -584,15 +643,7 @@ def _load_latest_snapshot(days):
         conn.close()
         if raw.empty:
             return pd.DataFrame(columns=["asin", "created_at"] + _SNAP_NULLABLE + _SNAP_ALWAYS)
-        last = raw.drop(columns=["prev_rating", "prev_review_count"])
-        prev = pd.DataFrame({
-            "asin": raw["asin"], "rating": raw["prev_rating"], "review_count": raw["prev_review_count"],
-            "created_at": pd.to_datetime(raw["created_at"], utc=True) - pd.Timedelta(seconds=1)})
-        for c in last.columns:
-            if c not in prev.columns:
-                prev[c] = None
-        df = pd.concat([prev[last.columns], last], ignore_index=True).sort_values("created_at", kind="stable")
-        return _finish_history(df.reset_index(drop=True))
+        return _snapshot_to_frame(raw)
     except Exception:
         return None
 
@@ -1237,7 +1288,7 @@ def _perf_snapshot():
 _LIGHT_SECTIONS = {"📋 Портфель (Чайлд)", "📋 Портфель (Парент)", "⭐ Рейтинги", "🧠 AI-анализ",
                    "⚙️ Сбор и управление", "👥 Активность дашборда", "ℹ️ Как это работает"}
 _nav_early = st.session_state.get("nav_section") or "📋 Портфель (Чайлд)"
-_period_days = int(st.session_state.get("period_days_sel", 120))
+_period_days = int(st.session_state.get("period_days_sel", 30))   # 30 = значение по умолчанию у селектора
 if _nav_early in _LIGHT_SECTIONS:
     full_df = get_latest_two(_period_days)
 else:
@@ -4499,6 +4550,7 @@ def render_asin_manager(kind):
                             (new_code, "none", f"заменил {old_asin}"))
             conn.commit()
             conn.close()
+            _refresh_latest_snapshot([old_asin, new_code])
             st.success(f"{old_asin} → {new_code}. Запусти точечную проверку нового ASIN или дождись автосбора.")
             st.rerun()
         except Exception as e:
