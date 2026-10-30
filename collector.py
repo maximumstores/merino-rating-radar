@@ -190,6 +190,104 @@ def ensure_schema():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_runs_started "
                         "ON collection_runs (started_at DESC);")
         conn.commit()
+    ensure_latest_table()
+
+
+# ---------------------------------------------------------------- снимок «последнее по каждому ASIN»
+# Дашборду для таблиц портфеля нужна одна строка на ASIN, а не 120 дней истории. Считаем её один раз
+# при записи замера (только для затронутых ASIN) вместо пересчёта на каждый клик.
+# Семантика ровно как у pandas groupby().last() / nth(-2) в app.build_calc_df:
+#   - каждая колонка = последнее НЕпустое значение (coalesce-колонки уже без NULL),
+#   - prev_* = рейтинг/отзывы предыдущего замера «как есть».
+SNAPSHOT_DAYS = 365          # не меньше максимального «Периода истории» в дашборде
+_SNAP_NULLABLE = ["source", "rating", "review_count", "histogram_json", "image_url",
+                  "bsr", "bsr_num", "price", "note"]
+_SNAP_ALWAYS = ["coupon", "prime_excl", "list_price", "discount", "deal_info"]
+# время получения каждого «последнего непустого» значения: окно периода в дашборде короче года,
+# и значение старше окна читатель обязан считать пустым (как делал расчёт по сырой истории)
+_SNAP_TS = [f"ts_{c}" for c in _SNAP_NULLABLE]
+_SNAP_COLS = (["asin"] + _SNAP_NULLABLE + _SNAP_ALWAYS + ["created_at"] + _SNAP_TS
+              + ["prev_rating", "prev_review_count", "prev_created_at"])
+
+LATEST_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS asin_latest (
+    asin TEXT PRIMARY KEY,
+    source TEXT, rating NUMERIC(3,2), review_count INTEGER, histogram_json JSONB,
+    image_url TEXT, bsr TEXT, bsr_num INTEGER, price TEXT, note TEXT,
+    coupon BOOLEAN, prime_excl BOOLEAN, list_price TEXT, discount TEXT, deal_info TEXT,
+    created_at TIMESTAMPTZ NOT NULL,
+    ts_source TIMESTAMPTZ, ts_rating TIMESTAMPTZ, ts_review_count TIMESTAMPTZ, ts_histogram_json TIMESTAMPTZ,
+    ts_image_url TIMESTAMPTZ, ts_bsr TIMESTAMPTZ, ts_bsr_num TIMESTAMPTZ, ts_price TIMESTAMPTZ, ts_note TIMESTAMPTZ,
+    prev_rating NUMERIC(3,2), prev_review_count INTEGER, prev_created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+def ensure_latest_table():
+    """Отдельное соединение и try: гонка CREATE TABLE между шардами не должна ронять сбор."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(LATEST_TABLE_SQL)
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+
+def _latest_insert_sql(subset):
+    agg = ",\n".join(
+        [f"(array_agg({c} ORDER BY created_at DESC) FILTER (WHERE {c} IS NOT NULL))[1] AS {c}"
+         for c in _SNAP_NULLABLE]
+        + [f"(array_agg({c} ORDER BY created_at DESC))[1] AS {c}" for c in _SNAP_ALWAYS])
+    ts_agg = ",\n".join(f"MAX(created_at) FILTER (WHERE {c} IS NOT NULL) AS ts_{c}" for c in _SNAP_NULLABLE)
+    sel = ", ".join(f"l.{c}" for c in ["asin"] + _SNAP_NULLABLE + _SNAP_ALWAYS + ["created_at"] + _SNAP_TS)
+    cols = ", ".join(_SNAP_COLS + ["updated_at"])
+    upd = ", ".join(f"{c} = EXCLUDED.{c}" for c in _SNAP_COLS[1:] + ["updated_at"])
+    return f"""
+        WITH b AS (
+            SELECT asin, source, rating, review_count, histogram_json, image_url, bsr, bsr_num, price, note,
+                   COALESCE(coupon, FALSE) AS coupon, COALESCE(prime_excl, FALSE) AS prime_excl,
+                   COALESCE(list_price, '') AS list_price, COALESCE(discount, '') AS discount,
+                   COALESCE(deal_info, '') AS deal_info, created_at,
+                   ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
+            FROM asin_metrics
+            WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
+              AND created_at >= NOW() - (%s || ' days')::interval
+              {"AND asin = ANY(%s)" if subset else ""}
+        )
+        INSERT INTO asin_latest ({cols})
+        SELECT {sel}, p.rating, p.review_count, p.created_at, NOW()
+        FROM (SELECT asin, {agg}, {ts_agg}, MAX(created_at) AS created_at FROM b GROUP BY asin) l
+        LEFT JOIN (SELECT asin, rating, review_count, created_at FROM b WHERE rn = 2) p USING (asin)
+        ON CONFLICT (asin) DO UPDATE SET {upd};"""
+
+
+def refresh_latest(asins=None):
+    """Пересчитать снимок: для списка ASIN (после записи замера) или целиком (asins=None).
+    Никогда не бросает исключение — запись замеров важнее снимка."""
+    try:
+        subset = asins is not None
+        if subset:
+            asins = sorted({extract_asin(a) for a in asins if a})
+            asins = [a for a in asins if a]
+            if not asins:
+                return True
+        ensure_latest_table()
+        with db() as conn:
+            with conn.cursor() as cur:
+                if subset:
+                    cur.execute("DELETE FROM asin_latest WHERE asin = ANY(%s)", (asins,))
+                    cur.execute(_latest_insert_sql(True), (str(SNAPSHOT_DAYS), asins))
+                else:
+                    cur.execute("DELETE FROM asin_latest")
+                    cur.execute(_latest_insert_sql(False), (str(SNAPSHOT_DAYS),))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[asin_latest] не обновился: {e}", flush=True)
+        return False
 
 
 def clean_db_trash():
@@ -212,6 +310,7 @@ def delete_asin_completely(asin: str):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM tracked_asins WHERE asin = %s", (clean,))
             cur.execute("DELETE FROM asin_metrics WHERE asin = %s", (clean,))
+            cur.execute("DELETE FROM asin_latest WHERE asin = %s", (clean,))
         conn.commit()
 
 
@@ -270,6 +369,7 @@ def save_to_db(data: dict):
                 ),
             )
         conn.commit()
+    refresh_latest([clean_asin])
 
 
 def save_batch(rows: list) -> int:
@@ -295,6 +395,7 @@ def save_batch(rows: list) -> int:
                 "price, note, coupon, prime_excl, list_price, discount, deal_info) VALUES %s",
                 clean, page_size=200)
         conn.commit()
+    refresh_latest([row[0] for row in clean])
     return len(clean)
 
 
