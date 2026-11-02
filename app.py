@@ -1134,6 +1134,101 @@ def run_collection(items, label="Прогон"):
     st.rerun()
 
 
+# ==================== РАСХОД РЕСУРСОВ (шапка) ====================
+ACTIONS_MINUTES_LIMIT = int(os.environ.get("ACTIONS_MINUTES_LIMIT", "2000"))   # бесплатный план, только для приватного репо
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_scrapingdog_credits():
+    """Кредиты Scrapingdog: {limit, used, pack}. Ответ API содержит email и ключ — наружу отдаём только нужные поля."""
+    key = os.environ.get("SCRAPINGDOG_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests
+        r = requests.get("https://api.scrapingdog.com/account", params={"api_key": key}, timeout=10)
+        r.raise_for_status()
+        d = r.json()
+        return {"limit": int(d["requestLimit"]), "used": int(d["requestUsed"]), "pack": str(d.get("pack") or "")}
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=10800, show_spinner=False)
+def get_actions_usage():
+    """Минуты GitHub Actions за текущий месяц по запускам collect.yml и bot.yml.
+    Считаем так, как биллит GitHub: каждая джоба округляется вверх до минуты (Linux x1).
+    Публичный репозиторий минуты не тратит — флаг private нужен, чтобы показать «лимита нет»."""
+    try:
+        import math
+        import requests
+        from concurrent.futures import ThreadPoolExecutor
+        hdr = {"Accept": "application/vnd.github+json"}
+        tok = os.environ.get("GITHUB_TOKEN", "")
+        if tok:
+            hdr["Authorization"] = f"Bearer {tok}"
+        base = f"https://api.github.com/repos/{GH_REPO}"
+
+        def get(path, **params):
+            r = requests.get(base + path, headers=hdr, params=params, timeout=20)
+            r.raise_for_status()
+            return r.json()
+
+        def ts(x):
+            return datetime.datetime.fromisoformat(x.replace("Z", "+00:00"))
+
+        repo = get("")
+        month_start = datetime.datetime.now(datetime.timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        def runs(wf):
+            out, page = [], 1
+            while page <= 10:
+                rs = get(f"/actions/workflows/{wf}/runs", per_page=100, page=page,
+                         created=f">={month_start:%Y-%m-%d}").get("workflow_runs", [])
+                out += rs
+                if len(rs) < 100:
+                    break
+                page += 1
+            return out
+
+        def run_minutes(run):
+            js = get(f"/actions/runs/{run['id']}/jobs", per_page=100).get("jobs", [])
+            return sum(math.ceil((ts(j["completed_at"]) - ts(j["started_at"])).total_seconds() / 60)
+                       for j in js if j.get("started_at") and j.get("completed_at"))
+
+        collect_runs = runs("collect.yml")
+        with ThreadPoolExecutor(8) as ex:
+            used = sum(ex.map(run_minutes, collect_runs))
+        # у бота одна джоба на запуск — берём длительность запуска, без лишних запросов
+        used += sum(math.ceil((ts(r["updated_at"]) - ts(r["run_started_at"])).total_seconds() / 60)
+                    for r in runs("bot.yml") if r.get("status") == "completed" and r.get("run_started_at"))
+        return {"used": int(used), "private": bool(repo.get("private")), "limit": ACTIONS_MINUTES_LIMIT,
+                "month": f"{month_start:%m.%Y}"}
+    except Exception:
+        return None
+
+
+def _fmt_int(n):
+    return f"{int(n):,}".replace(",", " ")
+
+
+def render_usage_caption():
+    parts = []
+    sd = get_scrapingdog_credits()
+    if sd:
+        parts.append(f"Scrapingdog: использовано **{_fmt_int(sd['used'])}** из {_fmt_int(sd['limit'])} · "
+                     f"осталось **{_fmt_int(max(0, sd['limit'] - sd['used']))}**")
+    gh = get_actions_usage()
+    if gh:
+        if gh["private"]:
+            parts.append(f"GitHub Actions ({gh['month']}): **{_fmt_int(gh['used'])}** из {_fmt_int(gh['limit'])} мин · "
+                         f"осталось **{_fmt_int(max(0, gh['limit'] - gh['used']))}**")
+        else:
+            parts.append(f"GitHub Actions ({gh['month']}): **{_fmt_int(gh['used'])}** мин · репозиторий публичный, лимита нет")
+    if parts:
+        st.caption(" · ".join(parts))
+
+
 # ==================== ШАПКА ====================
 hdr_l, hdr_r = st.columns([3, 2])
 with hdr_l:
@@ -1149,6 +1244,10 @@ with hdr_r:
             f"Последний сбор: **{started_kyiv:%d.%m.%Y %H:%M}** (Киев) · {status_label} · "
             f"валидных **{int(last_run['ok_count'] or 0)} / {int(last_run['asin_count'] or 0)}**"
             + (f" · шардов {shards}" if shards > 1 else ""))
+        try:
+            render_usage_caption()
+        except Exception:
+            pass
     else:
         st.warning("История сборов пуста")
     # какой бот за что отвечает — видно сразу в шапке
