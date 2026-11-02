@@ -56,13 +56,14 @@ def is_own(brand, owns):
 def load_data(days=3):
     """Конкуренты + их последние замеры."""
     conn = _conn()
+    # конкуренты и наши позиции групп лежат в таблице competitors (как и в дашборде и в сборе);
+    # tracked_asins.kind='competitor' — устаревшая схема, новые добавления туда не попадают
     comp = pd.read_sql(
         """
-        SELECT t.asin, COALESCE(d.comp_group,'') AS grp, COALESCE(d.market,'') AS market,
-               COALESCE(d.brand,'') AS brand
-        FROM tracked_asins t
-        LEFT JOIN asin_dictionary d ON d.asin = t.asin
-        WHERE t.kind = 'competitor';
+        SELECT c.asin, COALESCE(c.comp_group,'') AS grp, COALESCE(c.market,'') AS market,
+               COALESCE(NULLIF(c.brand,''), COALESCE(d.brand,'')) AS brand
+        FROM competitors c
+        LEFT JOIN asin_dictionary d ON d.asin = c.asin;
         """, conn)
     if comp.empty:
         conn.close()
@@ -186,10 +187,10 @@ def build_report(country=None, days=10):
         ok = hist.dropna(subset=[col]).groupby("asin").last()
         latest[col] = latest["asin"].map(ok[col])
         latest[f"{col}_at"] = latest["asin"].map(ok["created_at"])
-    meta = comp.set_index("asin")
-    latest["brand"] = [str(meta.loc[a, "brand"]) if a in meta.index else "" for a in latest["asin"]]
-    latest["grp"] = [str(meta.loc[a, "grp"]) if a in meta.index else "" for a in latest["asin"]]
-    latest["market"] = [str(meta.loc[a, "market"]) if a in meta.index else "" for a in latest["asin"]]
+    # один ASIN может стоять в нескольких странах/группах — это отдельные позиции
+    latest = latest.merge(comp[["asin", "grp", "market", "brand"]].drop_duplicates(["asin", "market"]),
+                          on="asin", how="inner")
+    latest["brand"] = latest["brand"].fillna("").astype(str)
     latest["own"] = latest["brand"].apply(lambda b: is_own(b, owns))
 
     markets = [country] if country else sorted({m for m in latest["market"] if m})

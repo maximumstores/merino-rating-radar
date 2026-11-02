@@ -529,8 +529,9 @@ def _finish_history(df):
     return df
 
 
-def _load_history(days):
-    """Вся история за период (нужна разделам с графиками и динамикой)."""
+def _load_history(days, competitors_only=False):
+    """Вся история за период (нужна разделам с графиками и динамикой).
+    competitors_only — только ASIN из таблицы конкурентов (вкладке «Конкуренты» остальное не нужно)."""
     if not DATABASE_URL:
         return pd.DataFrame()
     try:
@@ -541,6 +542,7 @@ def _load_history(days):
             FROM asin_metrics
             WHERE asin NOT LIKE 'HTTP%%' AND LENGTH(asin) <= 10
               AND created_at >= NOW() - (%s || ' days')::interval
+              {"AND asin IN (SELECT asin FROM competitors)" if competitors_only else ""}
             ORDER BY created_at ASC;
             """, conn, params=(str(int(days)),))
         conn.close()
@@ -654,6 +656,12 @@ def get_full_history(days=120):
     строк повторялся при каждом клике — отсюда «экран думает» на переключении вкладок.
     Сбрасывается после сбора через st.cache_data.clear()."""
     return _load_history(days)
+
+
+@st.cache_data(ttl=600, show_spinner="Загружаю историю конкурентов…", max_entries=4)
+def get_competitors_history(days=90):
+    """История только по конкурентам и позициям их групп: в разы меньше полной."""
+    return _load_history(days, competitors_only=True)
 
 
 @st.cache_data(ttl=600, show_spinner=False, max_entries=8)
@@ -1390,6 +1398,8 @@ _nav_early = st.session_state.get("nav_section") or "📋 Портфель (Ча
 _period_days = int(st.session_state.get("period_days_sel", 30))   # 30 = значение по умолчанию у селектора
 if _nav_early in _LIGHT_SECTIONS:
     full_df = get_latest_two(_period_days)
+elif _nav_early == "🥊 Конкуренты":
+    full_df = get_competitors_history(max(_period_days, 90))
 else:
     full_df = get_full_history(_period_days)
 st.session_state["full_df_sec"] = time.time() - _t_hist
@@ -3002,6 +3012,10 @@ if nav == "🥊 Конкуренты":
         st.caption(f"В базе по «{grp_clean or '—'}» / {comp_market}: **{len(cur_pairs)}** — они подставлены "
                    "в поле ниже. Дописывай новые ASIN или ссылки, лишние строки удаляй.")
 
+        st.info("🔵 **Свой ASIN кладётся в эту же группу** — в то же поле, что и конкуренты "
+                "(не в «Конкуренты» отдельно и не в главное поле). Бренд подтянется сам: Merino.tech = наш, "
+                "остальные = конкуренты. Нужны именно **чайлды** — парент рейтинга не имеет.")
+
         # форма: без неё Streamlit пересчитывает всю вкладку на каждый введённый символ
         with st.form("comp_add_form", clear_on_submit=False):
             comp_text = st.text_area(
@@ -3070,6 +3084,16 @@ if nav == "🥊 Конкуренты":
                 try:
                     if to_save:
                         save_competitors(to_save, grp_clean)
+                        # бренд нужен сразу: по нему «наш/чужой» и отчёты в Telegram.
+                        # Без этого он появлялся только после следующего сбора
+                        _have_brand = set(comp_df.loc[comp_df["brand"].astype(str).str.strip() != "", "asin"]) \
+                            if not comp_df.empty else set()
+                        _need = [(a, m) for a, m in to_save if a not in _have_brand][:40]
+                        if _need:
+                            with st.spinner(f"Подтягиваю бренды: {len(_need)} позиций…"):
+                                for _m in sorted({m for _a, m in _need}):
+                                    pull_meta([a for a, m in _need if m == _m], _m)
+                            st.cache_data.clear()
                     if to_delete:
                         delete_competitors(to_delete)
                     msg = []
@@ -4486,6 +4510,8 @@ def render_asin_manager(kind):
     # ---- добавить пачку ----
     st.markdown("**➕ Добавить ASIN** <span class='muted'>— дубли не запишутся, только новые</span>",
                 unsafe_allow_html=True)
+    st.caption("Рейтинг есть у **чайлдов** (конкретный цвет/размер). Если вставишь парент — данных не будет: "
+               "используй блок «👨‍👦 Подтянуть чайлдов из паренты» ниже, он покажет все варианты.")
     add_text = st.text_area("Пачка ASIN / ссылок", height=90, key=f"add_asins_text_{kind}",
                             placeholder="B09NWGDK3S, B0H6YBDKXJ:US, https://www.amazon.com/dp/…",
                             label_visibility="collapsed")
@@ -4875,7 +4901,12 @@ if nav == "⚙️ Сбор и управление":
                     unsafe_allow_html=True)
         k1, k2, k3 = st.columns([2, 1, 1])
         parent_in = k1.text_input("ASIN паренты или чайлда", key="kids_asin", placeholder="B0H8SFPK44 или ссылка")
-        kids_market = k2.selectbox("Страна", options=list(MARKET_DOMAINS.keys()), index=1, key="kids_market")
+        _kh = parse_asin_batch(st.session_state.get("kids_asin", ""), [], None)[3]
+        _kh = next(iter(_kh.values()), "US")          # страна из ссылки amazon.de/… или суффикса :DE
+        _kopts = list(MARKET_DOMAINS.keys())
+        kids_market = k2.selectbox("Страна", options=_kopts, index=_kopts.index(_kh),
+                                   key=f"kids_market_{_kh}",
+                                   help="Подставляется из ссылки; без ссылки — US")
         k3.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
         if k3.button("🔍 Найти", disabled=not parent_in.strip(), key="kids_find", width="stretch"):
             with st.spinner("Запрашиваю API…"):
@@ -5454,6 +5485,15 @@ if nav == "ℹ️ Как это работает":
   <div class="card"><div class="t">Откуда</div><div class="d">Если у ASIN в справочнике стоит страна (например <code>US</code>) — коллектор идёт на <code>amazon.com</code>. Если страны нет — каскад <code>amazon.com.be → amazon.nl</code> (там чайлды показываются отдельно). Если и там пусто — фолбэк по письменным ревью, помечается как «неполные данные».</div></div>
   <div class="card"><div class="t">Что снимается</div><div class="d">Рейтинг (0.1), число оценок, гистограмма звёзд в %, BSR, фото. Каждый замер пишется отдельной строкой — ничего не перезаписывается, история сохраняется полностью.</div></div>
 </div>
+
+<h2>Как добавить свои ASIN и конкурентов (по шагам)</h2>
+<div class="note"><b>Главное:</b> рейтинг есть только у <b>чайлдов</b>. Парент (ASIN, под которым собраны цвета/размеры) данных не даёт — открой «Подтянуть чайлдов из паренты» и добавь нужные варианты.</div>
+<ol>
+  <li><b>Свой ASIN</b> — «⚙️ Сбор и управление» → блок «Чайлды» → «➕ Добавить ASIN». Можно ссылку целиком, например <code>https://www.amazon.de/…/dp/B0XXXXXXXX</code> — страна определится по домену (amazon.de = DE). Или <code>B0XXXXXXXX:DE</code>.</li>
+  <li><b>Конкуренты и наш ASIN в одной группе</b> — вкладка «🥊 Конкуренты» → «📥 Добавить конкурентов» → выбрать страну и группу → в <b>одно поле</b> вставить и конкурентов, и свой ASIN → «🔍 Разобрать пачку» → «➕ добавить». Отдельного места для «нашего» нет: наш/чужой определяется по бренду (Merino.tech = наш, 🔵).</li>
+  <li><b>Бренды</b> подтягиваются сами сразу после добавления (несколько секунд). Если у какой-то позиции бренд пустой — проверь, что ASIN существует в этой стране.</li>
+  <li><b>Telegram-отчёты</b> по группе приходят в бот страны (кнопка «✈️ Отчёты по DE» на вкладке «Конкуренты»). Один раз нажми в боте <code>/start</code>, иначе сообщения не придут. Отчёты — в 09:00 и 17:00 по Киеву; конкурент попадает в «сильнейшего» от 20 отзывов.</li>
+</ol>
 
 <h2>Статусы и цвета</h2>
 <p>Пороги — по логике Amazon, одинаковые во всех вкладках:</p>

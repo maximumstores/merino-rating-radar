@@ -94,8 +94,15 @@ CREATE TABLE IF NOT EXISTS tracked_asins (
 def extract_asin(text: str) -> str:
     """Извлекает 10-значный чистый ASIN из текста или ссылки. Пустая строка, если не нашёл."""
     text = str(text).strip().upper()
-    match = re.search(r"(B[0-9A-Z]{9})", text)
-    return match.group(1) if match else ""
+    # 1) ссылка: ASIN стоит сразу после /dp/, /gp/product/, /product/ и т.п.
+    m = re.search(r"/(?:DP|GP/PRODUCT|PRODUCT|GP/AW/D|ASIN)/(B[0-9A-Z]{9})(?![0-9A-Z])", text)
+    if m:
+        return m.group(1)
+    # 2) отдельно стоящий токен: слова из названия товара («BETTWAESCHEGARNITUR») не подходят
+    m = re.search(r"(?<![0-9A-Z])(B[0-9A-Z]{9})(?![0-9A-Z])", text)
+    if m:
+        return m.group(1)
+    return ""
 
 
 def extract_asin_and_market(text: str):
